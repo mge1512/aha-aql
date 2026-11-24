@@ -1,57 +1,79 @@
-# aha-studio-aql
+# aha-aql
 
 ## META
-Deployment:   enhance-existing
-Language:     Go
-Version:      0.1.0
+Deployment:   mcp-server
+Version:      0.2.0
 Spec-Schema:  0.4.0
-Author:       John Wang
-Author:       Matthias G. Eckermann [?]
+Author:       Matthias G. Eckermann <pcd@mailbox.org>
 License:      MIT
 Verification: none
 Safety-Level: QM
 
-This specification amends AQL (Aha Query Language), the query language of
-aha-studio for the Aha! product management service. The base version is
-aha-studio 0.12.0. The specification is the input for patches that are
-offered to the upstream project. It does not describe aha-studio as a whole.
+This specification describes mcp-server-aha-aql, a small MCP server for the
+Aha! product management service. A language model works with Aha! through
+one query language, AQL, and two tools: `query` reads, and `execute`
+changes one record. The same two tools can be called from the command line
+(see manual-mode).
 
-It specifies how a statement is read, which names a statement may use, how
-a statement is run against the Aha! API, and the two MCP tools `query`
-and `execute`. With these two tools a language model can work with Aha!
-through AQL alone. It then does not need the one-tool-per-API-call set of
-the base version.
+AQL (Aha Query Language) comes from the open source project aha-studio.
+This server implements a dialect of AQL and shares no code with aha-studio.
+The dialect differs from the original in four points:
 
-Everything that aha-studio does and that this specification does not
-mention stays as it is in the base version. The DELTA section lists the
-differences from the base version, the parts that stay unchanged, and the
-test evidence behind the rules.
+- `id` is the reference number of a record.
+- `=` on a name is equality.
+- A statement reads one entity.
+- A write statement changes one record, and it finds that record by its id.
+
+The server calls the Aha! REST API directly. The account name and the
+credential come from its options or from two environment variables. In
+http mode they come from each request (see load-configuration and
+request-account). The server does not obtain a credential itself: this
+version has no OAuth flow.
 
 ## TYPES
 
 ```
-Caller := agent | operator
-// agent:    the statement arrives through the MCP tool query or the MCP
-//           tool execute.
-// operator: the statement arrives through the command line, the
-//           interactive shell or the HTTP service.
+Mode := stdio | http | manual
+// stdio:  MCP over standard input and output. The process has one Account.
+// http:   MCP over HTTP. Every request brings its own Account.
+// manual: one tool call from the command line (see manual-mode).
 
-AgentLimits := {
+Limits := {
   default_limit: 50,     // rows returned when a read statement has no LIMIT
   max_limit:     200,    // most rows that one call returns
   max_pages:     15      // most pages of one list that one statement reads
 }
-// Constants. They apply to agent callers only.
+// Constants.
 
 PageSize := 200
-// Records requested per page of a list. Applies to every caller.
+// Records requested per page of a list.
 
 MaxInValues := 20
 // Most values of an IN list that are read with one request per value
-// (see plan-fetch). Applies to every caller.
+// (see plan-fetch).
 
 MaxListed := 30
 // Most records or product keys that one message lists (see error-messages).
+
+Subdomain := string where matches("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+// The account name in https://<subdomain>.aha.io, in lower case.
+
+Credential := string where matches("^[!-~]{1,4096}$")
+// A bearer value that Aha! accepts: an API key or an OAuth2 access token.
+// It has 1 to 4096 printable ASCII characters and no space. The server
+// does not interpret it. It only sends it to Aha!.
+
+Account := { subdomain: Subdomain, credential: Credential }
+// What one tool call runs with (see request-account).
+
+Settings := {
+  subdomain:       Subdomain or none,
+  api_key_file:    string or none,   // path of a file that has the Credential
+  default_product: string or none,   // key, numeric id or name of a product
+  read_only:       Boolean,          // default false
+  listen:          string,           // http mode; default of the deployment template
+  dry_run:         Boolean           // manual mode, tool execute; default false
+}
 
 StatementKind := select | describe | insert | update | delete
 
@@ -60,7 +82,6 @@ EntityName := string
 
 FieldName := string
 // Canonical name of a field of an entity, for example "assigned_to".
-// For operator callers also "custom.<key>" (see custom-field-references).
 
 Label := string
 // Name under which a value appears in a result row.
@@ -141,16 +162,8 @@ DeleteStatement := {
   id:     RecordId,
   guards: Map<FieldName, Value>
 }
-PredicateWrite := {
-  kind:   update | delete,
-  entity: EntityName,
-  fields: Map<FieldName, Value>,         // empty for delete
-  where:  Condition
-}
-// PredicateWrite exists for operator callers only (see write-by-predicate).
-
 Statement := ReadStatement | DescribeStatement | InsertStatement
-           | UpdateStatement | DeleteStatement | PredicateWrite
+           | UpdateStatement | DeleteStatement
 
 Row := Map<Label, Value>
 // The labels are in the order of the statement.
@@ -180,7 +193,9 @@ FieldDef := {
   reference_kind: RecordKind or none,   // for type reference
   source:         string,               // where the value is in an API record
   heavy:          Boolean,              // requested from a list only when used
-  writable:       Boolean
+  writable:       Boolean,
+  request_member: string or none        // member of a request body, when it is
+                                        // not the name of the field
 }
 
 EntityDef := {
@@ -197,7 +212,6 @@ EntityDef := {
   name_search:    Boolean,                     // the account-wide list has the parameter q
   parent_filters: List<FieldName>,
   parent_kind:    RecordKind | any-record | none,   // parent of a new record
-  parent_optional: Boolean,
   operations:     set of (create | update | delete),
   example:        string
 }
@@ -217,12 +231,16 @@ ListPage := {
   total_pages:   u32
 }
 
-ApiFailure := NotFound | RateLimited | Unreachable | Rejected
-// NotFound:    the API answers with status 404.
-// RateLimited: the API answers with status 429.
-// Unreachable: no answer.
-// Rejected:    every other status that is not a success; it has the status
-//              and the text of the answer.
+ApiFailure := NotFound | NotAuthorized | RateLimited | Unreachable | Rejected
+// NotFound:      the API answers with status 404. Aha! also answers so
+//                when the credential has no access to the record.
+// NotAuthorized: the API answers with status 401 or 403; it has the status.
+// RateLimited:   the API answers with status 429 after the repetitions of
+//                aha-request.
+// Unreachable:   no connection, a certificate that cannot be verified, or
+//                no answer in time.
+// Rejected:      every other status that is not a success; it has the status
+//                and the text of the answer.
 ```
 
 ### TYPE: ErrorKind
@@ -239,6 +257,7 @@ Kind: enum
 | not_found | A record that does not exist |
 | bad_value | A value that cannot be written to the field, or a required value that is missing |
 | guard_failed | A condition next to the id is not true for the record; nothing was changed |
+| not_authorized | Aha! did not accept the credential, or the credential has no access to the record |
 | rate_limited | Aha! answered that there were too many requests |
 | network | Aha! cannot be reached |
 | api_error | Aha! answered with another error |
@@ -279,49 +298,49 @@ Kind: enum
 
 ```
 AhaAPI
-  The Aha! REST API, version 1, of the configured account. Routes are
-  written relative to its base address. A route parameter in braces is
-  replaced by a RecordId or by the NumericId of a product.
+  The Aha! REST API, version 1, of one account. Its base address is
+  https://<subdomain>.aha.io/api/v1, and routes are written relative to it.
+  A route parameter in braces is replaced by a RecordId or by the NumericId
+  of a product. Every operation runs with the Account of the tool call and
+  is sent as aha-request says.
 
   ApiList(route, parameters) -> ListPage | ApiFailure
-      One page of a list. Parameters: page (1-based), per_page, fields
+      GET. One page of a list. Parameters: page (1-based), per_page, fields
       (comma-separated names of the wanted members of each record),
       q (name search, on the routes that have it).
   ApiGet(route) -> ApiRecord | ApiFailure
-      One record with all its members.
-  ApiCreate(route, fields) -> ApiRecord | ApiFailure
-      Creates one record under the parent of the route.
-  ApiUpdate(route, fields) -> ApiRecord | ApiFailure
-      Changes the given fields of one record.
+      GET. One record with all its members.
+  ApiCreate(route, body) -> ApiRecord | ApiFailure
+      POST. Creates one record under the parent of the route.
+  ApiUpdate(route, body) -> ApiRecord | ApiFailure
+      PUT. Changes the given fields of one record.
   ApiDelete(route) -> none | ApiFailure
-      Deletes one record.
-  ApiSetCustomFields(kind, id, values) -> none | ApiFailure
-      Sets custom field values of one record. The base version does this
-      through the GraphQL endpoint of the same account.
+      DELETE. Deletes one record.
 ```
 
-The request bodies of ApiCreate and ApiUpdate are the record forms that the
-Aha! API expects on the route. Where the base version already sends the
-same request for one of its own tools, the request keeps its form. Where
-the base version reaches the same result through the GraphQL endpoint
-(create an idea, set custom field values), it may continue to do so.
+The server uses no other operation of Aha!, and it calls no other host.
+The bodies of ApiCreate and ApiUpdate are built as write-request says.
 
-A RateLimited answer is repeated as the client of the base version repeats
-it. When it persists, the statement fails with rate_limited and returns no
-partial result.
+Test double: FakeAha. It takes the place of the HTTPS connection (see
+aha-request). It gets every request with its method, address, headers and
+body, answers it from memory with a fixture account, and never opens a
+network connection.
 
-Test double: FakeAha. It serves a fixture account from memory and never
-opens a network connection.
-
+- FakeAha serves the subdomain `example` and accepts the credential `fixture-key`. A request with another credential is answered with the status 403. A request to another host is a failure of the test.
 - ApiList returns pages of `per_page` records with correct `total_records` and `total_pages`.
 - A record of a list has the members of the parameter `fields`, and `id`.
 - `q` is a search for the text inside `name`, without regard to case.
-- A route for a record that the fixture does not have is answered with NotFound.
+- A route for a record that the fixture does not have is answered with the status 404.
 - ApiCreate gives the new record the next free reference number.
-- FakeAha records every call with its method, route, parameters and fields. A test can then check which requests a statement caused, and that a failed statement caused no write request.
+- A test can tell FakeAha to answer a route with a given status and header a given number of times, or to give no answer.
+- FakeAha records every call with its method, address, headers, parameters and body. A test can then check which requests a statement caused, which credential they had, and that a failed statement caused no write request.
 
-The EXAMPLES use this fixture account. No default product is configured,
-so the ExampleKey is PROD.
+The EXAMPLES use this fixture account. Unless an example says otherwise:
+
+- The server runs in stdio mode. Its Account has the subdomain `example` and the credential `fixture-key`.
+- The setting default_product has no value, and read_only is false.
+- The tool list was answered before the call of the example. The ExampleKey is therefore chosen, and it is PROD.
+- The calls that an example counts are the calls that its statement caused.
 
 Products of the fixture account:
 
@@ -349,14 +368,14 @@ Releases of DEMO:
 
 Features of DEMO, in the order in which the API lists them:
 
-| id | name | status | release | initiative | assigned_to | custom field priority |
-|---|---|---|---|---|---|---|
-| DEMO-1 | CSV export | In design | DEMO-R-2 | (none) | test.user@example.com | High |
-| DEMO-2 | Offline maps | Under consideration | DEMO-R-2 | (none) | (none) | High |
-| DEMO-3 | Live dashboard | In development | DEMO-R-3 | DEMO-S-1 | (none) | (none) |
-| DEMO-4 | Live video feed | Under consideration | DEMO-R-3 | DEMO-S-1 | (none) | (none) |
-| DEMO-5 | Rider's handbook | Shipped | DEMO-R-3 | (none) | (none) | (none) |
-| DEMO-6 | Route planner | Under consideration | DEMO-R-1 | (none) | (none) | (none) |
+| id | name | status | release | initiative | assigned_to |
+|---|---|---|---|---|---|
+| DEMO-1 | CSV export | In design | DEMO-R-2 | (none) | test.user@example.com |
+| DEMO-2 | Offline maps | Under consideration | DEMO-R-2 | (none) | (none) |
+| DEMO-3 | Live dashboard | In development | DEMO-R-3 | DEMO-S-1 | (none) |
+| DEMO-4 | Live video feed | Under consideration | DEMO-R-3 | DEMO-S-1 | (none) |
+| DEMO-5 | Rider's handbook | Shipped | DEMO-R-3 | (none) | (none) |
+| DEMO-6 | Route planner | Under consideration | DEMO-R-1 | (none) | (none) |
 
 Other records of the fixture account:
 
@@ -369,15 +388,23 @@ Other records of the fixture account:
 OTHER has no releases and no features. No feature of the fixture account
 has an epic.
 
-## BEHAVIOR: query-tool
+## BEHAVIOR: query
 Constraint: required
 
 The MCP tool `query`. It runs one read statement or one describe statement
-for an agent caller and returns the result as a JSON object.
+and returns the result as a JSON object.
+
+A statement that fails is a normal answer of the tool. The call succeeds
+as a JSON-RPC call. Its result is marked as an error (`isError` is true)
+and has the message as its only text. A language model reads tool results,
+and the messages are written for it. JSON-RPC error responses are for
+protocol errors and for internal errors of the server, as the deployment
+template says.
 
 INPUTS:
 ```
-query: string    // one AQL statement; the only parameter of the tool
+query:   string    // one AQL statement; the only parameter of the tool
+account: Account   // from request-account; not a parameter of the tool
 ```
 
 OUTPUTS:
@@ -389,20 +416,21 @@ tool result: the result object as JSON text,
 
 PRECONDITIONS:
 - the tool is registered (see tool-registration)
+- the Account of the call is known: from request-account for an MCP call, and from load-configuration in manual mode
 
 STEPS:
 1. If the call has a parameter other than `query` → bad_args, message A02.
 2. If `query` is absent, is not text, or is empty after trimming → bad_args, message A01.
-3. Run parse-statement with caller agent and the kinds select and describe allowed; on failure → the error of parse-statement.
+3. Run parse-statement with the kinds select and describe allowed; on failure → the error of parse-statement.
 4. For a describe statement: run describe-statement. Its result is the result object. Continue with step 7.
-5. For a read statement: run read-statement with caller agent and without a default product; on failure → the error of read-statement.
+5. For a read statement: run read-statement; on failure → the error of read-statement.
 6. Build the result object from the ReadResult. Its members, in this order:
    a. `entity`, `scope` and `count`;
    b. `total`, only when it has a value;
    c. `truncated`, only when it is true;
    d. `records`, the rows;
    e. `note`, only when there are notes: the notes joined by one space.
-7. Return the result object as JSON text. Text is a JSON string, Number a JSON number, Boolean a JSON boolean and Null the JSON null.
+7. Return the result object as JSON text. Text is a JSON string, Number a JSON number, Boolean a JSON boolean and Null the JSON null. The JSON text has no line break and no white space outside its strings.
 
 POSTCONDITIONS:
 - only ApiList and ApiGet were called
@@ -413,15 +441,18 @@ ERRORS:
 - bad_args: unknown parameter (A02); missing or empty statement (A01)
 - every error of parse-statement and read-statement, passed on unchanged
 
-## BEHAVIOR: execute-tool
+## BEHAVIOR: execute
 Constraint: required
 
-The MCP tool `execute`. It runs one write statement for an agent caller.
-One call creates, changes or deletes at most one record.
+The MCP tool `execute`. It runs one write statement. One call creates,
+changes or deletes at most one record. A statement that fails is answered
+as the tool `query` answers it.
 
 INPUTS:
 ```
 statement: string    // one AQL statement; the only parameter of the tool
+account:   Account   // from request-account; not a parameter of the tool
+dry_run:   Boolean   // false in every MCP call; see manual-mode
 ```
 
 OUTPUTS:
@@ -429,22 +460,47 @@ OUTPUTS:
 tool result: the result object as JSON text,
              or the message of an AqlError, with the tool result marked
              as an error
+log line:    one line on the diagnostic output, in stdio and http mode
 ```
 
 PRECONDITIONS:
-- the tool is registered; it is not registered in read-only mode (see tool-registration)
+- for an MCP call the tool is registered; it is not registered when the setting read_only is true (see tool-registration)
+- the Account of the call is known, as for the tool `query`
 
 STEPS:
 1. If the call has a parameter other than `statement` → bad_args, message A02.
 2. If `statement` is absent, is not text, or is empty after trimming → bad_args, message A03.
-3. Run parse-statement with caller agent and the kinds insert, update and delete allowed; on failure → the error of parse-statement.
-4. Run insert-statement, update-statement or delete-statement, according to the kind of the statement, with caller agent; on failure → the error of that behavior.
-5. Build the result object from the WriteResult: `id`, then each entry of `values` in its order, then `message`.
-6. Return the result object as JSON text, as in query-tool.
+3. Run parse-statement with the kinds insert, update and delete allowed; on failure → the error of parse-statement.
+4. Run insert-statement, update-statement or delete-statement, according to the kind of the statement, with dry_run; on failure → the error of that behavior.
+5. Build the result object from the WriteResult: `id`, when it has a value, then each entry of `values` in its order, then `message`.
+6. Return the result object as JSON text, as the tool `query` does.
+
+Log line. In stdio mode and in http mode, every call of `execute` writes
+one line to the diagnostic output (standard error) when it ends, with or
+without an error:
+
+```
+<time> execute account=<subdomain> op=<op> entity=<entity> id=<id> result=<result>
+```
+
+| Part | Value |
+|---|---|
+| `<time>` | The time when the call ended, in UTC, as YYYY-MM-DDThh:mm:ssZ |
+| `<subdomain>` | The subdomain of the Account |
+| `<op>` | `insert`, `update` or `delete`. `none` when parse-statement did not accept the statement |
+| `<entity>` | The entity name of the statement. `none` when parse-statement did not accept the statement |
+| `<id>` | The id of the record that was created, or the id that the statement gives, in capital letters, when it has the form of a RecordId. `none` in every other case |
+| `<result>` | `ok`, or the ErrorKind of the error |
+
+The line has no value of a field, no text of the statement and no
+credential.
+
+MECHANISM: the time comes from a clock that tests replace.
 
 POSTCONDITIONS:
 - at most one record of the account was created, changed or deleted
-- when the result is an error that was found before the write request, no ApiCreate, ApiUpdate, ApiDelete or ApiSetCustomFields call was made
+- when the result is an error that was found before the write request, no ApiCreate, ApiUpdate or ApiDelete call was made
+- in stdio mode and in http mode exactly one log line was written for the call
 
 ERRORS:
 - bad_args: unknown parameter (A02); missing or empty statement (A03)
@@ -453,15 +509,14 @@ ERRORS:
 ## BEHAVIOR: tool-registration
 Constraint: required
 
-Decides which AQL tools the MCP server offers and what their descriptions
-say. The descriptions are what a language model learns the language from,
-so their text is part of this specification.
+Decides which tools the MCP server offers and what their descriptions say.
+The server has two tools, `query` and `execute`. No other BEHAVIOR of this
+specification is an MCP tool. The descriptions are what a language model
+learns the language from, so their text is part of this specification.
 
 INPUTS:
 ```
-aql_group_selected: Boolean   // the AQL tool group is among the selected tool
-                              // groups, or no selection is configured
-read_only:          Boolean   // the server runs in read-only mode
+read_only: Boolean   // the setting read_only
 ```
 
 OUTPUTS:
@@ -470,15 +525,14 @@ registered tools: query; execute unless read_only
 ```
 
 PRECONDITIONS:
-- the server has a selection of tool groups and a read-only mode (see PRECONDITIONS)
+- load-configuration has succeeded
 
 STEPS:
-1. Run choose-example-key once, before any tool is registered.
-2. If aql_group_selected: register `query` as a read tool with the description below. It has one parameter, `query`: text, required, with the description "One AQL statement".
-3. If aql_group_selected and not read_only: register `execute` as a write tool with the description below. It has one parameter, `statement`: text, required, with the description "One AQL statement".
-4. Never register a tool with the name `describe_aql`. The statement DESCRIBE replaces it.
-5. In both descriptions, replace every {KEY} by the ExampleKey.
-6. A call with a parameter that the tool does not declare reaches the tool and is answered with message A02. It is not ignored.
+1. Register `query` with the description below. It has one parameter, `query`: text, required, with the description "One AQL statement". Its annotations say that it only reads: readOnlyHint true, openWorldHint true.
+2. Unless read_only is true: register `execute` with the description below. It has one parameter, `statement`: text, required, with the description "One AQL statement". Its annotations say that it changes data and can delete: readOnlyHint false, destructiveHint true, idempotentHint false, openWorldHint true.
+3. Register no other tool, no MCP resource and no MCP prompt.
+4. When the tool list is answered: replace every {KEY} in both descriptions by the ExampleKey of the Account that asks (see choose-example-key).
+5. A call with a parameter that the tool does not declare reaches the tool and is answered with message A02. It is not ignored, and it is not answered with a JSON-RPC error.
 
 Description of `query`:
 
@@ -519,13 +573,224 @@ description of `query` is the list of catalog entities in catalog
 order.
 
 POSTCONDITIONS:
-- in read-only mode the tool list has no tool that can change data in Aha! through AQL
-- no description contains a product key of the account other than a configured default product
+- the tool list is `query` and `execute`, or `query` alone when read_only is true
+- no description contains a product key of the account other than the product of the setting default_product
 
 ERRORS:
 - none
 
-## BEHAVIOR: read-statement
+## BEHAVIOR: manual-mode
+Constraint: required
+
+Runs one tool call from the command line and ends. A person can see with
+it what a statement returns, without a language model and without an MCP
+host. The MCP server does not offer manual mode as a tool. Manual mode
+runs the same `query` and `execute` as the MCP tools, with the same
+limits and the same messages.
+
+INPUTS:
+```
+tool:      query | execute   // the first word of the command line
+arguments: List<string>      // key=value, see load-configuration
+standard input               // read only when the statement is "-"
+```
+
+OUTPUTS:
+```
+standard output: the tool result as JSON text and a line break, or nothing
+standard error:  nothing, or one line that starts with "error: "
+exit code:       0 | 1 | 2
+```
+
+PRECONDITIONS:
+- the first word of the command line is `query` or `execute`; every other first word is answered as the deployment template says
+
+STEPS:
+1. Run load-configuration for the mode manual; on failure → exit code 2, with the message of load-configuration on standard error.
+2. Take the statement. For `query` it is the value of the argument `query`, and for `execute` the value of the argument `statement`. If that argument is absent → exit code 2, message G10.
+3. If the value is `-`: read standard input to its end as UTF-8 text. That text is the statement.
+4. If the tool is `execute` and the setting read_only is true → exit code 2, message G11. No request is sent.
+5. Call the tool with the statement as its only parameter and with the Account of the process. For `execute`, dry_run is the setting dry_run.
+6. If the tool returns an AqlError → write `error: `, the message and a line break to standard error; exit code 1. Nothing is written to standard output.
+7. Write the tool result and a line break to standard output; exit code 0.
+
+Dry run. With `dry-run=true` the tool `execute` checks the statement
+completely: the form, the names, the id, the guards and the values. It
+sends read requests for these checks and no write request. The result says
+what the statement would do (see insert-statement, update-statement and
+delete-statement).
+
+POSTCONDITIONS:
+- standard output has exactly the text that the MCP tool returns for the same statement and the same Account, and one line break
+- no request was sent before load-configuration succeeded
+- with dry_run true no ApiCreate, ApiUpdate or ApiDelete call was made
+- no log line of `execute` was written
+
+ERRORS:
+- exit code 2: the start errors G01 to G08 of load-configuration; statement argument missing (G10); `execute` with read_only (G11)
+- exit code 1: every AqlError of the tool, with its message
+
+## BEHAVIOR/INTERNAL: load-configuration
+Constraint: required
+
+Reads the settings of the process from its arguments and from two
+environment variables. For stdio mode and manual mode it also returns the
+Account of the process.
+
+The command line has no option that takes the credential itself. The
+arguments of a process can be seen by other users of the same system.
+
+INPUTS:
+```
+mode:        Mode
+word:        stdio | http | query | execute   // the first word of the command line
+arguments:   List<string>                     // every argument after the first word
+environment: the variables AHA_SUBDOMAIN and AHA_API_KEY
+```
+
+OUTPUTS:
+```
+settings: Settings
+account:  Account or none     // none in http mode
+or a start error: one line on standard error, and exit code 2
+```
+
+PRECONDITIONS:
+- none
+
+STEPS:
+1. Read each argument as `key=value`, split at its first `=`. If an argument has no `=` or an empty key → G01.
+2. If a key is not an option of the word (see the first table below) → G02. If a key is given twice → G03.
+3. Check the values.
+   a. `read-only` and `dry-run`: `true` or `false`; otherwise → G04.
+   b. `subdomain`: put the value into lower case. If it does not match Subdomain → G04.
+   c. `default-product` and `api-key-file`: if the value is empty → G04.
+   d. `listen`: the value goes to the http transport of the deployment template. If its host is not a loopback address: write a warning to the diagnostic output. The warning says that every request has a credential and that the connection needs TLS in front of the server.
+4. Subdomain. Take the option `subdomain`. Without it, take the variable AHA_SUBDOMAIN and check it as step 3 b says; in G04 its name stands for the key. A variable that is empty counts as absent.
+5. In http mode: if the option `api-key-file` is given or the variable AHA_API_KEY is not empty → G09. The account is none. Continue with step 9.
+6. In stdio mode and manual mode: if there is no subdomain → G05.
+7. Credential from a file. When the option `api-key-file` is given, the variable AHA_API_KEY is not read.
+   a. If the path is not a regular file that the process can read → G07.
+   b. On a platform that has permission bits: if a permission bit for the group or for other users is set → G08.
+   c. Read at most 4097 bytes. The credential is that text without surrounding white space. If it does not match Credential → G07.
+8. Credential from the environment. Without the option `api-key-file`, the credential is the value of AHA_API_KEY without surrounding white space. If the variable is absent or empty → G06. If the value does not match Credential → G07.
+9. Return the settings and the account.
+
+Options:
+
+| Key | Value | Accepted for | Default |
+|---|---|---|---|
+| subdomain | The account name: the part of the address before `.aha.io` | stdio, http, query, execute | The variable AHA_SUBDOMAIN |
+| api-key-file | The path of a file that has the credential | stdio, query, execute | The variable AHA_API_KEY |
+| default-product | The key, the numeric id or the name of a product. It is used as the ExampleKey | stdio, http, query, execute | none |
+| read-only | true or false. With true the tool `execute` is not offered | stdio, http, query, execute | false |
+| listen | host:port for the http transport | http | As the deployment template says |
+| dry-run | true or false. See manual-mode | execute | false |
+| query | One read statement or describe statement, or `-` | query | Required |
+| statement | One write statement, or `-` | execute | Required |
+
+Start messages. Each one is a single line on standard error:
+
+| ID | Text |
+|---|---|
+| G01 | `error: argument <n> is not key=value` |
+| G02 | `error: unknown option '<key>' for <word>. Options: <keys>` |
+| G03 | `error: option '<key>' is given twice` |
+| G04 | `error: <key> must be <what>` |
+| G05 | `error: no Aha! account. Use subdomain=NAME or set AHA_SUBDOMAIN` |
+| G06 | `error: no credential. Use api-key-file=PATH or set AHA_API_KEY` |
+| G07 | `error: no usable credential in <source>: <reason>` |
+| G08 | `error: <path> can be read by other users. Run: chmod 600 <path>` |
+| G09 | `error: http mode takes the credential from each request. Remove api-key-file and unset AHA_API_KEY` |
+| G10 | `error: <word> needs <key>=STATEMENT, or <key>=- to read the statement from standard input` |
+| G11 | `error: execute is not available with read-only=true` |
+
+In G01, `<n>` is the position of the argument after the first word,
+counted from 1. In G02, `<keys>` are the options of the word in the order
+of the table, joined by a comma and a space. In G10, `<key>` is `query`
+for the word `query` and `statement` for the word `execute`.
+
+In G04, `<what>` depends on the key:
+
+| Key | `<what>` |
+|---|---|
+| read-only, dry-run | `true or false` |
+| subdomain, AHA_SUBDOMAIN | `the account name before .aha.io, for example mycompany` |
+| default-product | `a product key, id or name` |
+| api-key-file | `a file path` |
+
+In G07, `<source>` is the path of the file, or `AHA_API_KEY`. `<reason>`
+is one of `no such file`, `not a regular file`, `cannot be read`, `empty`
+and `not a single value of at most 4096 printable characters`.
+
+POSTCONDITIONS:
+- no request was sent
+- no start message has the credential, and none has the value of an argument other than the path of the key file
+- the process takes its configuration from its arguments and from the two variables only: it reads no other environment variable for it and no configuration file
+
+ERRORS:
+- start error with exit code 2: G01 to G09
+
+## BEHAVIOR/INTERNAL: request-account
+Constraint: required
+
+Gives the Account that one MCP request runs with. In stdio mode it is the
+Account of the process. In http mode every request brings its own Account
+in two headers, and the server has none.
+
+This version does not use the authorization of the MCP specification,
+which is optional. The credential of Aha! is data that a request needs,
+and it has its own header. The header Authorization and the status 401
+are not used.
+
+INPUTS:
+```
+mode:     stdio | http
+settings: Settings
+account:  Account or none    // the Account of the process, in stdio mode
+request:  in http mode, the HTTP request with its headers Aha-Api-Key,
+          Aha-Subdomain and Origin
+```
+
+OUTPUTS:
+```
+account: Account
+or, in http mode, an HTTP answer with the status 400 or 403;
+the request is then not handled
+```
+
+PRECONDITIONS:
+- load-configuration has succeeded
+
+STEPS:
+1. In stdio mode: return the Account of the process.
+2. In http mode: make the checks of the steps 3 to 7 for every HTTP request to the MCP endpoint, before the request is handled. They also apply to a request that calls no tool.
+3. If the request has an `Origin` header → status 403, error text `requests from a web page are not accepted`.
+4. Read the header `Aha-Api-Key`. If the request does not have it, or its value does not match Credential → status 400, error text `no credential. Send the header Aha-Api-Key with an Aha! API key`.
+5. If the request has the header `Aha-Subdomain`: put its value into lower case. If it does not match Subdomain → status 400, error text `Aha-Subdomain must be the account name before .aha.io`.
+6. If the settings have a subdomain and the header gives another one → status 403, error text `this server works with one Aha! account only`.
+7. If neither the settings nor the header give a subdomain → status 400, error text `no Aha! account. Send the header Aha-Subdomain`.
+8. Return the Account with that subdomain and the value of the header `Aha-Api-Key`.
+
+A refused request gets the status and a body. The body has the form that
+the deployment template requires for HTTP errors: a JSON-RPC error
+response. Its id is null, its code is -32600 and its message is the error
+text.
+
+The Account of a request is used for that request only. When the request
+is answered, the server keeps neither the credential nor anything that it
+read from Aha! with it. Where a behavior says that a list may be kept
+between statements, this applies to stdio mode only.
+
+POSTCONDITIONS:
+- in http mode no request reaches a tool, the tool list or any other MCP method without a credential
+- no answer of this behavior has a credential, and none says which account the server works with
+
+ERRORS:
+- status 400: no credential or a credential of the wrong form; no account or an account name of the wrong form
+- status 403: a request with an Origin header; an account other than the account of the server
+
+## BEHAVIOR/INTERNAL: read-statement
 Constraint: required
 
 Runs one read statement against the Aha! API and returns the matching
@@ -533,9 +798,7 @@ records as rows.
 
 INPUTS:
 ```
-statement:       ReadStatement
-caller:          Caller
-default_product: ProductKey or none   // operator callers only
+statement: ReadStatement
 ```
 
 OUTPUTS:
@@ -549,10 +812,9 @@ PRECONDITIONS:
 STEPS:
 1. Replace a Star item by fields.
    a. When the WHERE condition has a conjunct that compares the id field of the entity with `=`: all fields of the entity.
-   b. Otherwise, for an agent caller: the default fields of the entity, followed by the other fields that the statement selects by name. Add note H01.
-   c. Otherwise, for an operator caller: all fields of the entity that are not heavy.
+   b. Otherwise: the default fields of the entity, followed by the other fields that the statement selects by name. Add note H01.
 2. Collect the used fields: the fields of the select items, of the WHERE condition, of GROUP BY and of ORDER BY.
-3. Run plan-fetch with the statement, the used fields, the caller and the default product; on failure → the error of plan-fetch. plan-fetch returns the API records, the scope and the applied conjuncts. It also returns the total of a list that was not read to its end, and the mark that page 1 was read for a count only.
+3. Run plan-fetch with the statement and the used fields; on failure → the error of plan-fetch. plan-fetch returns the API records, the scope and the applied conjuncts. It also returns the total of a list that was not read to its end, and the mark that page 1 was read for a count only.
 4. Run convert-record for every API record.
 5. Keep each record for which evaluate-condition is true for the WHERE condition. A conjunct that the route has applied counts as true.
 6. Run build-rows with the kept records, and with the total and the count-only mark of plan-fetch. It returns the rows, count, total and truncated.
@@ -572,13 +834,13 @@ POSTCONDITIONS:
 - only ApiList and ApiGet were called
 
 ERRORS:
-- every error of plan-fetch (scope, bad_product, wrong_kind, not_found, rate_limited, network, api_error), passed on unchanged
+- every error of plan-fetch (scope, bad_product, wrong_kind, not_found, not_authorized, rate_limited, network, api_error), passed on unchanged
 
-## BEHAVIOR: describe-statement
+## BEHAVIOR/INTERNAL: describe-statement
 Constraint: required
 
-Answers `DESCRIBE` and `DESCRIBE entity` from the catalog. It replaces
-the tool `describe_aql` of the base version. It sends no request.
+Answers `DESCRIBE` and `DESCRIBE entity` from the catalog. It sends no
+request to Aha! for the description itself.
 
 INPUTS:
 ```
@@ -622,33 +884,30 @@ The texts of `change_with_execute`:
 
 | Operation | Text |
 |---|---|
-| create | `INSERT INTO <entity> (parent, ...) VALUES (...): parent is <what>`; when a new record has no parent, `INSERT INTO <entity> (...) VALUES (...)` |
+| create | `INSERT INTO <entity> (parent, ...) VALUES (...): parent is <what>` |
 | update | `UPDATE <entity> SET field = 'value' WHERE id = '...'` |
 | delete | `DELETE FROM <entity> WHERE id = '...'` |
 
 `<what>` is `a product key` when the parent is a product, and `the id of
 the commented record` for comments. For another record kind it is `the id
-of a release`, with that kind and with `an` before a vowel. When the parent
-is optional, ` (optional)` follows.
+of a release`, with that kind and with `an` before a vowel.
 
 POSTCONDITIONS:
 - the fields listed for an entity are exactly the fields that read-statement delivers for it
-- no request was sent
+- this behavior causes at most one request: the reading of the product list for the ExampleKey (see choose-example-key)
 
 ERRORS:
 - none
 
-## BEHAVIOR: insert-statement
+## BEHAVIOR/INTERNAL: insert-statement
 Constraint: required
 
 Creates one record.
 
 INPUTS:
 ```
-statement:       InsertStatement
-caller:          Caller
-dry_run:         Boolean              // operator callers only
-default_release: RecordId or none     // operator callers only
+statement: InsertStatement
+dry_run:   Boolean       // true only in manual mode with dry-run=true
 ```
 
 OUTPUTS:
@@ -660,30 +919,30 @@ PRECONDITIONS:
 - the statement comes from parse-statement: the entity allows create and every field in it is a writable field of the entity
 
 STEPS:
-1. If the statement gives no parent, the caller is an operator, the entity is features and default_release has a value: use it as the parent.
-2. If there is no parent and the entity needs one → bad_value, message W18.
-3. Check the parent against the parent kind of the entity.
+1. If the statement gives no parent → bad_value, message W18.
+2. Check the parent against the parent kind of the entity.
    a. Parent kind product: run resolve-product without hints; on failure → the error of resolve-product.
    b. Parent kind is a record kind: the parent must be a ReferenceNumber of that kind or a NumericId. For a value of another form: if resolve-product finds it as a product → wrong_kind, message W24; otherwise → not_found, message W25, because no record of that kind can have such an id.
    c. Parent kind any-record (comments): the parent must be a ReferenceNumber of the kind feature, epic, idea, release, initiative, goal or requirement; otherwise → wrong_kind, message K08.
-4. If the field `name` (for comments the field `body`) is absent or empty → bad_value, message W19.
-5. Run check-write-values for the fields; on failure → the error of check-write-values. When a status is assigned and the parent is a record, check-write-values reads the parent to learn its product.
-6. If dry_run: return a WriteResult without id, with the fields as values and the message "would create <singular> under <parent>". No write request is sent.
-7. Call ApiCreate on the create route of the entity with the parent and the fields. NotFound → not_found, message W25. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Rejected → api_error, message W30.
-8. Return the WriteResult. `id` is the id of the new record. `values` has `name` and `parent`; for a comment it has `parent`, `body` and `created_at`. `message` is "<Singular> <id> created" with the singular name of the entity starting with a capital letter; for a comment it is "Comment added to <parent>".
+3. If the field `name` (for comments the field `body`) is absent or empty → bad_value, message W19.
+4. Run check-write-values for the fields; on failure → the error of check-write-values. When a status is assigned and the parent is a record, check-write-values reads the parent to learn its product.
+5. If dry_run: return a WriteResult without id, with the checked fields as values, and the message "would create <singular> under <parent>". No write request is sent.
+6. Run write-request for the entity and the checked fields. Call ApiCreate on the create route of the entity with the parent and that body. NotFound → not_found, message W25. NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Rejected → api_error, message W30.
+7. Return the WriteResult. `id` is the id of the new record. `values` has `name` and `parent`; for a comment it has `parent`, `body` and `created_at`. `message` is "<Singular> <id> created" with the singular name of the entity starting with a capital letter; for a comment it is "Comment added to <parent>".
 
 POSTCONDITIONS:
 - exactly one record was created, with every field of the statement
-- when an error is returned from steps 1 to 5, no ApiCreate call was made
+- when an error is returned from steps 1 to 4, no ApiCreate call was made
+- with dry_run true no ApiCreate call was made
 
 ERRORS:
 - bad_value: parent missing (W18); name or body missing (W19); errors of check-write-values
 - wrong_kind: W24, K08
 - bad_product: from resolve-product (P01)
 - not_found: the parent does not exist, or the value cannot be the id of a parent (W25)
-- rate_limited, network, api_error: X01, X02, W30
+- not_authorized, rate_limited, network, api_error: X04, X01, X02, W30
 
-## BEHAVIOR: update-statement
+## BEHAVIOR/INTERNAL: update-statement
 Constraint: required
 
 Changes one record. The record is found by its id alone. Further
@@ -693,8 +952,7 @@ and when one of them is not true, nothing is changed.
 INPUTS:
 ```
 statement: UpdateStatement
-caller:    Caller
-dry_run:   Boolean       // operator callers only
+dry_run:   Boolean       // true only in manual mode with dry-run=true
 ```
 
 OUTPUTS:
@@ -706,30 +964,30 @@ PRECONDITIONS:
 - the statement comes from parse-statement: the entity allows update, every assigned field is a writable field and every guard field is a field of the entity
 
 STEPS:
-1. The id must be a RecordId that the entity accepts. For products: run resolve-product without hints; on failure → the error of resolve-product. For comments: a NumericId. For every other entity: a ReferenceNumber of the entity's kind or a NumericId. A ReferenceNumber of another kind → wrong_kind, message K02. Any other value → wrong_kind, message K04. A ReferenceNumber is used in capital letters from here on.
-2. Call ApiGet on the id route of the entity; for products, take the record from the product list. NotFound → not_found, message W20. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Rejected → api_error, message X03.
+1. The id must be a RecordId that the entity accepts. For comments: a NumericId. For every other entity: a ReferenceNumber of the entity's kind or a NumericId. A ReferenceNumber of another kind → wrong_kind, message K02. Any other value → wrong_kind, message K04. A ReferenceNumber is used in capital letters from here on.
+2. Call ApiGet on the id route of the entity. NotFound → not_found, message W20. NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Rejected → api_error, message X03.
    MECHANISM: the record is read with one request by its id. The statement never lists records to find the record to change.
 3. Run convert-record for the record.
 4. For each guard, in the order of the statement: run evaluate-condition with the operator "=" on the record. The first guard that is not true → guard_failed, message W29.
 5. Run check-write-values for the assigned fields with the product of the record; on failure → the error of check-write-values.
-6. If dry_run: return a WriteResult with the id, the assigned fields as values and the message "would update <singular> <id>". No write request is sent.
-7. Call ApiUpdate on the update route with the assigned catalog fields. For an operator caller, assigned custom fields are then written with ApiSetCustomFields. RateLimited → rate_limited, message X01. Unreachable → network, message X02. NotFound, when the statement assigns exactly one reference → not_found, message W25 for that reference. Any other failure → api_error, message W30. When ApiUpdate succeeded and ApiSetCustomFields failed, the message also says which fields were written.
+6. If dry_run: return a WriteResult with the id, the assigned fields with their checked values, and the message "would update <singular> <id>". No write request is sent.
+7. Run write-request for the entity and the checked fields. Call ApiUpdate on the update route with that body. NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. NotFound, when the statement assigns exactly one reference → not_found, message W25 for that reference. Any other failure → api_error, message W30.
 8. Return the WriteResult. `id` is the id of the record. `values` has `name`, or `parent` for a comment, followed by each assigned field with the value that the record has after the write. `message` is "<Singular> <id> status changed to '<status>'" when `status` is the only assigned field, and "<Singular> <id> updated" in every other case.
 
 POSTCONDITIONS:
 - exactly one record was changed, in every assigned field and in no other field
-- when an error is returned from steps 1 to 5, no ApiUpdate and no ApiSetCustomFields call was made
+- when an error is returned from steps 1 to 5, no ApiUpdate call was made
+- with dry_run true no ApiUpdate call was made
 - a value of empty text is sent as empty text; the field is not left out of the request
 
 ERRORS:
 - wrong_kind: K02, K04
-- bad_product: an unknown product as the id of a product (P01)
 - not_found: the record does not exist (W20); a referenced record does not exist (W25)
 - guard_failed: W29
 - bad_value, wrong_kind: errors of check-write-values
-- rate_limited, network, api_error: X01, X02, X03, W30
+- not_authorized, rate_limited, network, api_error: X04, X01, X02, X03, W30
 
-## BEHAVIOR: delete-statement
+## BEHAVIOR/INTERNAL: delete-statement
 Constraint: required
 
 Deletes one record. Finding the record and the guards work as in
@@ -738,8 +996,7 @@ update-statement.
 INPUTS:
 ```
 statement: DeleteStatement
-caller:    Caller
-dry_run:   Boolean       // operator callers only
+dry_run:   Boolean       // true only in manual mode with dry-run=true
 ```
 
 OUTPUTS:
@@ -752,110 +1009,23 @@ PRECONDITIONS:
 
 STEPS:
 1. Check the id as in update-statement, step 1 → wrong_kind, message K02 or K04.
-2. Call ApiGet on the id route of the entity. NotFound → not_found, message W20. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Rejected → api_error, message X03.
+2. Call ApiGet on the id route of the entity. NotFound → not_found, message W20. NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Rejected → api_error, message X03.
 3. Run convert-record for the record.
 4. Check the guards as in update-statement, step 4 → guard_failed, message W29.
 5. If dry_run: return a WriteResult with the id and the message "would delete <singular> <id>". No write request is sent.
-6. Call ApiDelete on the delete route of the entity. Where the route contains the product, it is the product of the record that step 2 read. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Any other failure → api_error, message W30.
+6. Call ApiDelete on the delete route of the entity. Where the route contains the product, it is the product of the record that step 2 read. NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Any other failure → api_error, message W30.
 7. Return the WriteResult with the id, no values, and the message "<Singular> <id> deleted".
 
 POSTCONDITIONS:
 - exactly one record was deleted
 - when an error is returned from steps 1 to 4, no ApiDelete call was made
+- with dry_run true no ApiDelete call was made
 
 ERRORS:
 - wrong_kind: K02, K04
 - not_found: W20
 - guard_failed: W29
-- rate_limited, network, api_error: X01, X02, X03, W30
-
-## BEHAVIOR: operator-statements
-Constraint: required
-
-The command line (`query`, `exec`, saved queries), the interactive shell
-and the HTTP service of the base version run statements for an operator
-caller. They keep their commands, options and output formats. This behavior
-says what changes for them.
-
-INPUTS:
-```
-statement: string
-options:   the options of the base version, among them
-           the default product (--product), the dry run (--dry-run),
-           the skipped confirmation (--force), the default release
-           (--release), the execution mode (live, offline, prefer-cache)
-           and the output format
-```
-
-OUTPUTS:
-```
-the output of the base version in the chosen format, and an exit status
-```
-
-PRECONDITIONS:
-- none
-
-STEPS:
-1. Run parse-statement with caller operator; on failure → the command ends with the error of parse-statement.
-2. Check the kind of the statement against the command, as the base version does. A write statement for a command that only reads, or a read statement for the command for write statements → syntax, with the message of the base version.
-3. Read statement in live execution: run read-statement with caller operator and the default product of the options; on failure → the command ends with the error of read-statement. AgentLimits do not apply: without LIMIT all matching rows are returned. The command line and the shell write each note to the diagnostic stream.
-4. Read statement in offline execution: answer from the local cache as the base version does. Statements that the base version answers from the cache return the same records as before.
-5. Describe statement: run describe-statement and print its result.
-6. InsertStatement, UpdateStatement or DeleteStatement: run the behavior of that statement with the dry-run option. insert-statement also gets the default release. On failure → the command ends with the error of that behavior.
-7. PredicateWrite: run write-by-predicate where it is offered; where it is not offered → syntax, message W05.
-8. A command that ends with an error writes the message to the diagnostic stream, and its exit status is not zero. The exit status is zero only when every requested change was made, or when a dry run found no error.
-
-POSTCONDITIONS:
-- a result is never cut without notice: without LIMIT every matching row is in the output
-- an error found before a write request leaves the account unchanged
-
-ERRORS:
-- syntax: a statement of the wrong kind for the command (step 2); a PredicateWrite where it is not offered (W05)
-- every error of parse-statement, read-statement, insert-statement, update-statement, delete-statement and write-by-predicate
-
-## BEHAVIOR: write-by-predicate
-Constraint: supported
-
-An UPDATE or DELETE whose WHERE clause selects records by a condition
-instead of by one id. It exists for operator callers at the command line
-only. The MCP tool `execute` never accepts it. Each selected record is
-changed through the same steps as in update-statement and
-delete-statement.
-
-INPUTS:
-```
-statement: PredicateWrite
-dry_run:   Boolean
-force:     Boolean        // do not ask for confirmation
-default_product: ProductKey or none
-```
-
-OUTPUTS:
-```
-per record: WriteResult | AqlError
-exit status
-```
-
-PRECONDITIONS:
-- the caller is an operator at the command line
-- the statement comes from parse-statement: it has a WHERE clause, and every assigned field is a writable field of the entity
-
-STEPS:
-1. Run check-write-values for the assigned fields with form_only true; on failure → the error of check-write-values. This check comes before any record is read, and it is also made in a dry run.
-2. Run read-statement with a statement that selects all fields of the entity, with the WHERE condition of the statement and without LIMIT; on failure → the error of read-statement. The selected records are exactly the records that a read statement with the same WHERE clause returns.
-3. Show the number of selected records and their ids.
-4. If dry_run: stop. The exit status is zero.
-5. Unless force: ask for confirmation. Without confirmation → stop without any change; the exit status is not zero.
-6. For each selected record, run update-statement from step 5 on, or delete-statement from step 6 on, with the record that step 2 read. A failure for one record is reported with its id → the exit status is not zero; the remaining records are still processed.
-7. Report the ids that were changed and the ids that failed.
-
-POSTCONDITIONS:
-- no record outside the selection of step 2 was changed
-- the exit status is zero only when every selected record was changed
-
-ERRORS:
-- every error of check-write-values and read-statement, before any write request
-- per record: the errors of update-statement and delete-statement
+- not_authorized, rate_limited, network, api_error: X04, X01, X02, X03, W30
 
 ## BEHAVIOR/INTERNAL: tokenize
 Constraint: required
@@ -910,7 +1080,6 @@ an apostrophe inside a word taken as part of the text.
 INPUTS:
 ```
 text:          string
-caller:        Caller
 allowed_kinds: set of StatementKind
 ```
 
@@ -939,9 +1108,7 @@ STEPS:
    a. For a read statement → syntax, message S03. What was expected is "the end of the statement, or WHERE, GROUP BY, ORDER BY, LIMIT in this order".
    b. For a describe statement → syntax, message S14.
    c. For a write statement → syntax, message W03.
-9. Constructs outside the forms below.
-   a. For an agent caller they are refused. JOIN → syntax, message S08. HAVING → syntax, message S09. OFFSET, or a second number after LIMIT → syntax, message S10. SELECT inside parentheses → syntax, message S11. Anything else → syntax, message S03.
-   b. For an operator caller, the constructs of the base version that the forms below do not have stay accepted and keep their behavior. These are JOIN, HAVING, SELECT inside parentheses, relative time values, the `release.` qualifier, SELECT written after WHERE, the entity `tags`, and custom field references (see custom-field-references).
+9. Constructs outside the forms below are refused. JOIN → syntax, message S08. HAVING → syntax, message S09. OFFSET, or a second number after LIMIT → syntax, message S10. SELECT inside parentheses → syntax, message S11. Anything else → syntax, message S03.
 
 Form of a read statement:
 
@@ -1008,7 +1175,6 @@ Rules for a write statement:
 - Each further condition must be joined with AND and have the form `field = value`. OR, NOT or parentheses → syntax, message W05. Another operator → syntax, message W06. A field that is not a field of the entity → bad_name, message W17. These conditions are the guards of the statement.
 - NULL as a value → syntax, message W11. A word that is not a keyword, where a value is expected → syntax, message S13.
 - Any other departure from the forms → syntax, message W03.
-- For an operator caller at the command line, an UPDATE or DELETE whose WHERE clause does not have the form above is a PredicateWrite. Its WHERE clause is parsed as the condition of a read statement. Without a WHERE clause → syntax, message B01.
 
 POSTCONDITIONS:
 - the returned statement has canonical entity and field names only
@@ -1016,16 +1182,15 @@ POSTCONDITIONS:
 - no input is left after the statement
 
 ERRORS:
-- syntax: S03 to S14, W01 to W11, B01, and S01 and S02 from tokenize
+- syntax: S03 to S14, W01 to W11, and S01 and S02 from tokenize
 - bad_name: W12 to W17, and N01 to N03 from resolve-names
 
 ## BEHAVIOR/INTERNAL: entity-catalog
 Constraint: required
 
 The catalog is a single table of entities, fields, types, API sources,
-routes, parents and operations. Every other behavior of live execution
-takes these facts from the catalog. The base version has them in several
-places that disagree (see DELTA).
+routes, parents and operations. Every other behavior takes these facts
+from the catalog.
 
 INPUTS:
 ```
@@ -1041,7 +1206,7 @@ PRECONDITIONS:
 - none
 
 STEPS:
-1. Take every entity name, field name, type, API source, route, parent, operation, about text and example from the entries below. resolve-names, describe-statement, plan-fetch, convert-record, check-write-values and error-messages use the catalog and no second list.
+1. Take every entity name, field name, type, API source, request member, route, parent, operation, about text and example from the entries below. resolve-names, describe-statement, plan-fetch, convert-record, check-write-values, write-request and error-messages use the catalog and no second list.
 2. Use the order of the entries below wherever entities are listed, and the order of the field tables wherever fields are listed: in DESCRIBE results, in tool descriptions and in messages.
 3. Replace {KEY} in about texts and examples by the ExampleKey.
 4. Add an entity by adding an entry. No step of plan-fetch, convert-record or the write statements is written for one entity only, except where an entry below says so.
@@ -1067,6 +1232,17 @@ precedence.
 | updated | updated_at |
 | assignee, assigned_to_user, assigned_user, owner, assigned | assigned_to |
 
+### Request members of written fields
+
+A written field is sent under its own name, as write-request says. The
+exceptions are:
+
+| Field | Request member |
+|---|---|
+| status | workflow_status |
+| assigned_to | assigned_to_user |
+| description of releases | theme |
+
 ### ENTITY: products
 
 | Property | Value |
@@ -1079,18 +1255,16 @@ precedence.
 | Other field names | id, reference_prefix, prefix, reference_num, ref_num, ref, product, product_key, product_id mean key. parent_id means parent. title means name |
 | Read | The product list: GET /products, all pages. Conditions are evaluated on the list |
 | Parent filters | none |
-| Create | POST /products. Parent: a product (the product line above it), optional |
-| Update | PUT /products/{id} |
-| Delete | not offered |
+| Create, update, delete | not offered |
 | Example | SELECT key, name FROM products |
 
 | Field | Type | API source | Writable | Notes |
 |---|---|---|---|---|
-| key | key | reference_prefix | yes | The id field of products. Conditions also accept the NumericId |
-| name | string | name | yes | |
+| key | key | reference_prefix | no | The id field of products. Conditions also accept the NumericId |
+| name | string | name | no | |
 | product_line | boolean | product_line | no | false when the API record has no value |
 | parent | key | parent_id | no | The key of the product with that NumericId |
-| description | text | description | yes | |
+| description | text | description | no | |
 | created_at | datetime | created_at | no | |
 | url | string | url | no | |
 
@@ -1461,7 +1635,6 @@ INPUTS:
 ```
 word:    string                // as the statement writes it
 entity:  EntityName or none    // none: the word is an entity word
-caller:  Caller
 writing: Boolean               // the word is part of a write statement
 ```
 
@@ -1477,23 +1650,20 @@ PRECONDITIONS:
 
 STEPS:
 1. Compare words without regard to case.
-2. Entity word: the result is the first catalog entity, in catalog order, whose name, singular or other names have the word. For an operator caller, the entity `tags` of the base version is accepted as well and keeps its base-version behavior.
+2. Entity word: the result is the first catalog entity, in catalog order, whose name, singular or other names have the word.
 3. Entity word without a match: when writing is true, the result is none; otherwise → bad_name, message N01.
-4. Field word: unless the word starts with `custom.`, remove a qualifier, which is everything up to and including the last `.`. Then take the first match in this order:
+4. Field word: remove a qualifier, which is everything up to and including the last `.`. A word that starts with `custom.` keeps its qualifier, so that a message shows the word as the statement writes it. Then take the first match in this order:
    a. a field of the entity;
    b. one of the other field names of the entity;
    c. one of the common other names, when the entity is not products and has the field that the name means;
    d. the entity's own name: the singular, or the singular followed by `_id`, means the id field of the entity, and the singular followed by `_name` means `name`. This applies only when the entity has that field.
-5. Field word without a match, for an operator caller.
-   a. A word that starts with `custom.` is a custom field reference. It is accepted in a read statement and as an assigned field of UPDATE (see custom-field-references).
-   b. In a read statement, a field that the base version accepts for the entity and that the catalog does not have is accepted under its own name. Its value is the member of that name in the API record, or null. describe-statement does not list such a field.
-6. Field word without a match, in every other case: when writing is true, the result is none. On users, a word that means `product` on other entities → bad_name, message N03. Any other word → bad_name, message N02.
+5. Field word without a match: when writing is true, the result is none. On users, a word that means `product` on other entities → bad_name, message N03. Any other word → bad_name, message N02.
 
 The id field of an entity is `key` for products and `id` for every other
 entity that has a field `id`. The entity statuses has no id field.
 
 POSTCONDITIONS:
-- for an agent caller the result is a name of the catalog
+- the result is a name of the catalog, or none
 - a word that is a field of the entity is never read as another name
 
 ERRORS:
@@ -1521,7 +1691,7 @@ PRECONDITIONS:
 - none
 
 STEPS:
-1. Take the product list. When it was not read before: call ApiList on /products for all pages, with the members that the fields of the entity products need. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Any other failure → api_error, message X03. The list may be kept between statements.
+1. Take the product list. When it was not read before: call ApiList on /products for all pages, with the members that the fields of the entity products need. NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Any other failure → api_error, message X03. In stdio mode the list may be kept between statements. In http mode it is read at most once per request and is not kept.
 2. Compare the value with the key and the NumericId of every product, and then with the name of every product. The comparison is the equality of text of evaluate-condition. The first match is the result.
 3. Without a match, when the product list was kept from an earlier statement: read it again as in step 1 and repeat step 2 once.
 4. Without a match, when hints is true, take the first case that applies:
@@ -1537,7 +1707,7 @@ POSTCONDITIONS:
 ERRORS:
 - bad_product: P01
 - wrong_kind: P02, P03, P04
-- rate_limited, network, api_error: X01, X02, X03
+- not_authorized, rate_limited, network, api_error: X04, X01, X02, X03
 
 ## BEHAVIOR/INTERNAL: plan-fetch
 Constraint: required
@@ -1548,10 +1718,8 @@ request per page and never one request per record.
 
 INPUTS:
 ```
-statement:       ReadStatement
-used_fields:     set of FieldName
-caller:          Caller
-default_product: ProductKey or none
+statement:   ReadStatement
+used_fields: set of FieldName
 ```
 
 OUTPUTS:
@@ -1590,32 +1758,32 @@ STEPS:
    e. the field is release, initiative or epic, and the WHERE condition has a conjunct `product = value` that resolve-product finds → message K05. The records of that kind in the product are read for it with one list request;
    f. in every other case → message K06.
 5. Route by a list of values. This step applies when step 2 took no route. Take the first conjunct of the form `field IN (values)` that has at most MaxInValues values and whose field has a read route. The route of the field `product` counts here. Read every value as step 3 says, each list to its last page; the steps 8 a and 8 b do not apply. Put the records together and leave out a record that was read before. Scope: the scopes of the values, joined by a comma and a space. The conjunct is applied.
-6. Route by product. This step applies when no route was taken so far and the entity has a read route for the field `product`. When the WHERE condition has a conjunct `product = value`: read it as step 3 b says, and the conjunct is applied. Otherwise, for an operator caller with a default product: read the route for the default product.
+6. Route by product. This step applies when no route was taken so far and the entity has a read route for the field `product`. When the WHERE condition has a conjunct `product = value`: read it as step 3 b says, and the conjunct is applied.
 7. Account-wide list. This step applies when no route was taken so far.
    a. When the entity has no account-wide list → scope, message C01.
    b. When the entity has name search, look for a conjunct `name = text` or `name CONTAINS text` with a text that is not empty. The text of the first such conjunct is sent with the list request as the parameter `q`. This conjunct is not applied: read-statement still evaluates it on every record.
    c. Read the account-wide list. Scope: "all products".
 8. Reading a list. Request it page by page with per_page = PageSize, from page 1 on, every page once.
    a. Count only. It applies when the select items are one `COUNT(*)` and nothing else, the statement has no GROUP BY, and every conjunct of the WHERE condition is applied. Request page 1 only. `total` is its total_records and count_only is true.
-   b. Early end. It applies when every conjunct of the WHERE condition is applied and the statement has no ORDER BY, no GROUP BY, no DISTINCT and no aggregate item. Stop when enough records are read. Enough is the LIMIT of the statement; for an agent caller it is default_limit without a LIMIT, and never more than max_limit. For an operator caller without a LIMIT there is no early end. When the list was not read to its end, `total` is its total_records.
-   c. Too many pages. For an agent caller: when page 1 reports more than max_pages pages, and neither a nor b ends the reading on page 1 → scope, message C02. No further page is requested.
+   b. Early end. It applies when every conjunct of the WHERE condition is applied and the statement has no ORDER BY, no GROUP BY, no DISTINCT and no aggregate item. Stop when enough records are read. Enough is the LIMIT of the statement, and default_limit without a LIMIT; it is never more than max_limit. When the list was not read to its end, `total` is its total_records.
+   c. Too many pages. When page 1 reports more than max_pages pages, and neither a nor b ends the reading on page 1 → scope, message C02. No further page is requested.
    d. In every other case read the list to its last page.
-   MECHANISM: every list request has the parameter `fields`. It has the API sources of all fields of the entity that are not heavy, and of the heavy fields among used_fields. For an operator caller it also has the base-version fields that the statement uses. One request per page delivers complete records. No request is sent per record of a list.
+   MECHANISM: every list request has the parameter `fields`. It has the API sources of all fields of the entity that are not heavy, and of the heavy fields among used_fields. One request per page delivers complete records. No request is sent per record of a list.
 9. Lookups for the evaluation. When the WHERE condition compares a field of the type user with `me`, `myself` or `current_user`, read the current user with one ApiGet on /me. When it compares a field of the type key outside the applied conjuncts, take the product list as resolve-product does. Each lookup is read at most once per statement.
-10. A request of the steps 1 to 9 that fails in another way than the steps say: RateLimited → rate_limited, message X01. Unreachable → network, message X02. Any other failure → api_error, message X03. No partial result is returned.
+10. A request of the steps 1 to 9 that fails in another way than the steps say: NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Any other failure → api_error, message X03. No partial result is returned.
 
 POSTCONDITIONS:
 - every record of the result belongs to the scope
 - every page of a list was requested at most once, with increasing page numbers
 - the number of requests does not grow with the number of records in a page
-- for an agent caller at most max_pages pages of one list were requested
+- at most max_pages pages of one list were requested
 
 ERRORS:
 - scope: an entity that needs a product or a parent in the WHERE condition (C01); too many pages (C02)
 - bad_product: P01, from resolve-product
 - wrong_kind: P02 to P04 from resolve-product; K01 to K06 and K08
 - not_found: a parent that does not exist (K07)
-- rate_limited, network, api_error: X01, X02, X03
+- not_authorized, rate_limited, network, api_error: X04, X01, X02, X03
 
 ## BEHAVIOR/INTERNAL: convert-record
 Constraint: required
@@ -1656,7 +1824,6 @@ STEPS:
    - `user` of comments: the e-mail address and the NumericId of the user.
    - `parent` of comments: the NumericId of the commented record.
    - `entity` of statuses: the singular of the entity and the record type of the workflow.
-5. For an operator caller, add the base-version fields and the custom fields that the statement uses (see resolve-names and custom-field-references).
 
 POSTCONDITIONS:
 - the record has every field of the entity, each with a value or null
@@ -1725,7 +1892,6 @@ INPUTS:
 ```
 statement:  ReadStatement     // Star already replaced by fields
 records:    the kept records, in the order in which they were read
-caller:     Caller
 list_total: u32 or none       // total of plan-fetch
 count_only: Boolean           // count_only of plan-fetch
 ```
@@ -1750,14 +1916,14 @@ STEPS:
    d. COUNT(*) is the number of records of the group. COUNT(field) is the number of records with a value in the field. COUNT(DISTINCT field) is the number of different values. SUM and AVG use the values that are numbers. MIN and MAX use the order of step 4. Without a value the result is null, and 0 for COUNT. A result that is a whole number is written without decimals; every other result is rounded to two decimals.
 3. Plain result: when the statement has no aggregate item and no GROUP BY. Sort the records as step 4 says. Make one row per record with the select items in the order of the statement, each under its label. With DISTINCT, leave out a row that equals an earlier row in all values.
 4. ORDER BY. Sort by the first key. Rows that are equal in it are sorted by the next key, and so on. Rows that are equal in all keys keep their order. A key is a field, the label of an aggregate item, or an aggregate that the statement selects. Numbers come before text. Numbers are sorted by value and text by its comparison form. A row without a value in the key comes last, with ASC and with DESC. A grouped result is sorted after step 2.
-5. Limits. The limit is the LIMIT of the statement. For an agent caller it is default_limit without a LIMIT, and never more than max_limit. For an operator caller without a LIMIT there is no limit. rows are the first rows up to the limit, and count is their number.
+5. Limits. The limit is the LIMIT of the statement, and default_limit without a LIMIT. It is never more than max_limit. rows are the first rows up to the limit, and count is their number.
 6. total has a value in two cases. When step 5 cut rows, it is the number of rows before the cut. When plan-fetch did not read the list to its end, it is list_total.
-7. truncated is true when total has a value and the statement did not ask for the cut: it has no LIMIT, or for an agent caller a LIMIT above max_limit.
+7. truncated is true when total has a value and the statement did not ask for the cut: it has no LIMIT, or a LIMIT above max_limit.
 
 POSTCONDITIONS:
 - an aggregate is computed over all matching records, also when step 5 cuts the rows of a grouped result
 - every row has the labels of the statement in its order; in a grouped result the group fields that are not selected come first
-- for an agent caller count is never above max_limit
+- count is never above max_limit
 
 ERRORS:
 - none
@@ -1783,11 +1949,11 @@ fields: Map<FieldName, Value> | AqlError
 ```
 
 PRECONDITIONS:
-- every field is a writable field of the entity, or for an operator caller a custom field reference
+- every field is a writable field of the entity
 
 STEPS:
-1. Go through the fields in the order of the statement and check each one by its type. The first value that fails ends the check. An assigned custom field is not checked: its value is sent as the statement has it.
-2. string, text and key: the value must be Text; otherwise → bad_value, message W28. The text is sent as the statement has it. Empty text is a value.
+1. Go through the fields in the order of the statement and check each one by its type. The first value that fails ends the check.
+2. string and text: the value must be Text; otherwise → bad_value, message W28. The text is sent as the statement has it. Empty text is a value.
 3. number: a Number, or Text that reads as a number; otherwise → bad_value, message W26.
 4. boolean: a Boolean, or the text `true` or `false` in any case; otherwise → bad_value, message W27.
 5. date: Text of the form YYYY-MM-DD that is a day of the calendar. Of a timestamp that starts with such a date, the first 10 characters are taken. Any other value → bad_value, message W22.
@@ -1799,58 +1965,113 @@ STEPS:
    b. For a new record the product is the product of the parent. When the parent is a record, read it with ApiGet on its id route to learn its product; NotFound → not_found, message W25.
    c. Compare the value with the names of the statuses. The comparison is the equality of text of evaluate-condition. The name is sent as the workflow writes it.
    d. Without a match, read the statuses again when they were kept from an earlier statement, and compare once more. Still without a match → bad_value, message W21.
-10. A request of this behavior that fails in another way: RateLimited → rate_limited, message X01. Unreachable → network, message X02. Any other failure → api_error, message X03.
+10. A request of this behavior that fails in another way: NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Any other failure → api_error, message X03.
 
 POSTCONDITIONS:
-- no ApiCreate, ApiUpdate, ApiDelete or ApiSetCustomFields call was made
+- no ApiCreate, ApiUpdate or ApiDelete call was made
 - a status is sent with the name that the workflow has
 
 ERRORS:
 - bad_value: W21, W22, W23, W26, W27, W28
 - wrong_kind: a product where a record is needed (W24)
 - not_found: W25
-- rate_limited, network, api_error: X01, X02, X03
+- not_authorized, rate_limited, network, api_error: X04, X01, X02, X03
 
-## BEHAVIOR/INTERNAL: custom-field-references
+## BEHAVIOR/INTERNAL: write-request
 Constraint: required
 
-Custom fields in the statements of an operator caller, written
-`custom.<key>`. The base version accepts them. This behavior keeps them
-and corrects how their values are read and compared. An agent caller
-cannot use them: for an agent caller resolve-names answers `custom.<key>`
-with message N02.
+Builds the body of a create request or an update request from the checked
+fields of a write statement.
 
 INPUTS:
 ```
-reference: FieldName     // "custom.<key>"
-record:    ApiRecord
+entity: EntityName
+fields: Map<FieldName, Value>    // the output of check-write-values
 ```
 
 OUTPUTS:
 ```
-value: Value
+body: JSON object
 ```
 
 PRECONDITIONS:
-- the caller is an operator
-- the entity is one for which the base version accepts custom field references
+- check-write-values has succeeded for the fields
 
 STEPS:
-1. A statement can use a custom field reference in a select item, in the WHERE condition and in ORDER BY. It then reads the custom fields of the records together with the list, in the way the base version reads them. The list itself is read as step 8 of plan-fetch says: every page once, with its page number.
-2. The value of the reference is the value of the custom field with that key in the API record. A value is never returned in an encoded form.
-   a. Text is Text, a number is a Number and a truth value is a Boolean.
-   b. A list of values is Text, with the values joined by a comma and a space.
-   c. An absent field is Null.
-3. evaluate-condition and build-rows treat the reference as a field of the type number when the value is a Number, and of the type string in every other case. `custom.priority = 'High'` is true for a record whose custom field priority has the value High.
-4. The label of a selected reference is the reference as the statement writes it.
-5. In UPDATE, an assigned custom field is written with ApiSetCustomFields after the catalog fields, as update-statement says.
+1. The body is a JSON object with one member. The name of that member is the singular of the entity. Its value is a JSON object with one member per field, in the order of the statement.
+2. The name of a member is the request member that the catalog gives for the field. For a field without a request member it is the name of the field.
+3. The value of a member depends on the type of the field.
+   a. string and text: the text as a JSON string. Text is not converted to HTML.
+   b. number: a JSON number. boolean: a JSON boolean.
+   c. date: the date as a JSON string of the form YYYY-MM-DD.
+   d. status: the name of the status as a JSON string.
+   e. user: the e-mail address or the NumericId as a JSON string.
+   f. reference: the id as a JSON string.
+4. The field `tags`: the tags as a single JSON string, joined by a comma.
+5. The parent of a new record is part of the route. It is not a member of the body.
+
+For the statement `UPDATE features SET status = 'In design', assigned_to =
+'me' WHERE id = 'DEMO-1'` on the fixture account, the body is
+`{"feature":{"workflow_status":"In design","assigned_to_user":"test.user@example.com"}}`.
 
 POSTCONDITIONS:
-- reading a list with custom fields ends after its last page
-- a comparison with a custom field is true for the records whose value is equal
+- the body has one member for every field of the statement and no other member
+- the body has no member for the id, the parent or the product of the record
 
 ERRORS:
 - none
+
+## BEHAVIOR/INTERNAL: aha-request
+Constraint: required
+
+Sends one operation of the AhaAPI as an HTTPS request and reads the
+answer. Every request of the server to Aha! goes through this behavior.
+
+INPUTS:
+```
+account:    Account
+method:     GET | POST | PUT | DELETE
+route:      string                 // from the catalog, with its parameters replaced
+parameters: Map<string, string>    // the parameters of ApiList
+body:       JSON object or none    // from write-request
+```
+
+OUTPUTS:
+```
+answer: JSON value | none | ApiFailure
+```
+
+PRECONDITIONS:
+- the subdomain of the Account matches Subdomain, and its credential matches Credential
+
+STEPS:
+1. Build the address: `https://`, the subdomain, `.aha.io/api/v1`, the route, and the parameters as a query string. Every value that replaces a route parameter and every parameter value is percent-encoded. No other scheme and no other host is used.
+2. Send the request with the headers `Authorization: Bearer <credential>`, `Accept: application/json` and `User-Agent: mcp-server-aha-aql/<version> (<project address>)`. A request with a body also has `Content-Type: application/json`. Aha! asks every client for a way to reach its developer. The project address is the address of the project in the metadata of the package.
+3. The connection uses TLS and checks the certificate of Aha! against the trust store of the system. No setting turns this check off. The server connects directly and reads no proxy setting.
+4. If the connection or the certificate check fails, or no answer arrives within 60 seconds → Unreachable. The request is not sent again.
+5. A redirect is not followed. An answer with a status from 300 to 399 → Rejected, with the status.
+6. Status 429: wait, and send the same request again. The header `X-Ratelimit-Reset` of the answer gives the time when the limit ends, as UTC Unix time. The waiting time is the number of seconds from now to that time, at least 1 second and at most 30 seconds. Without the header it is 5 seconds. The request is sent again at most twice. If the third answer also has the status 429 → RateLimited.
+7. Status 401 or 403 → NotAuthorized, with the status. Status 404 → NotFound.
+8. Every other status outside 200 to 299 → Rejected, with the status and the text of the answer.
+9. Status 200 to 299: the answer is the body, read as JSON. ApiDelete needs no body. If a body that is needed cannot be read as JSON → Rejected, with the status and the text `the answer is not JSON`.
+
+MECHANISM: the HTTPS connection can be replaced as a whole, and FakeAha
+takes its place in tests. The waiting of step 6 goes through a clock that
+tests replace, so that no test waits. It is the clock of the log line of
+`execute`.
+
+POSTCONDITIONS:
+- the request went to the account of the Account and to no other host
+- the credential was sent in the Authorization header of that request and nowhere else
+- a request was sent again only after the status 429, and at most twice
+- no failure has the credential in its text
+
+ERRORS:
+- Unreachable: no connection, a certificate that cannot be verified, or no answer in time
+- NotAuthorized: status 401 or 403
+- NotFound: status 404
+- RateLimited: status 429 three times
+- Rejected: a redirect, another status that is not a success, or an answer that is not JSON
 
 ## BEHAVIOR/INTERNAL: error-messages
 Constraint: required
@@ -1871,7 +2092,7 @@ message: string
 ```
 
 PRECONDITIONS:
-- choose-example-key has run
+- none; the ExampleKey is chosen when a message first needs it (see choose-example-key)
 
 STEPS:
 1. Take the text of the ID from the tables below and replace every placeholder. The ID itself is not part of the message.
@@ -1879,11 +2100,10 @@ STEPS:
 3. Replace `<KEY>` by the ExampleKey. `<PRODUCT>` is the key of the product that the message is about.
 4. Take lists of entities and of fields from the catalog, in catalog order, joined by a comma and a space.
 5. Show at most MaxListed entries of a list of records or of product keys. When there are more, end the list with `, and <n> more`.
-6. The message of an error is the complete tool result of query-tool and of execute-tool for that error. A note is part of the result of a read statement.
+6. The message of an error is the complete tool result of `query` and of `execute` for that error. A note is part of the result of a read statement.
 
-The messages speak of the query tool and the execute tool. For an operator
-caller these are the command for read statements and the command for write
-statements; the texts stay the same.
+The messages speak of the query tool and the execute tool. In manual mode
+these are the two commands of the same names; the texts stay the same.
 
 A hint that is not empty starts with one space, so that it can follow the
 period of the sentence before it.
@@ -2042,7 +2262,6 @@ Messages of write statements:
 | W28 | bad_value | `<field> must be text in single quotes` |
 | W29 | guard_failed | `nothing was changed: <singular> <id> has <field> = '<current value>', not '<value>'` |
 | W30 | api_error | `aha: API error (status <n>) on <method> <route>: <answer>` |
-| B01 | syntax | `<KEYWORD> needs a WHERE clause. To change one record: WHERE id = '...'` |
 
 In W03, `<problem>` is one of these texts:
 
@@ -2060,15 +2279,14 @@ In W03, `<problem>` is one of these texts:
 - `WHERE id = needs the id in single quotes.`
 - `unexpected text at <where>. One statement, one record.`
 
-In W04 and B01, `<KEYWORD>` is `UPDATE` or `DELETE`. In W14, `<done>` is
+In W04, `<KEYWORD>` is `UPDATE` or `DELETE`. In W14, `<done>` is
 `created` for INSERT, `changed` for UPDATE and `deleted` for DELETE, and
 `<list>` are the entities that have that operation.
 
 In W16, `<opening>` is `unknown field '<word>' on <entity>.` for a word
 that resolve-names does not know, and `the field <field> of <entity> cannot
 be set.` for a field that is not writable. `<parent note>` is `, and parent
-in INSERT` when a new record of the entity has a parent, and empty
-otherwise.
+in INSERT` when the entity has the operation create, and empty otherwise.
 
 In W18, `<parent text>` is `a release`, `a product`, `a feature` or `the
 record to comment on`. In W19, `<field>` is `name`, or `body` for a
@@ -2088,12 +2306,22 @@ Messages for failed requests:
 | ID | Kind | Text |
 |---|---|---|
 | X01 | rate_limited | `aha: API error (status 429): too many requests` |
-| X02 | network | `cannot reach Aha!: <reason>` |
+| X02 | network | `cannot reach Aha!: <reason>.<write hint>` |
 | X03 | api_error | `aha: API error (status <n>) on <method> <route>: <answer>` |
+| X04 | not_authorized | `Aha! refused the request (status <n>): the API key is not valid for the account <subdomain>, or it has no permission for this record. Repeating the statement does not help.` |
+
+In X02, `<reason>` is `no answer within 60 seconds`, `the certificate of
+<subdomain>.aha.io could not be verified`, or `the connection to
+<subdomain>.aha.io failed`. `<write hint>` is empty for ApiList and ApiGet.
+For ApiCreate, ApiUpdate and ApiDelete it is ` The change may have been
+made. Read the record before you send the statement again.`
 
 In X03 and W30, `<answer>` is the first 300 characters of the text that
-the API returned. W30 has the text of X03. It has its own ID because a
-write request causes it.
+the API returned, and `(no text)` when it returned none. W30 has the text
+of X03. It has its own ID because a write request causes it.
+
+In X04, `<subdomain>` is the subdomain of the Account. The message has no
+part of the credential.
 
 Notes in the result of a read statement:
 
@@ -2108,7 +2336,7 @@ Notes in the result of a read statement:
 | H07 | `No <singular> has exactly the name '<value>'. name = compares the whole name; to search inside names use: name CONTAINS '<value>'` |
 
 POSTCONDITIONS:
-- every complete statement that a message shows is accepted by parse-statement for an agent caller, after its placeholders are replaced
+- every complete statement that a message shows is accepted by parse-statement, after its placeholders are replaced
 - no message tells the reader to use an option of the command line
 
 ERRORS:
@@ -2124,8 +2352,8 @@ never an example.
 
 INPUTS:
 ```
-default_product: the default product setting of the server, or none
-caller:          Caller
+default_product: the setting default_product, or none
+account:         Account
 ```
 
 OUTPUTS:
@@ -2137,172 +2365,473 @@ PRECONDITIONS:
 - none
 
 STEPS:
-1. Agent callers, once at the start of the server: when a default product is configured and resolve-product finds it, the ExampleKey is the key of that product.
-2. In every other case the ExampleKey is PROD. While a product of the account has the ExampleKey as its key, in any case, add the letter X at its end.
-3. When a default product is configured and resolve-product does not find it, the server writes a warning to its diagnostic output and continues with step 2.
-4. When the product list cannot be read at the start, the ExampleKey is PROD, the server writes a warning to its diagnostic output, and the server starts.
-5. Operator callers: the ExampleKey is the default product of the options when one is given, and PROD otherwise. The product list is not read for this.
+1. Choose the ExampleKey when it is first needed. That is when the tool list is answered, or when a DESCRIBE result, a message or a note shows it. In stdio mode and manual mode it is chosen once for the process. In http mode it is chosen at most once for each request, with the Account of that request.
+2. When the setting default_product has a value and resolve-product finds it: the ExampleKey is the key of that product.
+3. In every other case the ExampleKey is PROD. While a product of the account has the ExampleKey as its key, in any case, add the letter X at its end.
+4. When the setting default_product has a value and resolve-product does not find it: write a warning to the diagnostic output and continue with step 3.
+5. When the product list cannot be read: the ExampleKey is PROD. Write a warning to the diagnostic output. The failed reading is not an error of the call that needed the key.
 
 POSTCONDITIONS:
-- the ExampleKey is the configured default product, or a key that no product of the account had when the server started
+- the ExampleKey is the key of the product of the setting default_product, or a key that no product of the account had when the key was chosen, or PROD when the product list could not be read
+- a call that shows no example causes no request for the ExampleKey
+- no warning has the credential
 
 ERRORS:
 - none
 
 ## PRECONDITIONS
 
-- The account, the credentials and the address of the Aha! API are configured as in the base version.
-- The MCP server has a selection of tool groups with one group for the AQL tools, and a read-only mode in which no write tool is registered. The base version 0.12.0 has neither. Both are a prerequisite of tool-registration and are not specified in this document.
 - The Aha! API reports total_records and total_pages for every list.
-- The Aha! API accepts the parameter `fields` on the list routes of the catalog and a page size of PageSize. This was observed on one account on 2026-11-12 (see DELTA).
+- The Aha! API accepts the parameter `fields` on the list routes of the catalog and a page size of PageSize. This was observed on one account on 2026-11-12.
+- The Aha! API accepts an API key and an OAuth2 access token in the same way: as a bearer value in the Authorization header.
+- The credential has the permissions in Aha! that a statement needs. The server gives no permission and takes none away.
 
 ## POSTCONDITIONS
 
 - After a read statement or a describe statement, no data in Aha! has changed.
-- After a call of `execute` that returns a result, exactly one record was created, changed or deleted, and the result gives its id.
+- After a call of `execute` that returns a result, exactly one record was created, changed or deleted, and the result gives its id. With dry_run true, no record was created, changed or deleted.
 - After a write statement that returns an error from parsing, from name resolution, from the id check, from a guard or from a value check, no data in Aha! has changed.
 - Every result of a read statement gives its scope, and it says so when rows were cut.
 - Every error gives the valid names or values, or a statement that can be sent as it is.
+- A process in stdio mode or manual mode works with one Aha! account from its start to its end.
 
 ## INVARIANTS
 
 - [observable] every row of a read result satisfies the WHERE condition of its statement, for every form of condition that parse-statement accepts, OR and NOT included
 - [observable] a read result has every matching record, unless truncated is true or the statement has a LIMIT, and then total gives the number of matching rows
-- [observable] every field that describe-statement lists for an entity is delivered by read-statement with its value or with null, and an agent caller gets an error with the list of the valid fields for every other field word
+- [observable] every field that describe-statement lists for an entity is delivered by read-statement with its value or with null, and every other field word gets an error with the list of the valid fields
 - [observable] every read result gives its scope: the record, the parent, the product or the account-wide list that was read
 - [observable] a result row has the labels of the select items in the order of the statement, a grouped result has the fields of GROUP BY that are not selected before them, and a field without a value is null
 - [observable] one call of execute creates, changes or deletes at most one record
 - [observable] a write statement is checked completely before its write request: an unknown column, an unknown field, a value of the wrong form, an unknown status and a guard that is not true are errors, and none of them changes data
 - [observable] an accepted write statement sends every field that it assigns; no column, assignment or condition is ignored without an error
-- [observable] the tool query sends only read requests, and in read-only mode no registered tool accepts INSERT, UPDATE or DELETE
-- [observable] text that follows a complete statement is an error, for every statement kind and for every caller
+- [observable] the tool query sends only read requests, and with read_only true the server offers no tool that accepts INSERT, UPDATE or DELETE
+- [observable] the tool list is query and execute, or query alone with read_only true; the server offers no other tool, no resource and no prompt
+- [observable] text that follows a complete statement is an error, for every statement kind
 - [observable] the error for an unknown entity or field lists the valid names, and every syntax error shows a form or a statement that parse-statement accepts
-- [observable] every example statement in a tool description, in a DESCRIBE result, in an error message and in a note is accepted by parse-statement for an agent caller
-- [observable] an example statement or example id in a tool description, a DESCRIBE result, an error message or a note has the ExampleKey, or the key of the product that the statement of the caller is about; the ExampleKey is the configured default product or a key that no product of the account has
+- [observable] every example statement in a tool description, in a DESCRIBE result, in an error message and in a note is accepted by parse-statement
+- [observable] an example statement or example id in a tool description, a DESCRIBE result, an error message or a note has the ExampleKey, or the key of the product that the statement is about; the ExampleKey is the product of the setting default_product or a key that no product of the account has
 - [observable] a statement that the strict reading accepts has the same result with and without the second reading
 - [observable] in one reading of a list every page is requested once, with increasing page numbers, and the reading ends
-- [observable] for an agent caller one statement requests at most max_pages pages of one list and returns at most max_limit rows
+- [observable] one statement requests at most max_pages pages of one list and returns at most max_limit rows
 - [observable] an aggregate is computed over all matching records and never over a list that was cut
-- [observable] offline execution from the local cache returns what it returns in the base version
-- [implementation] the entity-catalog is the single source for name resolution, DESCRIBE, the parameter fields, record conversion, value checks and the lists in messages; live execution has no second list of entities or fields
+- [observable] a statement that fails is answered with a tool result that is marked as an error and has the message as its text; it is not answered with a JSON-RPC error
+- [observable] manual mode writes to standard output the same text that the MCP tool returns for the same statement and the same Account
+- [observable] the credential is in no tool result, no message, no note, no log line, no start message, no warning and no output of manual mode, and no option of the command line takes it
+- [observable] every request of the server goes to https://<subdomain>.aha.io/api/v1 with the subdomain of the Account of the call; the server follows no redirect and calls no other host
+- [observable] in http mode a request without a credential reaches no tool and no tool list, and the server has no credential of its own
+- [observable] in http mode nothing that was read with the credential of one request is part of the answer to another request
+- [implementation] the certificate of Aha! is checked on every connection, and no setting turns the check off
+- [implementation] in http mode the server keeps no credential and no data of Aha! after a request is answered
+- [implementation] the server has no direct dependency other than the MCP framework that the deployment template selects
+- [implementation] the entity-catalog is the single source for name resolution, DESCRIBE, the parameter fields, record conversion, value checks, request bodies and the lists in messages; the server has no second list of entities or fields
 - [implementation] no list is read with one request per record
 
 ## EXAMPLES
 
 The examples use FakeAha with the fixture account of the INTERFACES
 section, and every example starts from the unchanged fixture account. The
-ExampleKey is PROD. A tool result is shown as compact JSON: white space
-between the JSON tokens is not part of the expectation, the order of the
-members is. A statement and a message are shown between backticks, which
-are not part of them. "No write request" means that FakeAha recorded no
-ApiCreate, ApiUpdate, ApiDelete and ApiSetCustomFields call.
+INTERFACES section also says in which mode the server runs unless an
+example says otherwise. A tool result is shown as it is returned, and the
+order of its members is part of the expectation. A statement, a command
+line and a message are shown between backticks, which are not part of
+them. "No write request" means that FakeAha recorded no ApiCreate,
+ApiUpdate and ApiDelete call. `stdout` is the standard output and `stderr`
+the standard error of the process.
 
-### EXAMPLE: query_result_envelope (of: query-tool)
+### EXAMPLE: query_result_envelope (of: query)
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id, name, status FROM features WHERE release = 'DEMO-R-3'`
 THEN:
   the tool result is
   `{"entity":"features","scope":"release DEMO-R-3","count":3,"records":[{"id":"DEMO-3","name":"Live dashboard","status":"In development"},{"id":"DEMO-4","name":"Live video feed","status":"Under consideration"},{"id":"DEMO-5","name":"Rider's handbook","status":"Shipped"}]}`
   FakeAha recorded exactly one call: ApiList on /releases/DEMO-R-3/features, page 1
 
-### EXAMPLE: query_rejects_product_parameter (of: query-tool)
+### EXAMPLE: query_rejects_product_parameter (of: query)
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `SELECT id FROM features` and with a
+  the tool query is called with query = `SELECT id FROM features` and with a
   second parameter product = `DEMO`
 THEN:
   the tool result is an error with the message
   `tool query has one parameter: query (one AQL statement). It does not accept: product. Name the product inside the statement: ... WHERE product = 'PROD'`
   FakeAha recorded no call
 
-### EXAMPLE: query_requires_a_statement (of: query-tool)
+### EXAMPLE: query_requires_a_statement (of: query)
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called without parameters
+  the tool query is called without parameters
 THEN:
   the tool result is an error with the message
   `query parameter is required: one AQL statement. Example: SELECT id, name, status FROM features WHERE release = 'PROD-R-3'`
 WHEN:
-  query-tool is called with a query that has three spaces and nothing else
+  the tool query is called with a query that has three spaces and nothing else
 THEN:
   the tool result is the same error
 
-### EXAMPLE: query_refuses_write_statements (of: query-tool)
+### EXAMPLE: query_refuses_write_statements (of: query)
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `UPDATE features SET name = 'X' WHERE id = 'DEMO-1'`
 THEN:
   the tool result is an error with the message
   `query only reads. Use the execute tool for INSERT, UPDATE and DELETE.`
   FakeAha recorded no call
 
-### EXAMPLE: execute_result_envelope (of: execute-tool)
+### EXAMPLE: execute_result_envelope (of: execute)
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `INSERT INTO features (parent, name) VALUES ('DEMO-R-3', 'Export to PDF')`
 THEN:
   the tool result is
   `{"id":"DEMO-7","name":"Export to PDF","parent":"DEMO-R-3","message":"Feature DEMO-7 created"}`
   FakeAha recorded exactly one call: ApiCreate on /releases/DEMO-R-3/features
-  with the field name = `Export to PDF`
+  with the body `{"feature":{"name":"Export to PDF"}}`
 
-### EXAMPLE: execute_rejects_unknown_parameter (of: execute-tool)
+### EXAMPLE: execute_rejects_unknown_parameter (of: execute)
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called without the parameter statement and with a
+  the tool execute is called without the parameter statement and with a
   parameter query = `DELETE FROM features WHERE id = 'DEMO-6'`
 THEN:
   the tool result is an error with the message
   `tool execute has one parameter: statement (one AQL statement). It does not accept: query. Pass the statement as statement.`
   FakeAha recorded no call
 
-### EXAMPLE: execute_refuses_read_statements (of: execute-tool)
+### EXAMPLE: execute_refuses_read_statements (of: execute)
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `SELECT id FROM features WHERE product = 'DEMO'`
 THEN:
   the tool result is an error with the message
   `execute only changes data. Use the query tool for SELECT and DESCRIBE.`
   FakeAha recorded no call
 
+### EXAMPLE: execute_writes_a_log_line (of: execute)
+GIVEN:
+  the fixture account
+  the clock of the test shows 2026-11-13T09:30:00Z
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE features SET status = 'shipped' WHERE id = 'demo-1'`
+THEN:
+  the tool result is
+  `{"id":"DEMO-1","name":"CSV export","status":"Shipped","message":"Feature DEMO-1 status changed to 'Shipped'"}`
+  the diagnostic output has the line
+  `2026-11-13T09:30:00Z execute account=example op=update entity=features id=DEMO-1 result=ok`
+
+### EXAMPLE: execute_logs_a_refused_statement (of: execute)
+GIVEN:
+  the fixture account
+  the clock of the test shows 2026-11-13T09:30:00Z
+WHEN:
+  the tool execute is called with statement =
+  `DELETE FROM features WHERE name = 'CSV export'`
+THEN:
+  the tool result is an error whose message starts with
+  `one statement changes one record: the WHERE must start with id = '...'.`
+  the diagnostic output has the line
+  `2026-11-13T09:30:00Z execute account=example op=none entity=none id=none result=syntax`
+  the diagnostic output does not contain `CSV export` and does not contain `fixture-key`
+  FakeAha recorded no call
+
 ### EXAMPLE: tools_without_read_only_mode (of: tool-registration)
 GIVEN:
-  the AQL tool group is selected and read-only mode is off
+  the setting read_only is false
 WHEN:
   tool-registration runs and an MCP client lists the tools
 THEN:
   the list has `query`, and its only parameter is `query`
   the list has `execute`, and its only parameter is `statement`
-  the list has no tool `describe_aql`
+  the list has no other tool
+  `query` is marked as a tool that only reads, and `execute` as a tool that
+  can delete
   the description of `query` has the line
   `id is the reference number of a record, for example 'PROD-23'.`
 
 ### EXAMPLE: tools_in_read_only_mode (of: tool-registration)
 GIVEN:
-  the AQL tool group is selected and read-only mode is on
+  the setting read_only is true
 WHEN:
   tool-registration runs and an MCP client lists the tools
 THEN:
   the list has `query`
-  the list has no tool `execute` and no tool `describe_aql`
+  the list has no other tool
+
+### EXAMPLE: manual_query_prints_the_tool_result (of: manual-mode)
+GIVEN:
+  the fixture account
+  the environment has AHA_SUBDOMAIN = `example` and AHA_API_KEY = `fixture-key`
+WHEN:
+  manual-mode runs for the command line
+  `mcp-server-aha-aql query query="SELECT id, name FROM features WHERE id = 'demo-1'"`
+THEN:
+  stdout is the line
+  `{"entity":"features","scope":"feature DEMO-1","count":1,"records":[{"id":"DEMO-1","name":"CSV export"}]}`
+  stderr is empty
+  exit_code = 0
+  FakeAha recorded exactly one call: ApiGet on /features/DEMO-1
+  the tool query returns the same text for the same statement in stdio mode
+
+### EXAMPLE: manual_statement_from_standard_input (of: manual-mode)
+GIVEN:
+  the fixture account
+  the environment has AHA_SUBDOMAIN = `example` and AHA_API_KEY = `fixture-key`
+  standard input has the text `SELECT email FROM me` and a line break
+WHEN:
+  manual-mode runs for the command line `mcp-server-aha-aql query query=-`
+THEN:
+  stdout is the line
+  `{"entity":"me","scope":"current user","count":1,"records":[{"email":"test.user@example.com"}]}`
+  exit_code = 0
+
+### EXAMPLE: manual_dry_run_sends_no_write_request (of: manual-mode)
+GIVEN:
+  the fixture account
+  the environment has AHA_SUBDOMAIN = `example` and AHA_API_KEY = `fixture-key`
+WHEN:
+  manual-mode runs for the command line
+  `mcp-server-aha-aql execute dry-run=true statement="UPDATE features SET status = 'shipped' WHERE id = 'DEMO-1'"`
+THEN:
+  stdout is the line
+  `{"id":"DEMO-1","status":"Shipped","message":"would update feature DEMO-1"}`
+  stderr is empty
+  exit_code = 0
+  FakeAha recorded one ApiGet call on /features/DEMO-1
+  no write request
+WHEN:
+  manual-mode runs for the command line
+  `mcp-server-aha-aql execute dry-run=true statement="UPDATE features SET status = 'done' WHERE id = 'DEMO-1'"`
+THEN:
+  stdout is empty
+  stderr contains the line
+  `error: workflow status 'done' not found for feature; valid statuses: Under consideration, In design, Ready to develop, In development, Shipped, Will not implement`
+  exit_code = 1
+  no write request
+
+### EXAMPLE: manual_error_goes_to_standard_error (of: manual-mode)
+GIVEN:
+  the fixture account
+  the environment has AHA_SUBDOMAIN = `example` and AHA_API_KEY = `fixture-key`
+WHEN:
+  manual-mode runs for the command line
+  `mcp-server-aha-aql query query="SELECT id, name FROM releases"`
+THEN:
+  stdout is empty
+  stderr contains the line
+  `error: releases are listed per product: add product = '...' to WHERE. Example: SELECT id, name, release_date FROM releases WHERE product = 'PROD'`
+  exit_code = 1
+
+### EXAMPLE: manual_statement_argument_is_missing (of: manual-mode)
+GIVEN:
+  the environment has AHA_SUBDOMAIN = `example` and AHA_API_KEY = `fixture-key`
+WHEN:
+  manual-mode runs for the command line `mcp-server-aha-aql query`
+THEN:
+  stderr contains the line
+  `error: query needs query=STATEMENT, or query=- to read the statement from standard input`
+  exit_code = 2
+  FakeAha recorded no call
+
+### EXAMPLE: manual_execute_is_refused_in_read_only (of: manual-mode)
+GIVEN:
+  the fixture account
+  the environment has AHA_SUBDOMAIN = `example` and AHA_API_KEY = `fixture-key`
+WHEN:
+  manual-mode runs for the command line
+  `mcp-server-aha-aql execute read-only=true statement="DELETE FROM features WHERE id = 'DEMO-6'"`
+THEN:
+  stderr contains the line `error: execute is not available with read-only=true`
+  exit_code = 2
+  FakeAha recorded no call
+
+### EXAMPLE: account_from_the_environment (of: load-configuration)
+GIVEN:
+  the environment has AHA_SUBDOMAIN = `Example` and AHA_API_KEY = `fixture-key`
+WHEN:
+  load-configuration runs for the command line `mcp-server-aha-aql stdio`
+THEN:
+  the Account has the subdomain `example` and the credential `fixture-key`
+  read_only is false and default_product has no value
+  no request was sent
+
+### EXAMPLE: arguments_take_precedence (of: load-configuration)
+GIVEN:
+  the environment has AHA_SUBDOMAIN = `other` and AHA_API_KEY = `environment-key`
+  the file /run/user/1000/aha-key has the content `fixture-key` and a line
+  break, and only its owner can read it
+WHEN:
+  load-configuration runs for the command line
+  `mcp-server-aha-aql stdio subdomain=example api-key-file=/run/user/1000/aha-key default-product=DEMO read-only=true`
+THEN:
+  the Account has the subdomain `example` and the credential `fixture-key`
+  default_product is `DEMO` and read_only is true
+
+### EXAMPLE: start_without_an_account (of: load-configuration)
+GIVEN:
+  the environment has neither AHA_SUBDOMAIN nor AHA_API_KEY
+WHEN:
+  load-configuration runs for the command line `mcp-server-aha-aql stdio`
+THEN:
+  stderr contains the line
+  `error: no Aha! account. Use subdomain=NAME or set AHA_SUBDOMAIN`
+  exit_code = 2
+  no request was sent
+WHEN:
+  load-configuration runs for the command line
+  `mcp-server-aha-aql stdio subdomain=example`
+THEN:
+  stderr contains the line
+  `error: no credential. Use api-key-file=PATH or set AHA_API_KEY`
+  exit_code = 2
+
+### EXAMPLE: key_file_that_other_users_can_read (of: load-configuration)
+GIVEN:
+  the file /home/user/aha-key has the content `fixture-key`, and its
+  permission bits are 0644
+WHEN:
+  load-configuration runs for the command line
+  `mcp-server-aha-aql stdio subdomain=example api-key-file=/home/user/aha-key`
+THEN:
+  stderr contains the line
+  `error: /home/user/aha-key can be read by other users. Run: chmod 600 /home/user/aha-key`
+  stderr does not contain `fixture-key`
+  exit_code = 2
+
+### EXAMPLE: credential_is_not_an_option (of: load-configuration)
+GIVEN:
+  the environment has AHA_SUBDOMAIN = `example` and no AHA_API_KEY
+WHEN:
+  load-configuration runs for the command line
+  `mcp-server-aha-aql stdio api-key=fixture-key`
+THEN:
+  stderr contains the line
+  `error: unknown option 'api-key' for stdio. Options: subdomain, api-key-file, default-product, read-only`
+  stderr does not contain `fixture-key`
+  exit_code = 2
+
+### EXAMPLE: values_of_the_wrong_form (of: load-configuration)
+GIVEN:
+  the environment has AHA_API_KEY = `fixture-key`
+WHEN:
+  load-configuration runs for the command line
+  `mcp-server-aha-aql stdio subdomain=https://example.aha.io`
+THEN:
+  stderr contains the line
+  `error: subdomain must be the account name before .aha.io, for example mycompany`
+  exit_code = 2
+WHEN:
+  load-configuration runs for the command line
+  `mcp-server-aha-aql stdio subdomain=example read-only=yes`
+THEN:
+  stderr contains the line `error: read-only must be true or false`
+  exit_code = 2
+
+### EXAMPLE: http_mode_starts_without_a_credential (of: load-configuration)
+GIVEN:
+  the environment has AHA_API_KEY = `fixture-key`
+WHEN:
+  load-configuration runs for the command line `mcp-server-aha-aql http`
+THEN:
+  stderr contains the line
+  `error: http mode takes the credential from each request. Remove api-key-file and unset AHA_API_KEY`
+  exit_code = 2
+WHEN:
+  the environment has neither AHA_SUBDOMAIN nor AHA_API_KEY
+  and load-configuration runs for the command line
+  `mcp-server-aha-aql http listen=127.0.0.1:8080`
+THEN:
+  load-configuration returns settings without a subdomain, and no account
+  the server starts and sends no request to Aha!
+
+### EXAMPLE: http_request_brings_its_account (of: request-account)
+GIVEN:
+  the fixture account
+  the server runs in http mode, and the setting subdomain has no value
+WHEN:
+  an MCP client calls the tool query with query = `SELECT email FROM me`
+  and with the headers `Aha-Api-Key: fixture-key` and
+  `Aha-Subdomain: example`, and request-account gives the Account
+THEN:
+  the tool result is
+  `{"entity":"me","scope":"current user","count":1,"records":[{"email":"test.user@example.com"}]}`
+  FakeAha recorded exactly one call: GET https://example.aha.io/api/v1/me
+  with the header `Authorization: Bearer fixture-key`
+
+### EXAMPLE: http_request_without_a_credential (of: request-account)
+GIVEN:
+  the server runs in http mode with the setting subdomain = `example`
+WHEN:
+  an MCP client asks for the tool list without the header Aha-Api-Key,
+  and request-account checks the request
+THEN:
+  the answer has the status 400
+  its body is a JSON-RPC error with the message
+  `no credential. Send the header Aha-Api-Key with an Aha! API key`
+  the answer has no tool list
+  FakeAha recorded no call
+
+### EXAMPLE: http_request_for_another_account (of: request-account)
+GIVEN:
+  the server runs in http mode with the setting subdomain = `example`
+WHEN:
+  an MCP client calls the tool query with the headers
+  `Aha-Api-Key: fixture-key` and `Aha-Subdomain: other`,
+  and request-account checks the request
+THEN:
+  the answer has the status 403
+  its body is a JSON-RPC error with the message
+  `this server works with one Aha! account only`
+  FakeAha recorded no call
+
+### EXAMPLE: http_request_from_a_web_page (of: request-account)
+GIVEN:
+  the server runs in http mode with the setting subdomain = `example`
+WHEN:
+  a request arrives with the headers `Origin: https://pages.example` and
+  `Aha-Api-Key: fixture-key`, and request-account checks the request
+THEN:
+  the answer has the status 403
+  its body is a JSON-RPC error with the message
+  `requests from a web page are not accepted`
+  FakeAha recorded no call
+
+### EXAMPLE: http_requests_share_nothing (of: request-account)
+GIVEN:
+  the fixture account
+  the server runs in http mode with the setting subdomain = `example`
+WHEN:
+  an MCP client calls the tool query with query = `SELECT key FROM products`
+  and with the header `Aha-Api-Key: fixture-key`
+THEN:
+  the tool result is
+  `{"entity":"products","scope":"all products","count":2,"records":[{"key":"DEMO"},{"key":"OTHER"}]}`
+WHEN:
+  a second MCP client calls the tool query with the same statement and with
+  the header `Aha-Api-Key: other-key`, and request-account gives
+  the Account of that request
+THEN:
+  the tool result is an error with the message
+  `Aha! refused the request (status 403): the API key is not valid for the account example, or it has no permission for this record. Repeating the statement does not help.`
+  FakeAha recorded an ApiList call on /products for each of the two requests
 
 ### EXAMPLE: count_per_status (of: read-statement)
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT status, COUNT(*) FROM features WHERE product = 'DEMO' GROUP BY status`
   and read-statement runs it
 THEN:
@@ -2313,7 +2842,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT * FROM features WHERE product = 'DEMO' AND status = 'under consideration'`
   and read-statement runs it
 THEN:
@@ -2324,7 +2853,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `SELECT * FROM features WHERE id = 'demo-3'`
+  the tool query is called with query = `SELECT * FROM features WHERE id = 'demo-3'`
   and read-statement runs it
 THEN:
   `scope` is `feature DEMO-3` and `count` is 1
@@ -2340,7 +2869,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id, assigned_to FROM features WHERE release = 'DEMO-R-2'`
   and read-statement runs it
 THEN:
@@ -2351,7 +2880,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT ref_num, title FROM features WHERE release_id = 'DEMO-R-2'`
   and read-statement runs it
 THEN:
@@ -2362,20 +2891,20 @@ THEN:
 GIVEN:
   the fixture account, in which two feature names start with "Live"
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM features WHERE product = 'DEMO' AND name = 'live'`
   and read-statement runs it
 THEN:
   the tool result is
   `{"entity":"features","scope":"product DEMO","count":0,"records":[],"note":"No feature has exactly the name 'live'. name = compares the whole name; to search inside names use: name CONTAINS 'live'"}`
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM features WHERE product = 'DEMO' AND name CONTAINS 'live'`
 THEN:
   the tool result is
   `{"entity":"features","scope":"product DEMO","count":2,"records":[{"id":"DEMO-3"},{"id":"DEMO-4"}]}`
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM features WHERE product = 'DEMO' AND name = 'offline MAPS'`
 THEN:
   the tool result is
@@ -2385,7 +2914,7 @@ THEN:
 GIVEN:
   the fixture account, which has no feature DEMO-99
 WHEN:
-  query-tool is called with query = `SELECT * FROM features WHERE id = 'DEMO-99'`
+  the tool query is called with query = `SELECT * FROM features WHERE id = 'DEMO-99'`
   and read-statement runs it
 THEN:
   the tool result is
@@ -2396,7 +2925,7 @@ GIVEN:
   the fixture account and, in addition, a product BULK with one release
   BULK-R-1 and 60 features BULK-1 to BULK-60 in it
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id, name FROM features WHERE product = 'BULK'`
   and read-statement runs it
 THEN:
@@ -2409,7 +2938,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `SELECT id, name FROM releases`
+  the tool query is called with query = `SELECT id, name FROM releases`
   and read-statement gets the error of plan-fetch
 THEN:
   the tool result is an error with the message
@@ -2419,7 +2948,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `DESCRIBE features`
+  the tool query is called with query = `DESCRIBE features`
   and describe-statement answers it
 THEN:
   `entity` is `features` and `about` is `Features. Each feature is in one release.`
@@ -2444,7 +2973,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `DESCRIBE`
+  the tool query is called with query = `DESCRIBE`
   and describe-statement answers it
 THEN:
   `entities` has 12 objects, one per catalog entity in catalog order
@@ -2459,25 +2988,25 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `INSERT INTO features (release_id, title, assignee) VALUES ('DEMO-R-2', 'Dark mode', 'me')`
   and insert-statement runs it
 THEN:
   the tool result is
   `{"id":"DEMO-7","name":"Dark mode","parent":"DEMO-R-2","message":"Feature DEMO-7 created"}`
   FakeAha recorded one ApiCreate call on /releases/DEMO-R-2/features with
-  name = `Dark mode` and assigned_to = `test.user@example.com`
+  the body `{"feature":{"name":"Dark mode","assigned_to_user":"test.user@example.com"}}`
 
 ### EXAMPLE: insert_comment_with_apostrophe (of: insert-statement)
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `INSERT INTO comments (parent, body) VALUES ('DEMO-3', 'It''s ready.')`
   and insert-statement runs it
 THEN:
   FakeAha recorded one ApiCreate call on /features/DEMO-3/comments with
-  body = `It's ready.`
+  the body `{"comment":{"body":"It's ready."}}`
   the tool result has, in this order, `id` with the NumericId of the new
   comment, `parent` with `DEMO-3`, `body` with `It's ready.`, `created_at`
   with a timestamp, and `message` with `Comment added to DEMO-3`
@@ -2486,7 +3015,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `INSERT INTO features (name) VALUES ('Dark mode')`
   and insert-statement runs it
 THEN:
@@ -2498,7 +3027,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `INSERT INTO features (parent, name) VALUES ('DEMO', 'Dark mode')`
   and insert-statement runs it
 THEN:
@@ -2510,7 +3039,7 @@ THEN:
 GIVEN:
   the fixture account, which has no release DEMO-R-99
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `INSERT INTO features (parent, name) VALUES ('DEMO-R-99', 'Dark mode')`
   and insert-statement runs it
 THEN:
@@ -2522,21 +3051,21 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `UPDATE features SET status = 'in design' WHERE id = 'demo-2'`
   and update-statement runs it
 THEN:
   the tool result is
   `{"id":"DEMO-2","name":"Offline maps","status":"In design","message":"Feature DEMO-2 status changed to 'In design'"}`
   FakeAha recorded one ApiGet call on /features/DEMO-2 and one ApiUpdate
-  call on /features/DEMO-2 with status = `In design`
+  call on /features/DEMO-2 with the body `{"feature":{"workflow_status":"In design"}}`
   FakeAha recorded no ApiList call on a feature list
 
 ### EXAMPLE: update_assigned_to_me (of: update-statement)
 GIVEN:
   the fixture account, in which the current user is test.user@example.com
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `UPDATE features SET assigned_to = 'me' WHERE id = 'DEMO-2'`
   and update-statement runs it
 THEN:
@@ -2547,7 +3076,7 @@ THEN:
 GIVEN:
   the fixture account, in which DEMO-3 has the status In development
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `UPDATE features SET status = 'Shipped' WHERE id = 'DEMO-3' AND status = 'in development'`
   and update-statement runs it
 THEN:
@@ -2558,7 +3087,7 @@ THEN:
 GIVEN:
   the fixture account, in which DEMO-2 has the name Offline maps
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `UPDATE features SET status = 'Shipped' WHERE id = 'DEMO-2' AND name = 'CSV export'`
   and update-statement runs it
 THEN:
@@ -2571,7 +3100,7 @@ THEN:
 GIVEN:
   the fixture account, which has no feature DEMO-99
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `UPDATE features SET name = 'X' WHERE id = 'DEMO-99'`
   and update-statement runs it
 THEN:
@@ -2583,12 +3112,12 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `UPDATE features SET description = '' WHERE id = 'DEMO-1'`
   and update-statement runs it
 THEN:
-  FakeAha recorded one ApiUpdate call on /features/DEMO-1 whose fields have
-  description with empty text
+  FakeAha recorded one ApiUpdate call on /features/DEMO-1 with the body
+  `{"feature":{"description":""}}`
   the tool result is
   `{"id":"DEMO-1","name":"CSV export","description":null,"message":"Feature DEMO-1 updated"}`
 
@@ -2596,7 +3125,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `UPDATE features SET due_date = 2026-12-01 WHERE id = 'DEMO-1'`
   and update-statement runs it
 THEN:
@@ -2607,7 +3136,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement = `DELETE FROM features WHERE id = 'DEMO-6'`
+  the tool execute is called with statement = `DELETE FROM features WHERE id = 'DEMO-6'`
   and delete-statement runs it
 THEN:
   the tool result is `{"id":"DEMO-6","message":"Feature DEMO-6 deleted"}`
@@ -2618,7 +3147,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement = `DELETE FROM releases WHERE id = 'DEMO-R-4'`
+  the tool execute is called with statement = `DELETE FROM releases WHERE id = 'DEMO-R-4'`
   and delete-statement runs it
 THEN:
   the tool result is `{"id":"DEMO-R-4","message":"Release DEMO-R-4 deleted"}`
@@ -2629,7 +3158,7 @@ THEN:
 GIVEN:
   the fixture account, in which DEMO-6 has the status Under consideration
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `DELETE FROM features WHERE id = 'DEMO-6' AND status = 'Shipped'`
   and delete-statement runs it
 THEN:
@@ -2641,115 +3170,18 @@ THEN:
 GIVEN:
   the fixture account, which has no feature DEMO-99
 WHEN:
-  execute-tool is called with statement = `DELETE FROM features WHERE id = 'DEMO-99'`
+  the tool execute is called with statement = `DELETE FROM features WHERE id = 'DEMO-99'`
   and delete-statement runs it
 THEN:
   the tool result is an error with the message
   `there is no feature with the id 'DEMO-99'`
   no write request
 
-### EXAMPLE: operator_default_product (of: operator-statements)
-GIVEN:
-  the fixture account
-WHEN:
-  operator-statements runs the command for read statements with the option
-  --product DEMO and the statement `SELECT id, name FROM releases`
-THEN:
-  the output has four rows with the ids DEMO-R-1, DEMO-R-2, DEMO-R-3 and
-  DEMO-R-4, in this order
-  the exit status is zero
-
-### EXAMPLE: operator_has_no_default_limit (of: operator-statements)
-GIVEN:
-  the fixture account and, in addition, a product BULK with one release
-  BULK-R-1 and 60 features BULK-1 to BULK-60 in it
-WHEN:
-  operator-statements runs the command for read statements with the
-  statement `SELECT id FROM features WHERE product = 'BULK'`
-THEN:
-  the output has 60 rows
-  no note about a cut is written
-
-### EXAMPLE: operator_update_without_where (of: operator-statements)
-GIVEN:
-  the fixture account
-WHEN:
-  operator-statements runs the command for write statements with the
-  statement `UPDATE features SET name = 'X'`
-THEN:
-  the command ends with an error: the diagnostic stream has the message
-  `UPDATE needs a WHERE clause. To change one record: WHERE id = '...'`
-  the exit status is not zero
-  FakeAha recorded no call
-
-### EXAMPLE: operator_read_command_refuses_writes (of: operator-statements)
-GIVEN:
-  the fixture account
-WHEN:
-  operator-statements runs the command for read statements with the
-  statement `DELETE FROM features WHERE id = 'DEMO-6'`
-THEN:
-  the command ends with an error and the exit status is not zero
-  FakeAha recorded no call
-
-### EXAMPLE: predicate_update_changes_the_selection_only (of: write-by-predicate)
-GIVEN:
-  the fixture account, in which DEMO-1 is the only feature with the status
-  In design
-WHEN:
-  write-by-predicate runs through the command for write statements, with
-  the option --force and the statement
-  `UPDATE features SET status = 'Shipped' WHERE product = 'DEMO' AND status = 'In design'`
-THEN:
-  FakeAha recorded exactly one ApiUpdate call: on /features/DEMO-1 with
-  status = `Shipped`
-  the features DEMO-2 to DEMO-6 are unchanged
-  the exit status is zero
-
-### EXAMPLE: predicate_with_or_is_evaluated (of: write-by-predicate)
-GIVEN:
-  the fixture account
-WHEN:
-  write-by-predicate runs through the command for write statements, with
-  the option --force and the statement
-  `UPDATE features SET tags = 'review' WHERE id = 'DEMO-1' OR id = 'DEMO-2'`
-THEN:
-  FakeAha recorded exactly two ApiUpdate calls: on /features/DEMO-1 and on
-  /features/DEMO-2
-  the features DEMO-3 to DEMO-6 are unchanged
-
-### EXAMPLE: predicate_dry_run_checks_the_values (of: write-by-predicate)
-GIVEN:
-  the fixture account
-WHEN:
-  write-by-predicate runs through the command for write statements, with
-  the option --dry-run and the statement
-  `UPDATE features SET due_date = 'soon' WHERE product = 'DEMO'`
-THEN:
-  the command ends with an error: the diagnostic stream has the message
-  `due_date: invalid date 'soon', use YYYY-MM-DD`
-  the exit status is not zero
-  FakeAha recorded no call
-
-### EXAMPLE: predicate_without_confirmation (of: write-by-predicate)
-GIVEN:
-  the fixture account
-  the operator answers the confirmation with no
-WHEN:
-  write-by-predicate runs through the command for write statements, without
-  the option --force and with the statement
-  `DELETE FROM features WHERE product = 'DEMO' AND status = 'Shipped'`
-THEN:
-  the command shows one selected record, DEMO-5, and asks for confirmation
-  the command ends with an error: nothing was changed and the exit status
-  is not zero
-  no write request
-
 ### EXAMPLE: doubled_apostrophe_in_text (of: tokenize)
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM features WHERE product = 'DEMO' AND name = 'Rider''s handbook'`
   and tokenize reads the doubled apostrophe as one apostrophe
 THEN:
@@ -2760,7 +3192,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM releases WHERE product = 'DEMO' AND release_date > 2026-06-01`
   and tokenize reads the date as a text
 THEN:
@@ -2771,7 +3203,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM features WHERE name = 'Offline maps`
   and tokenize reaches the end of the input inside the text
 THEN:
@@ -2783,7 +3215,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `SELECT id FROM features WHERE name ~ 'x'`
+  the tool query is called with query = `SELECT id FROM features WHERE name ~ 'x'`
   and tokenize reaches the character ~
 THEN:
   the tool result is an error with the message
@@ -2795,7 +3227,7 @@ GIVEN:
   the fixture account, in which the release DEMO-R-4 has the name
   Rider's cup release
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM releases WHERE product = 'DEMO' AND name = 'Rider's cup release'`
   and parse-statement reads it a second time after the strict reading failed
 THEN:
@@ -2806,7 +3238,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM features WHERE release='DEMO-R-3'AND status='Shipped'`
   which parse-statement can read strictly, although an apostrophe stands
   between a digit and a letter
@@ -2818,13 +3250,13 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `FROM releases WHERE product = 'DEMO'`
+  the tool query is called with query = `FROM releases WHERE product = 'DEMO'`
   and parse-statement reads it as `SELECT * FROM releases WHERE product = 'DEMO'`
 THEN:
   the tool result is
   `{"entity":"releases","scope":"product DEMO","count":4,"records":[{"id":"DEMO-R-1","name":"What's next","release_date":null,"parking_lot":true},{"id":"DEMO-R-2","name":"Spring release","release_date":"2026-03-31","parking_lot":false},{"id":"DEMO-R-3","name":"Summer release","release_date":"2026-06-30","parking_lot":false},{"id":"DEMO-R-4","name":"Rider's cup release","release_date":"2026-12-15","parking_lot":false}],"note":"* shows id, name, release_date, parking_lot. Other fields of releases: start_date, status, released, product, progress, description, created_at, url."}`
 WHEN:
-  query-tool is called with query = `COUNT(*) FROM features WHERE product = 'DEMO'`
+  the tool query is called with query = `COUNT(*) FROM features WHERE product = 'DEMO'`
 THEN:
   the tool result is
   `{"entity":"features","scope":"product DEMO","count":1,"records":[{"COUNT(*)":6}]}`
@@ -2833,7 +3265,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM features WHERE product = 'DEMO' LIMIT 5 please`
   and parse-statement finds a token after the statement
 THEN:
@@ -2841,13 +3273,13 @@ THEN:
   `cannot read the statement at position 56 (please): expected the end of the statement, or WHERE, GROUP BY, ORDER BY, LIMIT in this order.`
   FakeAha recorded no call
 
-### EXAMPLE: join_is_refused_for_an_agent (of: parse-statement)
+### EXAMPLE: join_is_refused (of: parse-statement)
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT f.name FROM features f JOIN releases r ON f.release = r.id`
-  and parse-statement runs for an agent caller
+  and parse-statement reads it
 THEN:
   the tool result is an error with the message
   `JOIN is not supported. Read one entity per statement and filter by its parent, for example: SELECT id, name, status FROM features WHERE release = 'PROD-R-3'`
@@ -2856,12 +3288,12 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `DEMO-3` and parse-statement reads it
+  the tool query is called with query = `DEMO-3` and parse-statement reads it
 THEN:
   the tool result is an error with the message
   `DEMO-3 is an id, not a statement. To read that record: SELECT * FROM features WHERE id = 'DEMO-3'`
 WHEN:
-  query-tool is called with query = `features`
+  the tool query is called with query = `features`
 THEN:
   the tool result is an error with the message
   `features is an entity, not a statement. To list its records: SELECT id, name, status FROM features WHERE release = 'PROD-R-3'. To see its fields: DESCRIBE features`
@@ -2870,7 +3302,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `DESCRIBE features WHERE product = 'DEMO'`
+  the tool query is called with query = `DESCRIBE features WHERE product = 'DEMO'`
   and parse-statement reads it
 THEN:
   the tool result is an error with the message
@@ -2880,7 +3312,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `SELECT id FROM features WHERE name = 'it's`
+  the tool query is called with query = `SELECT id FROM features WHERE name = 'it's`
   and parse-statement can read it neither strictly nor a second time
 THEN:
   the tool result is an error whose message contains
@@ -2890,15 +3322,15 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `UPDATE features SET name = 'X' WHERE status = 'Shipped'`
-  and parse-statement runs for an agent caller
+  and parse-statement reads it
 THEN:
   the tool result is an error with the message
   `one statement changes one record: the WHERE must start with id = '...'. Further conditions are joined with AND and have the form field = 'value'. To change several records, find their ids with the query tool and send one statement per record.`
   FakeAha recorded no call
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `UPDATE features SET name = 'X' WHERE id = 'DEMO-1' OR id = 'DEMO-2'`
 THEN:
   the tool result is the same error
@@ -2908,14 +3340,14 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement = `UPDATE features SET name = 'X'`
-  and parse-statement runs for an agent caller
+  the tool execute is called with statement = `UPDATE features SET name = 'X'`
+  and parse-statement reads it
 THEN:
   the tool result is an error with the message
   `UPDATE needs WHERE id = '...' with the id of the one record to change. Forms: INSERT INTO entity (parent, field, ...) VALUES ('parent id', 'value', ...) | UPDATE entity SET field = 'value', ... WHERE id = 'id' | DELETE FROM entity WHERE id = 'id'`
   FakeAha recorded no call
 WHEN:
-  execute-tool is called with statement = `DELETE FROM features`
+  the tool execute is called with statement = `DELETE FROM features`
 THEN:
   the tool result is an error whose message starts with
   `DELETE needs WHERE id = '...' with the id of the one record to change.`
@@ -2925,7 +3357,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `INSERT INTO features (parent, name) VALUES ('DEMO-R-3', 'A'), ('DEMO-R-3', 'B')`
   and parse-statement reads it
 THEN:
@@ -2937,7 +3369,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `INSERT INTO features (parent, name, bogus) VALUES ('DEMO-R-3', 'A', 'x')`
   and parse-statement reads it
 THEN:
@@ -2949,7 +3381,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `UPDATE features SET name = name WHERE id = 'DEMO-1'`
   and parse-statement reads it
 THEN:
@@ -2957,7 +3389,7 @@ THEN:
   `text goes in single quotes: write 'name' instead of name`
   FakeAha recorded no call
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `UPDATE features SET name = name + ' (old)' WHERE id = 'DEMO-1'`
 THEN:
   the tool result is an error with the message
@@ -2968,7 +3400,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `UPDATE features SET due_date = NULL WHERE id = 'DEMO-1'`
   and parse-statement reads it
 THEN:
@@ -2980,26 +3412,38 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `UPDATE users SET name = 'X' WHERE id = '7000000000000000901'`
   and parse-statement reads it
 THEN:
   the tool result is an error with the message
-  `users cannot be changed. Entities that can be changed: products, releases, features, epics, requirements, initiatives, goals, ideas, comments`
+  `users cannot be changed. Entities that can be changed: releases, features, epics, requirements, initiatives, goals, ideas, comments`
+  FakeAha recorded no call
+
+### EXAMPLE: products_cannot_be_changed (of: parse-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool execute is called with statement =
+  `INSERT INTO products (name, key) VALUES ('New product', 'NEW')`
+  and parse-statement reads it
+THEN:
+  the tool result is an error with the message
+  `products cannot be changed. Entities that can be changed: releases, features, epics, requirements, initiatives, goals, ideas, comments`
   FakeAha recorded no call
 
 ### EXAMPLE: describe_and_read_have_the_same_fields (of: entity-catalog)
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `DESCRIBE releases`, and the
+  the tool query is called with query = `DESCRIBE releases`, and the
   entity-catalog gives the fields
 THEN:
   the names in `fields` are id, name, release_date, start_date, status,
   parking_lot, released, product, progress, description, created_at, url,
   in this order
 WHEN:
-  query-tool is called with query = `SELECT * FROM releases WHERE id = 'DEMO-R-2'`
+  the tool query is called with query = `SELECT * FROM releases WHERE id = 'DEMO-R-2'`
 THEN:
   the row has exactly these labels, in the same order
 
@@ -3008,7 +3452,7 @@ GIVEN:
   the fixture account, in which the API record of DEMO-G-1 has the status
   On track under its success metric and no workflow status of its own
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id, status FROM goals WHERE product = 'DEMO'`
   and the entity-catalog gives the two sources of the status
 THEN:
@@ -3019,14 +3463,14 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT name FROM statuses WHERE product = 'DEMO' AND entity = 'features'`
   and the entity-catalog gives the source of the entity statuses
 THEN:
   the tool result is
   `{"entity":"statuses","scope":"product DEMO","count":6,"records":[{"name":"Under consideration"},{"name":"In design"},{"name":"Ready to develop"},{"name":"In development"},{"name":"Shipped"},{"name":"Will not implement"}]}`
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT name FROM statuses WHERE product = 'demo' AND entity = 'feature'`
 THEN:
   the tool result is the same
@@ -3035,7 +3479,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `SELECT email FROM me`
+  the tool query is called with query = `SELECT email FROM me`
   and the entity-catalog gives the source of the entity me
 THEN:
   the tool result is
@@ -3045,14 +3489,14 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT body, user FROM comments WHERE parent = 'DEMO-3'`
   and the entity-catalog gives the comment route of a feature
 THEN:
   the tool result is
   `{"entity":"comments","scope":"feature DEMO-3","count":1,"records":[{"body":"Verified with the provider.","user":"Test User"}]}`
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT body, user FROM comments WHERE feature = 'demo-3'`
 THEN:
   the tool result is the same
@@ -3061,7 +3505,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT feature_id, feature_name FROM features WHERE feature = 'DEMO-5'`
   and resolve-names reads feature and feature_id as id and feature_name as name
 THEN:
@@ -3073,7 +3517,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id, severity FROM features WHERE product = 'DEMO'`
   and resolve-names does not find the word severity
 THEN:
@@ -3085,7 +3529,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `SELECT * FROM tickets`
+  the tool query is called with query = `SELECT * FROM tickets`
   and resolve-names does not find the word tickets
 THEN:
   the tool result is an error with the message
@@ -3095,19 +3539,19 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `SELECT name FROM users WHERE product = 'DEMO'`
+  the tool query is called with query = `SELECT name FROM users WHERE product = 'DEMO'`
   and resolve-names gets the word product on users
 THEN:
   the tool result is an error with the message
   `users cannot be filtered by product. Fields of users: id, name, email, created_at. Example: SELECT name, email FROM users`
 
-### EXAMPLE: custom_field_of_an_agent_caller (of: resolve-names)
+### EXAMPLE: custom_field_word_is_unknown (of: resolve-names)
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id, custom.priority FROM features WHERE product = 'DEMO'`
-  and resolve-names gets the word custom.priority for an agent caller
+  and resolve-names gets the word custom.priority
 THEN:
   the tool result is an error whose message starts with
   `unknown field 'custom.priority' on features. Fields of features: id, name, status,`
@@ -3116,18 +3560,18 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `SELECT id FROM releases WHERE product = 'demo'`
+  the tool query is called with query = `SELECT id FROM releases WHERE product = 'demo'`
   and resolve-product finds the product by its key in lower case
 THEN:
   the tool result is
   `{"entity":"releases","scope":"product DEMO","count":4,"records":[{"id":"DEMO-R-1"},{"id":"DEMO-R-2"},{"id":"DEMO-R-3"},{"id":"DEMO-R-4"}]}`
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM releases WHERE product = '7000000000000000001'`
 THEN:
   the tool result is the same
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM releases WHERE product = 'Demo Product'`
 THEN:
   the tool result is the same
@@ -3136,7 +3580,7 @@ THEN:
 GIVEN:
   the fixture account, in which DEMO and OTHER have one goal each
 WHEN:
-  query-tool is called with query = `SELECT id, name FROM goals WHERE product = 'other'`
+  the tool query is called with query = `SELECT id, name FROM goals WHERE product = 'other'`
   and resolve-product finds the product OTHER
 THEN:
   the tool result is
@@ -3146,7 +3590,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `SELECT id FROM releases WHERE product = 'DEMOX'`
+  the tool query is called with query = `SELECT id FROM releases WHERE product = 'DEMOX'`
   and resolve-product finds no product
 THEN:
   the tool result is an error with the message
@@ -3156,7 +3600,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `SELECT id FROM features WHERE product = 'DEMO-R-3'`
+  the tool query is called with query = `SELECT id FROM features WHERE product = 'DEMO-R-3'`
   and resolve-product gets the id of a release
 THEN:
   the tool result is an error with the message
@@ -3166,7 +3610,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id, release FROM features WHERE release IN ('DEMO-R-1', 'DEMO-R-2')`
   and plan-fetch reads one list per value
 THEN:
@@ -3180,7 +3624,7 @@ GIVEN:
   the fixture account and, in addition, a product BULK with one release
   BULK-R-1 and 60 features BULK-1 to BULK-60 in it
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT COUNT(*) FROM features WHERE product = 'BULK'`
   and plan-fetch takes the count from page 1
 THEN:
@@ -3192,7 +3636,7 @@ THEN:
 GIVEN:
   the fixture account and, in addition, a product BIG with 450 features
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM features WHERE product = 'BIG' ORDER BY id`
   and plan-fetch reads the list to its last page
 THEN:
@@ -3204,7 +3648,7 @@ THEN:
 GIVEN:
   the fixture account and, in addition, a product HUGE with 3100 features
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id, name FROM features WHERE product = 'HUGE' ORDER BY name`
   and plan-fetch learns from page 1 that the list has 16 pages
 THEN:
@@ -3212,7 +3656,7 @@ THEN:
   `this would read 3100 records. Narrow it down, for example with release = 'PROD-R-3'`
   FakeAha recorded exactly one ApiList call on the feature list of HUGE
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id, name FROM features WHERE product = 'HUGE'`
 THEN:
   `count` is 50, `total` is 3100 and `truncated` is true
@@ -3222,7 +3666,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM features WHERE product = 'DEMO' AND release = 'Summer release'`
   and plan-fetch gets a name where the id of a release is needed
 THEN:
@@ -3233,7 +3677,7 @@ THEN:
 GIVEN:
   the fixture account, which has no release DEMO-R-99
 WHEN:
-  query-tool is called with query = `SELECT id FROM features WHERE release = 'DEMO-R-99'`
+  the tool query is called with query = `SELECT id FROM features WHERE release = 'DEMO-R-99'`
   and plan-fetch gets NotFound for the list of the release
 THEN:
   the tool result is an error with the message
@@ -3243,7 +3687,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `SELECT * FROM features WHERE id = 'DEMO-R-3'`
+  the tool query is called with query = `SELECT * FROM features WHERE id = 'DEMO-R-3'`
   and plan-fetch gets the id of a release for the field id of features
 THEN:
   the tool result is an error with the message
@@ -3254,7 +3698,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query = `SELECT body FROM comments`
+  the tool query is called with query = `SELECT body FROM comments`
   and plan-fetch finds no route
 THEN:
   the tool result is an error with the message
@@ -3265,7 +3709,7 @@ GIVEN:
   the fixture account, in which the API records of DEMO-R-2, DEMO-R-3 and
   DEMO-R-4 have no member parking_lot
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id, release_date, parking_lot FROM releases WHERE product = 'DEMO'`
   and convert-record converts the four API records
 THEN:
@@ -3277,7 +3721,7 @@ GIVEN:
   the fixture account, in which the API record of DEMO-1 has the description
   `<p>Export <b>all</b> columns.</p><p>Keep the order.</p>`
 WHEN:
-  query-tool is called with query = `SELECT description FROM features WHERE id = 'DEMO-1'`
+  the tool query is called with query = `SELECT description FROM features WHERE id = 'DEMO-1'`
   and convert-record converts the API record
 THEN:
   the tool result is
@@ -3287,14 +3731,14 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM features WHERE product = 'DEMO' AND (status = 'Shipped' OR status = 'In design')`
   and evaluate-condition evaluates the OR on every record
 THEN:
   the tool result is
   `{"entity":"features","scope":"product DEMO","count":2,"records":[{"id":"DEMO-1"},{"id":"DEMO-5"}]}`
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM features WHERE release = 'DEMO-R-3' AND NOT status = 'Shipped'`
 THEN:
   the tool result is
@@ -3304,7 +3748,7 @@ THEN:
 GIVEN:
   the fixture account, in which the current user is test.user@example.com
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM features WHERE product = 'DEMO' AND assigned_to = 'me'`
   and evaluate-condition compares with the current user
 THEN:
@@ -3315,20 +3759,20 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM releases WHERE product = 'DEMO' AND release_date IS NULL`
   and evaluate-condition tests the field
 THEN:
   the tool result is
   `{"entity":"releases","scope":"product DEMO","count":1,"records":[{"id":"DEMO-R-1"}]}`
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM releases WHERE product = 'DEMO' AND parking_lot = false`
 THEN:
   the tool result is
   `{"entity":"releases","scope":"product DEMO","count":3,"records":[{"id":"DEMO-R-2"},{"id":"DEMO-R-3"},{"id":"DEMO-R-4"}]}`
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM features WHERE release = 'DEMO-R-2' AND assigned_to != 'test.user@example.com'`
 THEN:
   the tool result is
@@ -3338,7 +3782,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT release, COUNT(*) FROM features WHERE product = 'DEMO'`
   and build-rows groups by the selected field
 THEN:
@@ -3349,14 +3793,14 @@ THEN:
 GIVEN:
   the fixture account, in which DEMO-R-1 has no release date
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM releases WHERE product = 'DEMO' ORDER BY release_date`
   and build-rows sorts the rows
 THEN:
   the tool result is
   `{"entity":"releases","scope":"product DEMO","count":4,"records":[{"id":"DEMO-R-2"},{"id":"DEMO-R-3"},{"id":"DEMO-R-4"},{"id":"DEMO-R-1"}]}`
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM releases WHERE product = 'DEMO' ORDER BY release_date DESC`
 THEN:
   the tool result is
@@ -3366,7 +3810,7 @@ THEN:
 GIVEN:
   the fixture account, in which no feature has the status Will not implement
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT COUNT(*) FROM features WHERE product = 'DEMO' AND status = 'Will not implement'`
   and build-rows gets no record
 THEN:
@@ -3377,7 +3821,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  query-tool is called with query =
+  the tool query is called with query =
   `SELECT id FROM features WHERE product = 'DEMO' LIMIT 2`
   and build-rows cuts the rows
 THEN:
@@ -3389,12 +3833,12 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `UPDATE features SET tags = 'export, csv ,' WHERE id = 'DEMO-1'`
   and check-write-values prepares the value
 THEN:
-  FakeAha recorded one ApiUpdate call on /features/DEMO-1 with the two tags
-  `export` and `csv`
+  FakeAha recorded one ApiUpdate call on /features/DEMO-1 with the body
+  `{"feature":{"tags":"export,csv"}}`
   the tool result is
   `{"id":"DEMO-1","name":"CSV export","tags":"export, csv","message":"Feature DEMO-1 updated"}`
 
@@ -3402,7 +3846,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `UPDATE features SET status = 'Done' WHERE id = 'DEMO-2'`
   and check-write-values finds no workflow status with that name
 THEN:
@@ -3414,7 +3858,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `UPDATE features SET due_date = 'next friday' WHERE id = 'DEMO-1'`
   and check-write-values checks the date
 THEN:
@@ -3426,7 +3870,7 @@ THEN:
 GIVEN:
   the fixture account
 WHEN:
-  execute-tool is called with statement =
+  the tool execute is called with statement =
   `UPDATE features SET assigned_to = 'Second User' WHERE id = 'DEMO-2'`
   and check-write-values checks the user
 THEN:
@@ -3434,37 +3878,116 @@ THEN:
   `assigned_to: there is no user 'Second User'. Use an e-mail address, or 'me' for yourself`
   no write request
 
-### EXAMPLE: custom_field_is_compared_as_text (of: custom-field-references)
+### EXAMPLE: body_of_an_update_request (of: write-request)
 GIVEN:
-  the fixture account, in which DEMO-1 and DEMO-2 have the custom field
-  priority with the value High
+  the fixture account
 WHEN:
-  operator-statements runs the command for read statements with the
-  statement
-  `SELECT id, custom.priority FROM features WHERE product = 'DEMO' AND custom.priority = 'High'`
-  and custom-field-references gives the values
+  the tool execute is called with statement =
+  `UPDATE features SET status = 'in design', assigned_to = 'me', due_date = '2026-07-01' WHERE id = 'DEMO-2'`
+  and write-request builds the body
 THEN:
-  the output has two rows, DEMO-1 and DEMO-2
-  the value of custom.priority in both rows is the text High, without
-  quotation marks and not in an encoded form
+  FakeAha recorded one ApiUpdate call on /features/DEMO-2 with the body
+  `{"feature":{"workflow_status":"In design","assigned_to_user":"test.user@example.com","due_date":"2026-07-01"}}`
 
-### EXAMPLE: list_with_custom_fields_ends (of: custom-field-references)
+### EXAMPLE: body_of_a_create_request (of: write-request)
 GIVEN:
-  the fixture account and, in addition, a product BIG with 450 features
+  the fixture account
 WHEN:
-  operator-statements runs the command for read statements with the
-  statement `SELECT id, custom.priority FROM features WHERE product = 'BIG'`
-  and custom-field-references reads the custom fields with the list
+  the tool execute is called with statement =
+  `INSERT INTO releases (parent, name, release_date, description) VALUES ('demo', 'Winter release', '2027-01-31', 'Maintenance only')`
+  and write-request builds the body
 THEN:
-  the output has 450 rows
-  FakeAha recorded the pages 1, 2 and 3 of the feature list of BIG, each
-  once
+  FakeAha recorded one ApiCreate call on
+  /products/7000000000000000001/releases with the body
+  `{"release":{"name":"Winter release","release_date":"2027-01-31","theme":"Maintenance only"}}`
+  the body has no member for the parent
+
+### EXAMPLE: request_address_and_headers (of: aha-request)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query = `SELECT id FROM features WHERE id = 'demo-3'`
+  and aha-request sends the request
+THEN:
+  FakeAha recorded exactly one request:
+  GET https://example.aha.io/api/v1/features/DEMO-3
+  the request has the headers `Authorization: Bearer fixture-key` and
+  `Accept: application/json`
+  its `User-Agent` header starts with `mcp-server-aha-aql/`
+
+### EXAMPLE: too_many_requests_is_sent_again (of: aha-request)
+GIVEN:
+  the fixture account
+  the clock of the test shows 2026-11-13T09:30:00Z
+  FakeAha answers the route /features/DEMO-3 once with the status 429 and
+  the header `X-Ratelimit-Reset: 1794562202`, and after that as usual
+WHEN:
+  the tool query is called with query = `SELECT id FROM features WHERE id = 'DEMO-3'`
+  and aha-request sends the request
+THEN:
+  the clock of the test was asked to wait 2 seconds, once
+  FakeAha recorded two calls on /features/DEMO-3
+  the tool result is
+  `{"entity":"features","scope":"feature DEMO-3","count":1,"records":[{"id":"DEMO-3"}]}`
+
+### EXAMPLE: too_many_requests_three_times (of: aha-request)
+GIVEN:
+  the fixture account
+  FakeAha answers the route /features/DEMO-3 every time with the status 429
+  and without the header X-Ratelimit-Reset
+WHEN:
+  the tool query is called with query = `SELECT id FROM features WHERE id = 'DEMO-3'`
+  and aha-request sends the request
+THEN:
+  the clock of the test was asked to wait 5 seconds, twice
+  FakeAha recorded three calls on /features/DEMO-3
+  the tool result is an error with the message
+  `aha: API error (status 429): too many requests`
+
+### EXAMPLE: redirect_is_not_followed (of: aha-request)
+GIVEN:
+  the fixture account
+  FakeAha answers the route /features/DEMO-3 with the status 302, the header
+  `Location: https://other.example/api/v1/features/DEMO-3` and no text
+WHEN:
+  the tool query is called with query = `SELECT id FROM features WHERE id = 'DEMO-3'`
+  and aha-request sends the request
+THEN:
+  FakeAha recorded exactly one request, and it went to example.aha.io
+  the tool result is an error with the message
+  `aha: API error (status 302) on GET /features/DEMO-3: (no text)`
+
+### EXAMPLE: credential_that_aha_does_not_accept (of: aha-request)
+GIVEN:
+  the fixture account
+  the server runs in stdio mode with the Account of the subdomain `example`
+  and the credential `wrong-key`
+WHEN:
+  the tool query is called with query = `SELECT email FROM me`
+  and aha-request sends the request
+THEN:
+  the tool result is an error with the message
+  `Aha! refused the request (status 403): the API key is not valid for the account example, or it has no permission for this record. Repeating the statement does not help.`
+  the tool result does not contain `wrong-key`
+
+### EXAMPLE: write_request_without_an_answer (of: aha-request)
+GIVEN:
+  the fixture account
+  FakeAha gives no answer to an ApiUpdate call on /features/DEMO-1
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE features SET name = 'CSV export 2' WHERE id = 'DEMO-1'`
+  and aha-request sends the write request
+THEN:
+  FakeAha recorded exactly one ApiUpdate call
+  the tool result is an error with the message
+  `cannot reach Aha!: no answer within 60 seconds. The change may have been made. Read the record before you send the statement again.`
 
 ### EXAMPLE: statements_in_messages_can_be_sent (of: error-messages)
 GIVEN:
   the ExampleKey PROD
 WHEN:
-  parse-statement gets, for an agent caller, each of these statements of
+  parse-statement gets each of these statements of
   the error-messages tables and of the catalog after the placeholders are
   replaced: the example statement of every catalog entity; the five
   example statements of the description of `query`; the three example
@@ -3482,10 +4005,10 @@ THEN:
 ### EXAMPLE: example_key_is_the_default_product (of: choose-example-key)
 GIVEN:
   the fixture account
-  the default product of the server is configured as `demo`
+  the setting default_product is `demo`
 WHEN:
-  choose-example-key runs at the start of the server and an MCP client
-  lists the tools
+  an MCP client lists the tools for the first time and choose-example-key
+  runs
 THEN:
   the description of `query` has the line
   `id is the reference number of a record, for example 'DEMO-23'.`
@@ -3494,10 +4017,10 @@ THEN:
 ### EXAMPLE: example_key_without_a_default_product (of: choose-example-key)
 GIVEN:
   the fixture account
-  no default product is configured
+  the setting default_product has no value
 WHEN:
-  choose-example-key runs at the start of the server and an MCP client
-  lists the tools
+  an MCP client lists the tools for the first time and choose-example-key
+  runs
 THEN:
   the description of `query` has the line
   `Filter by parent: product = 'PROD', release = 'PROD-R-3', feature = 'PROD-23', initiative = 'PROD-S-1'.`
@@ -3506,146 +4029,177 @@ THEN:
 ### EXAMPLE: example_key_is_not_a_product_of_the_account (of: choose-example-key)
 GIVEN:
   the fixture account and, in addition, a product with the key PROD
-  no default product is configured
+  the setting default_product has no value
 WHEN:
-  choose-example-key runs at the start of the server and an MCP client
-  lists the tools
+  an MCP client lists the tools for the first time and choose-example-key
+  runs
 THEN:
   the description of `execute` has the line
   `INSERT INTO features (parent, name) VALUES ('PRODX-R-3', 'Export to CSV')`
   no description contains `'PROD-`
 
+### EXAMPLE: example_key_is_chosen_when_it_is_needed (of: choose-example-key)
+GIVEN:
+  the fixture account
+  the environment has AHA_SUBDOMAIN = `example` and AHA_API_KEY = `fixture-key`
+WHEN:
+  manual-mode runs for the command line
+  `mcp-server-aha-aql query query="SELECT id FROM features WHERE id = 'DEMO-3'"`
+THEN:
+  stdout is the line
+  `{"entity":"features","scope":"feature DEMO-3","count":1,"records":[{"id":"DEMO-3"}]}`
+  FakeAha recorded no ApiList call on /products, because the result shows
+  no example
+WHEN:
+  manual-mode runs for the command line
+  `mcp-server-aha-aql query query="SELECT id FROM bugs"`
+  and choose-example-key runs for the message
+THEN:
+  stderr contains the line
+  `error: unknown entity 'bugs'. Entities: products, releases, features, epics, requirements, initiatives, goals, ideas, comments, users, statuses, me. Example: SELECT id, name, status FROM features WHERE release = 'PROD-R-3'`
+  exit_code = 1
+  FakeAha recorded exactly one call: ApiList on /products
+
+### EXAMPLE: example_key_when_the_product_list_cannot_be_read (of: choose-example-key)
+GIVEN:
+  the fixture account
+  the setting default_product is `demo`
+  FakeAha gives no answer to an ApiList call on /products
+WHEN:
+  an MCP client lists the tools for the first time and choose-example-key
+  runs
+THEN:
+  the tool list is returned, with `query` and `execute`
+  the description of `query` has the line
+  `id is the reference number of a record, for example 'PROD-23'.`
+  the diagnostic output has a warning, and the warning does not contain
+  `fixture-key`
+
 ## DEPENDENCIES
 
-No new dependency. The amendment uses what the base version uses: its
-client for the Aha! REST API and for the GraphQL endpoint, and its MCP
-server library.
+The only direct dependency is the MCP framework that the deployment
+template selects. HTTPS, TLS and JSON come from the standard library of
+the language. convert-record describes the conversion of HTML to text
+completely, so that it needs no library.
+
+The server uses no part of aha-studio: no source file, no package and no
+generated client.
 
 ## DEPLOYMENT
 
-As in the base version. The MCP server runs on standard input and output
-or on HTTP. The command line tool has commands for read statements, for
-write statements, for the interactive shell and for the HTTP service. The
-amendment adds no binary, no configuration file and no environment
-variable.
+Runtime: one static binary, `mcp-server-aha-aql`. It has three modes: an
+MCP server on standard input and output, an MCP server on HTTP, and a
+command that makes one tool call and ends.
 
-Two existing settings change their effect. The default product of the MCP
-server no longer limits the statements of the tool `query`; it only chooses
-the ExampleKey (see choose-example-key). The option --product of the
-command line limits read statements of every entity that has a product
-route (see plan-fetch, step 6).
+Invocation:
 
-## DELTA
+```
+mcp-server-aha-aql stdio   [subdomain=NAME] [api-key-file=PATH] [default-product=PRODUCT] [read-only=true]
+mcp-server-aha-aql http    [listen=HOST:PORT] [subdomain=NAME] [default-product=PRODUCT] [read-only=true]
+mcp-server-aha-aql query   query=STATEMENT [subdomain=NAME] [api-key-file=PATH] [default-product=PRODUCT] [read-only=true]
+mcp-server-aha-aql execute statement=STATEMENT [dry-run=true] [subdomain=NAME] [api-key-file=PATH] [default-product=PRODUCT] [read-only=true]
+```
 
-This section is not normative. The BEHAVIOR sections above describe the
-target. This section lists what a series of patches changes in aha-studio
-0.12.0 to reach the target, what stays as it is, and what the rules rest
-on. The defects of the base version were observed against a local HTTP
-mock of the Aha! API and in its source text.
+The first word:
 
-### Read path: from the base version to the target
+| Word | Effect |
+|---|---|
+| stdio | MCP on standard input and output, as the deployment template says |
+| http | MCP on HTTP, as the deployment template says |
+| query | Manual mode: one call of the tool `query` |
+| execute | Manual mode: one call of the tool `execute` |
 
-| # | Base version 0.12.0 | Target | Where |
-|--:|---|---|---|
-| 1 | A condition on status is lost. The feature list is requested without it, and the records of a list have no status, release or assignee | Conditions are evaluated on complete records | plan-fetch, convert-record, evaluate-condition |
-| 2 | OR and NOT are not evaluated. Such a statement returns every record | Every form of condition is evaluated | evaluate-condition |
-| 3 | `=` on name is sent as a search, and its results are not checked | `=` is equality and CONTAINS is the search | plan-fetch, evaluate-condition |
-| 4 | A filter on a release costs one list request and one request per feature of the account | One request per page on the route of the parent | plan-fetch |
-| 5 | The aggregate example of the help tool returns one group with status null | Aggregates over complete records, with groups in a fixed order | build-rows |
-| 6 | A statement without LIMIT returns the first page as if it were complete | For an agent caller a default limit with count, total, truncated and a note; for an operator caller every row | read-statement, build-rows |
-| 7 | The product comes from a tool parameter or an option, and an error tells the reader to use an option of the command line | The product is a condition of the statement, and every result gives its scope | query-tool, plan-fetch, error-messages |
-| 8 | `id` is the internal number and the reference number is a second field | `id` is the reference number in conditions and in results; the internal number is accepted wherever an id is accepted | entity-catalog, convert-record |
-| 9 | A doubled apostrophe is a parse error. A text that is not closed is reported as a missing FROM clause at line 0: the error of the tokenizer is ignored | Both are read or reported as what they are, with the position | tokenize, parse-statement |
-| 10 | The error for an unknown entity lists four of the eleven entities, and the help tool lists four entities and no fields | Every list comes from the catalog; DESCRIBE lists every field | resolve-names, describe-statement, error-messages |
-| 11 | Two examples of the help tool do not parse, and the example in the description of `query` returns records that do not satisfy it | Every example that the server shows is accepted by the parser and evaluated | error-messages, INVARIANTS |
-| 12 | A custom field value is returned in an encoded form and never equals a text. Its list is requested again and again without a page number | Plain values, comparisons that match, and a list that ends | custom-field-references |
+The options and their defaults are in the table of load-configuration.
 
-### Write path: from the base version to the target
+Where the account name and the credential come from:
 
-| # | Base version 0.12.0 | Target | Where |
-|--:|---|---|---|
-| 1 | An UPDATE whose condition is lost (status, OR, NOT, equality on name) changes every record of the list | An agent caller changes one record, found by its id, with guards. An operator caller changes exactly the records that the same WHERE clause selects in a read statement | update-statement, write-by-predicate |
-| 2 | Input after a complete statement is ignored: `SET name = name + ' (old)' WHERE ...` renames every record to the text name, and a second row of VALUES is ignored | Leftover input is an error for every statement kind | parse-statement |
-| 3 | An UPDATE without WHERE changes every record | Refused for every caller | parse-statement |
-| 4 | An unknown column of INSERT is ignored. An unknown field of UPDATE is found only after the records were listed, and not in a dry run | Every name is checked before the first request, also in a dry run | parse-statement, resolve-names |
-| 5 | An empty value is skipped, and the call still reports one changed record | Empty text is sent. NULL is refused with a message | update-statement, parse-statement |
-| 6 | The record of `WHERE id = ...` is found by listing every record of the account | One request by id | update-statement, delete-statement |
-| 7 | DELETE is parsed and always fails | DELETE for eight entities | delete-statement |
-| 8 | INSERT exists for features only, and the release comes from an option | INSERT for nine entities, with the parent as a column | insert-statement |
-| 9 | The write path checks no names: an unknown field in WHERE matches nothing | Names are resolved as in a read statement | parse-statement, resolve-names |
-| 10 | The MCP server has no tool for write statements | The tool `execute`, absent in read-only mode | execute-tool, tool-registration |
+| Mode | Account name | Credential |
+|---|---|---|
+| stdio, manual | The option `subdomain`. Without it, the variable AHA_SUBDOMAIN | The file of the option `api-key-file`. Without it, the variable AHA_API_KEY |
+| http | The option `subdomain` or the variable AHA_SUBDOMAIN. Without both, the header `Aha-Subdomain` of each request | The header `Aha-Api-Key` of each request |
 
-### New in the language
+Manual mode at a shell. The statement is in double quotes, because AQL
+writes text in single quotes:
 
-- DESCRIBE as a statement. It replaces the tool `describe_aql`.
-- The entities statuses and me, and the value `me` for user fields.
-- The other names of entities and fields, the entity's own name as a field, and labels that keep the word of the statement.
-- The second reading for an apostrophe inside a word, and a date without quotes.
-- Guards next to the id in UPDATE and DELETE.
-- The ExampleKey in descriptions and messages.
-- The entity-catalog as the single table behind live execution.
+```
+mcp-server-aha-aql query query="SELECT id, name, status FROM features WHERE release = 'DEMO-R-3'"
+mcp-server-aha-aql query query=- < statement.aql
+mcp-server-aha-aql execute dry-run=true statement="UPDATE features SET status = 'Shipped' WHERE id = 'DEMO-23'"
+```
 
-### What users of the base version will notice
+Use with an MCP host. The host starts the server in stdio mode, and the
+configuration of the host gives the settings. It can give them as
+arguments of the command or as environment variables of the process. Both
+ways lead to the same Account. An example for the MCP host kit, with the
+credential in a file that only the user can read:
 
-- The tool `query` has one parameter. A call with `product` is answered with an error that shows where the product goes.
-- The default product of the MCP server no longer limits the statements of `query`.
-- The result of `query` is an object with entity, scope, count and records. Rows have exactly the selected fields.
-- The tool `describe_aql` is gone.
-- `id` is the reference number. A statement that compares `id` with an internal number still works.
-- `=` on name finds only a name that is equal from its first to its last character.
-- An agent caller gets at most 50 rows without LIMIT and 200 with it, and cannot use JOIN, HAVING, subqueries and OFFSET. The command line keeps them.
-- At the command line, an UPDATE without WHERE is refused, and an UPDATE or DELETE with a condition changes fewer records than before wherever the base version lost the condition.
+```yaml
+mcpServers:
+  aha:
+    type: local
+    command: ["mcp-server-aha-aql", "stdio", "subdomain=mycompany", "api-key-file=/home/me/.config/aha/api-key", "default-product=DEMO"]
+```
 
-### Unchanged, and out of scope
+The same with the credential in the environment of the server process:
 
-- Offline execution from the local cache, and the commands that fill the cache. After this change `id` is the reference number in live execution and the internal number in offline execution. Whether offline execution follows is an open point.
-- For an operator caller: JOIN, HAVING, subqueries, relative time values, the `release.` qualifier, the entity tags, saved queries and the output formats.
-- Custom fields for an agent caller.
-- The other tools of the MCP server. This specification removes none of them except `describe_aql`.
-- The calls of the Aha! API that do not create, read, change or delete one record. The analysis counts 37 such calls among 344. A tool for them is a separate specification.
-- Entities beyond the twelve of the catalog. The analysis counts 60 entities behind the 307 other calls. A further entity is one more entry in the catalog.
-- Three defects of the other tools that came up during the tests:
-  - the release list reports a released release as not released;
-  - the feature tool returns no release, initiative, assignee or dates;
-  - the MCP server of version 0.12.0 reports the version 0.8.0.
-- The documentation of the base version, which has to follow this specification. Today it documents comments inside statements, which no version accepts, and uses `votes_count` for the field `votes`.
+```yaml
+mcpServers:
+  aha:
+    type: local
+    command: ["mcp-server-aha-aql", "stdio", "default-product=DEMO"]
+    environment:
+      AHA_SUBDOMAIN: mycompany
+      AHA_API_KEY: "<the API key>"
+```
 
-### What the rules rest on
+With the second form the configuration file of the host has a secret, and
+it needs the protection of a key file.
 
-- The read rules were tested as a prototype outside aha-studio, with read requests against one account on 2026-11-12. That account has about 1,200 features; the tested product has 35.
-- The write rules were tested against a mock that accepts what Aha! is expected to accept. No write request was sent to Aha!.
-- With the two tools of this specification, one small local model answered 48 of 50 test requests and 15 of 15 held-out requests at temperature 0. The 74 tools of the base version, in the same series, gave 48 of 50 and 14 of 15. The two tool definitions have 2.1 KB, the 74 have 29.3 KB.
-- With a product key of the account in the examples that the requests were not about, 4 of 50 requests failed because the model read that product. This is the reason for choose-example-key.
-- Every route of the catalog is in the description of the Aha! API that the analysis used. The test report states that the feature lists of a release, an initiative and a product accept the parameter `fields`, as do the product lists of releases, initiatives, goals and ideas, and that a page size of 200 is accepted.
-- The writable fields of the catalog come from a draft table. They were not checked against the Aha! API. The draft also had start and end dates for goals; they are left out because the catalog cannot read them.
-- Text fields are sent as the statement has them. Whether Aha! needs HTML for a line break in a description or a comment was not tested.
+HTTP mode. The server starts without a credential, for example from the
+systemd unit of the package:
 
-### Where this specification differs from the tested prototype
+```
+mcp-server-aha-aql http listen=127.0.0.1:8080 subdomain=mycompany
+```
 
-- It has two callers. The prototype had the agent caller only. The rules for the operator caller are not tested. They are the default product, the absence of limits, the kept constructs of the base version, the fields of the base version outside the catalog, and write-by-predicate.
-- On the account-wide list, the search text of `name CONTAINS` is sent to the API and the condition is still evaluated on every record. The prototype relied on the search of the API.
-- A list with too many pages is refused after page 1. The prototype read max_pages pages first. The hint of that message depends on the list that was read.
-- `COUNT(*)` alone is answered from the record count of page 1 when the route applies every conjunct of the WHERE condition. The prototype read every page.
-- The limits of an agent caller also cut the rows of a grouped result. The prototype cut them only by a LIMIT of the statement.
-- A message lists at most MaxListed records or product keys.
-- Comments accept the spellings of product as other names of parent. The prototype listed product as a filter of comments and did not accept the word.
-- A product condition on users has its own message. In the prototype that message could not be reached.
-- Some spellings that the prototype accepted are left out:
-  - `notes` as another name of comments. Aha! has notes of its own.
-  - `desc` as another name of description. DESC is a keyword.
-  - SHOW and DESC as other spellings of DESCRIBE, names in backticks, `==` and ILIKE. The test report does not say that the model wrote them.
-- The example statements of products and users have no name filter. The prototype's examples had search words of the test data.
-- Four messages differ:
-  - the failed guard has no status number;
-  - the refusal of a WHERE without id also says how guards are written;
-  - a field that cannot be set is not called unknown;
-  - a parent that does not exist is reported with a statement that finds it, also for comments.
-- A guard is checked on every field of the catalog. The mock of the tests knew three fields.
-- NULL as a value of SET is refused, as in the prototype. The analysis expected that a field can be cleared with it. This is an open point.
+Every MCP client then sends its own credential in the header
+`Aha-Api-Key`. This version does not use the authorization of the MCP
+specification. The http transport of the deployment template speaks plain
+HTTP. On an address that is not a loopback address, a TLS endpoint in
+front of the server is necessary, because every request has a credential.
 
-### Proposals of the test report that are not applied
+Authentication with OAuth: this version has no OAuth flow. Aha! accepts an
+OAuth2 access token wherever it accepts an API key. A token that was
+obtained in another way can therefore be used as the credential.
 
-Both are untested, so the descriptions keep the tested text:
+Output streams:
 
-- form lines whose placeholder words cannot be read as names, for example `<entity>` and `<field>`;
-- the filter line without `feature = '...'`, or with a note that it is for requirements and comments.
+| Stream | Content |
+|---|---|
+| standard output | The MCP messages in stdio mode. The tool result in manual mode. Not used in http mode |
+| standard error | The diagnostic output: start messages, warnings, and the log lines of `execute`. In manual mode also the error line |
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | Manual mode: the tool returned a result. stdio and http: the server ended as the deployment template says |
+| 1 | Manual mode: the statement failed with an AqlError. http: see the deployment template |
+| 2 | The command line or the configuration is wrong: start messages G01 to G11, and an unknown first word as the deployment template says |
+
+External services:
+
+| Service | Address | Use |
+|---|---|---|
+| Aha! REST API, version 1 | `https://<subdomain>.aha.io/api/v1`, port 443 | Every read and every write. The server contacts no other host |
+
+Deviations from the deployment template:
+
+| Template key | The template says | This specification says |
+|---|---|---|
+| CONFIG-ENV-VARS | No configuration from environment variables | The two variables AHA_SUBDOMAIN and AHA_API_KEY are read. A credential must not be an argument of a process, and the configuration of an MCP host gives values to a local server as arguments or as environment variables |
+| TRANSPORT-SELECTION | The first word selects a transport: stdio or http | The first word can also be `query` or `execute`. These two select no transport. They make one tool call and end |
+| ERROR-HANDLING | All errors are JSON-RPC error responses | A statement that fails is answered with a tool result that is marked as an error, so that the language model reads the message. Protocol errors and internal errors are JSON-RPC error responses |
+
+Platform: as the deployment template says. The check of the permission
+bits of the key file applies on Linux and macOS.

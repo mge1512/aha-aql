@@ -1,3 +1,4 @@
-# Changelog of aha-studio-aql.spec.md
+# Changelog of aha-aql.spec.md
 
+- 2026-11-13: Version 0.2.0. The specification now describes a new MCP server, mcp-server-aha-aql, on the template mcp-server, and no longer an amendment of aha-studio. New are manual mode, configuration from options and two environment variables, an account per request in http mode, and own HTTPS requests to Aha!. The operator profile, writes by predicate, custom field references, writes on products and DELTA are removed; the file was aha-studio-aql.spec.md until 0.1.0.
 - 2026-11-13: Version 0.1.0. First version: the amended AQL of aha-studio on the base version 0.12.0. It has the two MCP tools query and execute, the entity catalog, a read path that evaluates every condition on complete records, and write statements that change one record found by its id. It follows the analysis of 2026-11-11 and the test results of 2026-11-12, and it is the input for patches to the upstream project.
