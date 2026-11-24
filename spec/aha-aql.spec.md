@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.11.0
+Version:      0.12.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -381,7 +381,8 @@ operation finds its result in that object:
 |---|---|---|
 | ApiGet, ApiCreate and ApiUpdate for one record | One member, with an object as its value. The name of the member is the singular of the record: `feature`, `release`, `epic`, `requirement`, `initiative`, `goal`, `idea`, `comment` or `product`. For /me it is `user` | That object is the ApiRecord |
 | ApiList | The records are the list in the member that has the name of the last part of the route: `features` for /releases/{release}/features, `custom_field_definitions` for /custom_field_definitions. The member `pagination` is an object with the numbers `total_records` and `total_pages` | The ListPage. Without the member `pagination` the list is complete, as ApiList says |
-| ApiGet on /products/{product}/workflows | The member `workflows` is a list. A workflow has the member `statusable_type`, which is the record type of the workflow, and the member `workflow_statuses`, a list of objects with `name`, `position` and `complete` | One record per workflow status, as the entity statuses says |
+| ApiGet on /products/{product} | The record of the product, in the member `product`. For each record kind it has a member whose name ends in `_workflow`, for example `feature_workflow` and `epic_workflow`. The value of such a member is an object with the member `id`, the id of a workflow | The workflow of each record kind, as the entity statuses says |
+| ApiGet on /products/{product}/workflows | The member `workflows` is a list. A workflow has the member `id` and the member `workflow_statuses`, a list of objects with `name`, `position` and `complete` | The statuses of each workflow, as the entity statuses says |
 | ApiGet on /custom_field_definitions/{definition}/options | The member `options` is a list of objects with the member `text` | The options, as custom-fields says |
 
 An answer with such a status that does not have this form is a failure:
@@ -440,12 +441,22 @@ Users: the current user is Test User, e-mail test.user@example.com, id
 7000000000000000900. A second user is Second User, e-mail
 second.user@example.com, id 7000000000000000901.
 
-Workflow statuses of features in DEMO, in workflow order: Under
-consideration, In design, Ready to develop, In development, Shipped, Will
-not implement.
+Workflows of DEMO. The list of workflows of the product has these five
+workflows, in this order. The record of the product names each of them in
+the members of the middle column:
 
-Workflow statuses of goals in DEMO, in workflow order: Not started, On
-track, At risk, Achieved.
+| Workflow id | Members of the product record | Statuses, in workflow order |
+|---|---|---|
+| 401 | feature_workflow, epic_workflow, requirement_workflow | Under consideration, In design, Ready to develop, In development, Shipped, Will not implement |
+| 402 | release_workflow | Planned, In progress, Shipped |
+| 403 | initiative_workflow | Not started, In progress, Done |
+| 404 | strategic_imperative_workflow | Not started, On track, At risk, Achieved |
+| 405 | idea_workflow | Needs review, Planned, Shipped |
+
+The list of workflows writes these ids as JSON numbers, and the record of
+the product writes them as JSON strings. The workflow 401 has the record
+type Feature. No workflow of the fixture account has the record type Epic
+or Requirement. OTHER names the same five workflows.
 
 Releases of DEMO:
 
@@ -1753,7 +1764,7 @@ exceptions are:
 | About | The workflow statuses a record can have, per product and entity. |
 | Default fields | name, entity |
 | Other field names | status, id, title mean name. type, entity_type, kind mean entity |
-| Read | GET /products/{product}/workflows. A conjunct product = value is required. One record per workflow status of each workflow, in workflow order |
+| Read | GET /products/{product} and GET /products/{product}/workflows. A conjunct product = value is required. One record per entity and workflow status, as the text below says |
 | Parent filters | product, entity |
 | Custom fields | none |
 | Create, update, delete | not offered |
@@ -1762,28 +1773,45 @@ exceptions are:
 | Field | Type | API source | Writable | Notes |
 |---|---|---|---|---|
 | name | string | name of the workflow status | no | |
-| entity | string | record type of the workflow | no | Converted to an entity name, see below |
+| entity | string | the member of the product that names the workflow | no | Converted to an entity name, see below |
 | position | number | position of the workflow status | no | |
 | complete | boolean | complete flag of the workflow status | no | false when the API record has no value |
 | product | key | none | no | The product of the statement |
 
-The record type of a workflow gives the value of `entity`:
+The record of a product names the workflow of each record kind in a
+member whose name ends in `_workflow`. The value of that member is an
+object, and its member `id` is the id of a workflow in the list of
+workflows of the product. The statuses of that workflow are the statuses
+of the kind. Aha! writes such an id as a JSON number or as a JSON string.
+Two ids are the same when their digits are the same.
 
-| Record type of the workflow | Value of `entity` |
+| Member of the product | Value of `entity` |
 |---|---|
-| Feature | features |
-| Release | releases |
-| Idea | ideas |
-| Initiative | initiatives |
-| StrategicImperative | goals |
-| Epic, MasterFeature | epics |
-| Requirement | requirements |
-| KeyResult | key_results |
-| Page | pages |
-| any other | the record type in lower case |
+| release_workflow | releases |
+| feature_workflow | features |
+| epic_workflow | epics |
+| requirement_workflow | requirements |
+| initiative_workflow | initiatives |
+| strategic_imperative_workflow | goals |
+| idea_workflow | ideas |
+| key_result_workflow | key_results |
+| page_workflow | pages |
+| any other member whose name ends in `_workflow` | the part of the name before `_workflow` |
+
+The records are in the order of this table. The members of the last row
+follow in the order of their names. Within one entity the records are in
+the order of the workflow. Several kinds can name one workflow. Its
+statuses are then delivered once for each of these entities. A member
+that is not an object gives no record, and so does a member whose
+workflow is not in the list of workflows.
+
+The record type of a workflow, its member `statusable_type`, does not say
+which entities use it. Features, epics and requirements can share one
+workflow, and its record type is then Feature.
 
 A condition on `entity` accepts every spelling that resolve-names accepts
-for that entity. It also accepts the record type itself.
+for that entity. It also accepts the part of the member name before
+`_workflow`, for example `strategic_imperative` for goals.
 
 ### ENTITY: me
 
@@ -2068,7 +2096,7 @@ STEPS:
    a. me: one ApiGet on /me. Scope: "current user".
    b. products: the product list, as resolve-product reads it. Scope: "all products". When used_fields has a custom field, the list is read for this statement with `custom_fields` in the parameter `fields`, and step 8 e applies. This reading does not replace a product list that is kept.
    c. users: the list /users, read as step 8 says. Scope: "all users".
-   d. statuses: the WHERE condition must have a conjunct `product = value`; otherwise → scope, message C01. Run resolve-product with hints for the value; on failure → the error of resolve-product. Call ApiGet on the workflow route of the product. Every workflow status of every workflow in the answer is one record. Scope: "product <KEY>". The conjunct is applied.
+   d. statuses: the WHERE condition must have a conjunct `product = value`; otherwise → scope, message C01. Run resolve-product with hints for the value; on failure → the error of resolve-product. Call ApiGet on /products/{product} and ApiGet on /products/{product}/workflows, both with the NumericId of the product. The record of the product names the workflow of each record kind, and the entity statuses says which records the two answers give. Scope: "product <KEY>". The conjunct is applied.
 2. Route by an id or a parent. Go through the read routes of the entity in catalog order and leave out the route of the field `product`. Take the first route whose field a conjunct of the WHERE condition compares with `=`. When several conjuncts compare that field, take the first in the order of the statement. Read the route as step 3 says. The conjunct is applied.
 3. Reading one route for one value.
    a. Field `id`: the value must be a ReferenceNumber of the entity's kind or a NumericId. For comments it must be a NumericId. Any other value → wrong_kind, with the message that step 4 gives. Call ApiGet on the id route. NotFound gives no record and no error. Scope: "<singular> <id>". The id is written as the record has it. When there is no record, it is the id of the statement in capital letters.
@@ -2157,7 +2185,7 @@ STEPS:
    - a field of the type reference: the NumericId and the name of the referenced record, where the API record has them.
    - `user` of comments: the e-mail address and the NumericId of the user.
    - `parent` of comments: the NumericId of the commented record.
-   - `entity` of statuses: the singular of the entity and the record type of the workflow.
+   - `entity` of statuses: the singular of the entity and the part of the member name before `_workflow`.
    - a custom field of the kind users: the names of its users, joined by a comma and a space. The NumericIds of its users, joined in the same way, are a second spelling.
 
 POSTCONDITIONS:
@@ -2302,10 +2330,10 @@ STEPS:
 7. reference: the value must be a ReferenceNumber of the kind of the field, or a NumericId. It is sent in capital letters. For a value of another form: when resolve-product finds it as a product → wrong_kind, message W24. The records of that kind in the product are read for the message with one list request. Any other value → not_found, message W25.
 8. The field `tags`: the text is split at commas into tags. White space around a tag is removed and an empty tag is left out.
 9. status, unless form_only is true.
-   a. Take the workflow statuses of the entity in the product, in workflow order, as plan-fetch reads them for the entity statuses.
+   a. Take the workflow statuses of the entity in the product, in workflow order, as plan-fetch reads them for the entity statuses. The record of the product names the workflow of the entity, and the list of workflows has its statuses. In stdio mode both answers may be kept between statements.
    b. For a new record the product is the product of the parent. When the parent is a record, read it with ApiGet on its id route to learn its product; NotFound → not_found, message W25.
    c. Compare the value with the names of the statuses. The comparison is the equality of text of evaluate-condition. The name is sent as the workflow writes it.
-   d. Without a match, read the statuses again when they were kept from an earlier statement, and compare once more. Still without a match → bad_value, message W21.
+   d. Without a match, read both answers again when they were kept from an earlier statement, and compare once more. Still without a match → bad_value, message W21. This is also the error when the product names no workflow for the entity.
 10. A custom field, by its kind. The table of values to set in custom-fields gives the accepted value and the form that is sent.
    a. text, url, note and choice: the value must be Text; otherwise → bad_value, message W28.
    b. number: as step 3. date: as step 5.
@@ -2692,7 +2720,8 @@ In W18, `<parent text>` is `a release`, `a product`, `a feature` or `the
 record to comment on`. In W19, `<field>` is the field that is missing:
 `name`, `body` for a comment, or `success_metric` for a goal. For a goal
 without both it is `name`. In W21, `<names>` are the names of the workflow
-statuses in workflow order, joined by a comma and a space.
+statuses in workflow order, joined by a comma and a space. When the
+product names no workflow for the entity, `<names>` is `(none)`.
 
 In W25, `<PRODUCT>` is the key of the product of the record that the
 statement changes. Without such a record it is the part of the value
@@ -2797,6 +2826,7 @@ ERRORS:
 - The Aha! API lists the custom field definitions of an account on /custom_field_definitions. Each definition has an id, a key, a name, a type and the record type that it belongs to. The API is documented so. This was not observed on an account.
 - The Aha! API returns the member `custom_fields` with a record that is read by its id. It also returns that member with the records of a list when the parameter `fields` names it. The first is documented. The second follows from the documentation of `fields` and was not observed.
 - The Aha! API accepts the member `custom_fields` in an update, next to other members, with one value per key. The documentation shows a text value. The forms of write-request for numbers, tags, users and notes are not documented and were not observed.
+- The record of a product names the workflow of each record kind in a member whose name ends in `_workflow`. The list of workflows of the product has that workflow. This was observed on two products of one account on 2026-11-24, where features, epics and requirements named one workflow. The API documentation shows the same members.
 - The Aha! API creates a goal only when the request has a success metric with a name. An update takes the status of a goal as `workflow_status`. Both were observed on one account on 2026-11-24. The documentation shows the status of a new goal inside `success_metric`; this form was not observed. The form of write-request for a new text of the success metric in an update was not observed either.
 
 ## POSTCONDITIONS
@@ -4231,7 +4261,8 @@ THEN:
 
 ### EXAMPLE: statuses_of_an_entity (of: entity-catalog)
 GIVEN:
-  the fixture account
+  the fixture account, in which the record of DEMO names the workflow 401
+  for features, for epics and for requirements
 WHEN:
   the tool query is called with query =
   `SELECT name FROM statuses WHERE product = 'DEMO' AND entity = 'features'`
@@ -4239,11 +4270,24 @@ WHEN:
 THEN:
   the tool result is
   `{"entity":"statuses","scope":"product DEMO","count":6,"records":[{"name":"Under consideration"},{"name":"In design"},{"name":"Ready to develop"},{"name":"In development"},{"name":"Shipped"},{"name":"Will not implement"}]}`
+  FakeAha recorded one ApiGet call on /products/7000000000000000001 and
+  one ApiGet call on /products/7000000000000000001/workflows
 WHEN:
   the tool query is called with query =
   `SELECT name FROM statuses WHERE product = 'demo' AND entity = 'feature'`
 THEN:
   the tool result is the same
+WHEN:
+  the tool query is called with query =
+  `SELECT name FROM statuses WHERE product = 'DEMO' AND entity = 'epics'`
+THEN:
+  the tool result has the same six records
+WHEN:
+  the tool query is called with query =
+  `SELECT entity FROM statuses WHERE product = 'DEMO' AND name = 'Shipped'`
+THEN:
+  the tool result is
+  `{"entity":"statuses","scope":"product DEMO","count":5,"records":[{"entity":"releases"},{"entity":"features"},{"entity":"epics"},{"entity":"requirements"},{"entity":"ideas"}]}`
 
 ### EXAMPLE: current_user (of: entity-catalog)
 GIVEN:
@@ -4945,6 +4989,27 @@ WHEN:
 THEN:
   the tool result is an error with the message
   `workflow status 'Done' not found for feature; valid statuses: Under consideration, In design, Ready to develop, In development, Shipped, Will not implement`
+  no write request
+
+### EXAMPLE: status_of_an_epic (of: check-write-values)
+GIVEN:
+  the fixture account, in which the record of DEMO names the workflow 401
+  as `epic_workflow`, and no workflow has the record type Epic
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE epics SET status = 'in development' WHERE id = 'DEMO-E-1'`
+  and check-write-values takes the statuses of epics in DEMO
+THEN:
+  FakeAha recorded one ApiUpdate call on /epics/DEMO-E-1 with the body
+  `{"epic":{"workflow_status":"In development"}}`
+  the tool result is
+  `{"id":"DEMO-E-1","name":"Race day","status":"In development","message":"Epic DEMO-E-1 status changed to 'In development'"}`
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE epics SET status = 'On track' WHERE id = 'DEMO-E-1'`
+THEN:
+  the tool result is an error with the message
+  `workflow status 'On track' not found for epic; valid statuses: Under consideration, In design, Ready to develop, In development, Shipped, Will not implement`
   no write request
 
 ### EXAMPLE: date_that_is_not_a_date (of: check-write-values)
