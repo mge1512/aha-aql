@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.6.0
+Version:      0.7.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -5199,13 +5199,14 @@ External services:
 | Aha! REST API, version 1 | `https://<subdomain>.aha.io/api/v1`, port 443 | Every read and every write. The server sends requests for no other host |
 | HTTPS proxy, only when the environment gives one | The address in HTTPS_PROXY | The tunnel to Aha! |
 
-Deviations from the deployment template:
+Declarations for the deployment template. The template allows each of
+these only when a specification declares it:
 
-| Template key | The template says | This specification says |
-|---|---|---|
-| CONFIG-ENV-VARS | No configuration from environment variables. The template says this in the table, in a PRECONDITION and in an INVARIANT | The server reads the environment variables of the table in load-configuration, in addition to its options and the key file. A host or a sandbox gives a process its credentials in this way. The template will be changed to allow it. Until then a translator follows this specification on this point |
-| TRANSPORT-SELECTION | The first word selects a transport: stdio or http. The message for another word lists these two | The first word can also be `query` or `execute`. These two select no transport. They make one tool call and end. The message for another word lists all four words (G12). The template will get a rule for such words |
-| ERROR-HANDLING | All errors are JSON-RPC error responses | A statement that fails is answered with a tool result that is marked as an error, so that the language model reads the message. Protocol errors and internal errors are JSON-RPC error responses |
+| Template key | Declared here |
+|---|---|
+| COMMAND-WORDS | The command words are `query` and `execute`. Each makes one tool call and ends, and it selects no transport (see manual-mode). Their arguments are in the table of options in load-configuration. Their output and their exit codes are in the tables of output streams and exit codes above. An unknown first word gets the message G12, which lists the two transports and then the two command words |
+| CONFIG-ENV-VARS | The server reads the environment variables of the table in load-configuration, and no other. An option takes precedence over its variable |
+| TOOL-EXECUTION-ERRORS | Every AqlError of `query` and of `execute` is a tool execution error. The tool result is marked as an error and has the message as its only text, so that the language model reads it. Protocol errors and internal errors of the server are JSON-RPC error responses |
 
 Platform: as the deployment template says. The check of the permission
 bits of the key file applies on Linux and macOS.
