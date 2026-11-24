@@ -1,11 +1,11 @@
-# aha-aql 0.3.0: notes
+# aha-aql 0.5.0: notes
 
 Status: not normative. The specification is `aha-aql.spec.md`, and a
 translator does not need this file. The notes record what changed, what
 was tested, what to check against Aha! itself, what the deployment
 template has to allow, and the plan for OAuth as an optional later step.
 
-Date: 2026-11-13
+Date: 2026-11-24
 
 ## 1. What changed
 
@@ -39,6 +39,55 @@ options and the key file. The reason is the use in a sandbox (section 5).
 | List of variables | In the steps | One table in load-configuration, and an invariant: the server reads these variables and no other |
 | Messages | | X02 has the new reason that the proxy did not open a connection. G09 and G11 have new texts |
 
+### 1.3 From version 0.3.0 to version 0.3.1
+
+Three small changes after the review of the open questions on 2026-11-24
+(section 3.1):
+
+- The author line has the address mge@mailbox.org.
+- The User-Agent has the address of the project, https://github.com/mge1512/aha-aql.
+- load-configuration takes the mode from the first word. An unknown first word gets the new start message G12, which lists stdio, http, query and execute.
+
+### 1.4 From version 0.3.1 to version 0.4.0
+
+Custom fields can be read and set. The new behavior `custom-fields` reads
+their definitions from the account, because every account has its own.
+
+| Topic | 0.3.1 | 0.4.0 |
+|---|---|---|
+| Name | `custom.priority` was an unknown field | `custom.<key>` is the name of a custom field. The key alone works too, when no catalog name has that word |
+| Entities | | features, releases, epics, requirements, initiatives, goals and ideas: read and set. products: read |
+| Reading | | SELECT, WHERE, GROUP BY, ORDER BY and the aggregates. `*` shows catalog fields only |
+| Setting | | UPDATE only. A value for a list with fixed options is checked against the options first |
+| Types | | Text, web address, note, number, date, both choice lists, both tags fields and users fields. A scorecard can be read. Every other type gets an error that names the type |
+| DESCRIBE | Fields of the catalog | Also `custom_fields`, with name, label, type and writable |
+| Tool description | | One new line in `query` |
+| Requests | | One list request for the definitions, only for a statement that has a custom field or an unknown field word. A list asks for custom fields only when the statement uses one |
+| Messages | N02, W16, W17 | They also list the custom fields. New: N04 to N07, W31, W32, X05 |
+
+### 1.5 From version 0.4.0 to version 0.5.0
+
+The specification has MILESTONE sections. Nothing else changed. A
+translator builds the server in six passes:
+
+| Milestone | Behaviors | Acceptance |
+|---|---|---|
+| 0.0.0, scaffold | All 26, as stubs | The binary exists, and `--version` shows the hash of the specification |
+| 0.1.0 | load-configuration, aha-request, entity-catalog, error-messages, choose-example-key, resolve-product, custom-fields | `make test`, and seven start errors at the command line |
+| 0.2.0 | tokenize, resolve-names, parse-statement | `make test` |
+| 0.3.0 | plan-fetch, convert-record, evaluate-condition, build-rows, read-statement, describe-statement | `make test` |
+| 0.4.0 | check-write-values, write-request, insert-statement, update-statement, delete-statement | `make test` |
+| 0.5.0 | query, execute, tool-registration, request-account, manual-mode | `make test`, eight commands in manual mode and three tool lists over stdio |
+
+What a maintainer should know about this design:
+
+- The order follows the rule of the milestone mode: a milestone uses only behaviors of itself or of earlier milestones. The command line (manual-mode) therefore comes last, and the milestones 0.2.0 to 0.4.0 have `make test` as their only acceptance command. That command is as strong as the tests of the translator. The examples whose heading names an included behavior are the tests to expect.
+- No acceptance command needs an Aha! account or a network. The two commands that reach aha-request set HTTPS_PROXY to a local port where nothing listens. The request then fails at once, with the message for a proxy that does not open a connection. The commands start with `env -i`, so that no variable of the build environment changes the result.
+- The three tool lists over stdio send the MCP handshake as three lines of JSON. If an MCP framework is strict about the protocol version of that handshake, these three commands are the first to adjust.
+- The milestone 0.5.0 has an empty list under `Deferred BEHAVIORs:`, because nothing is left. RULE-15 asks for the field and RULE-16 for known names. pcd-lint decides whether it accepts the empty list.
+- The skill has no milestones hints file for the template mcp-server, so the scaffold milestone has no `Hints-file:`.
+- An alternative order puts query and manual-mode directly after the read path. Reading could then be tried at the command line, also against a test account, before the write path exists. It breaks the dependency rule in one point, because manual-mode also calls execute.
+
 ## 2. Evidence and its limits
 
 The numbers come from the test of 2026-11-12 with the model lfm3, a
@@ -54,6 +103,23 @@ Limits of this evidence:
 - The write statements ran against a mock, not against Aha!.
 - Nothing in this list was tested: manual mode, the configuration rules, http mode, the HTTPS requests, the proxy, the request bodies, the log line.
 - The prototype is a Python program that belongs to the tests. No program has been built from this specification yet.
+- Custom fields were not tested at all: not with a language model and not against Aha!. Section 2.1 says what the unit rests on.
+
+### 2.1 What the custom fields unit rests on
+
+| Topic | Source | Status |
+|---|---|---|
+| The list of definitions and its members | API documentation of Aha!, OpenAPI file | Documented. The example has no page information and no request parameter |
+| Names of the types | OpenAPI file (10 names in examples). GraphQL schema of Aha!, as aha-studio 0.12.0 ships it (33 names) | Documented. That NoteField, NumberField and the two SelectMultiple types have the forms of the table of kinds follows from their names |
+| Forms of the entries in a record | OpenAPI file | Documented by examples for text, number, date, web address, note, scorecard, tags and users |
+| Custom fields with one record | API documentation: by default only with a specific record | Documented |
+| Custom fields in a list | Follows from the documentation of the parameter `fields` | Assumed. When Aha! returns a list without them, the statement fails with X05 |
+| Update with `custom_fields` | API documentation, for features, requirements, ideas and others | Documented with a text value |
+| Options of a list | API documentation: `GET /custom_field_definitions/:id/options` | Documented |
+| Request forms for numbers, tags, users and notes | None | A guess, as agreed on 2026-11-24 |
+| Custom fields when a record is created | API documentation, for ideas | Documented. Not used: the decision is UPDATE only |
+| A filter `custom_fields` on the lists of features, epics and initiatives | API documentation | Documented. Not used: the server evaluates conditions itself |
+| The layouts of a product with their custom fields, `api_type` and options | OpenAPI file, example of `GET /products/{id}` | Documented. Not used, see section 9 |
 
 ## 3. Decisions that the versions 0.2.0 and 0.3.0 add
 
@@ -76,6 +142,51 @@ column has the alternative.
 | 12 | Every call of execute writes one log line without values | A record of what a language model changed | No log |
 | 13 | AHA_DEFAULT_PRODUCT and AHA_READ_ONLY are read too | They are names of aha-studio. A host configuration with AHA_READ_ONLY=true must not start a server that can write | Only the two variables for the account |
 | 14 | In http mode AHA_API_KEY is not read, and a warning says so | In a sandbox the variable is in the environment of every process, so its presence is not a mistake of the operator | The start error of 0.2.0 |
+
+### 3.1 Answers of 2026-11-24
+
+The maintainer went through the open questions on 2026-11-24. The left
+column has the number of the decision in the table above, where there is
+one.
+
+| Decision | Question | Answer |
+|---|---|---|
+| 3 | Http mode: where the key comes from | From each request, as specified |
+| 14 | Http mode: AHA_API_KEY is set | It is ignored, with a warning, as specified |
+| 6 | A failed statement | A tool result that is marked as an error, as specified. The template gets a clarification |
+| | First words `query` and `execute` | They stay. The template gets a rule for further first words, and the message for an unknown word lists all four (0.3.1) |
+| 7 | Values in write requests | Plain values, until a test on an account decides |
+| 8 | Products | Read only |
+| | Custom fields | Reading and writing are wanted (0.4.0, section 3.2) |
+| | NULL in a write statement | Stays refused for now |
+| 2 | A key file that other users can read | The start is refused, as specified |
+| 13 | AHA_DEFAULT_PRODUCT and AHA_READ_ONLY | They stay, with strict values |
+| 9 | Proxy | From the environment only |
+| | Names | aha-aql and mcp-server-aha-aql |
+| | License | MIT |
+| | Author line | Matthias G. Eckermann, mge@mailbox.org (0.3.1) |
+| | Contact in the User-Agent | https://github.com/mge1512/aha-aql (0.3.1) |
+| | `### ENTITY:` subsections | The maintainer runs pcd-lint and pcd-slice and reports the findings |
+
+### 3.2 Decisions of the custom fields unit (0.4.0)
+
+The first six rows are the answers of the maintainer of 2026-11-24. The
+other rows are choices of the session that the maintainer did not decide.
+Each of them takes the cautious reading.
+
+| No. | Decision | Reason | Alternative |
+|---|---|---|---|
+| 15 | The name is `custom.<key>`. The key alone is accepted when no catalog name has that word | A language model writes the key alone. `custom.` is the form without doubt, and a catalog name always wins | `custom.<key>` only |
+| 16 | All record entities have custom fields. On products they can be read | Answer of the maintainer | Features only |
+| 17 | Tags fields, users fields and notes can be set, in addition to text, numbers, dates, web addresses and choice lists | Answer of the maintainer. The request forms are a guess and are in the checks of section 6 | Only the types with a documented form |
+| 18 | A value for a list with fixed options is checked against the options, and the error lists them | The same rule as for a workflow status. Aha! may ignore an unknown value without an error | Send the value unchecked |
+| 19 | The tool description of `query` gets one line. `execute` stays as it is | The descriptions are the tested part of the language. Every further line costs context in every call | A line in both descriptions |
+| 20 | A custom field is set with UPDATE only | Answer of the maintainer. INSERT stays as tested | Custom fields in INSERT. Aha! documents this for ideas |
+| 21 | `*` shows catalog fields only. DESCRIBE lists custom fields in an own member | The result of `*` stays as tested, and it stays small in an account with many custom fields | `*` with an id also shows the custom fields that have a value |
+| 22 | The definitions come from the list of the account, not from the layouts of a product | DESCRIBE and name resolution have no product. One request serves every statement | The layouts in the product record, section 9 |
+| 23 | When Aha! cannot give the definitions to the credential (status 403 or 404), the server works as if the account had none. An unknown field word then gets the same message as in 0.3.1 | A typing error in a field name still gets the list of the valid names, as in the tested version | An error for every statement that needs the definitions |
+| 24 | A list that comes without the custom fields that the request asked for is an error (X05) | Rows with empty custom fields would be a wrong answer that looks right. Reading the records one by one would break the rule of one request per page | Read each record by its id |
+| 25 | A users field takes `me`, an e-mail address or a user id. `me` is sent as the id | Aha! shows the users of such a field by their ids. Whether it also takes an e-mail address is check 15 | Look up every e-mail address in the user list |
 
 ## 4. Use with an MCP host
 
@@ -137,6 +248,32 @@ or a product that can be thrown away. Manual mode is made for this.
 | 8 | A wrong key gets the status 403, and the status 429 comes with X-Ratelimit-Reset | Documented, not observed |
 | 9 | A record without access gets the status 404 | Documented. The messages then say that the record does not exist |
 
+Checks for custom fields (version 0.4.0):
+
+| No. | Check | Why |
+|---|---|---|
+| 10 | `GET /custom_field_definitions` answers for the key of a normal user, and with all definitions in one answer | The specification covers the statuses 403 and 404 and a list in pages. The documentation shows none of them |
+| 11 | The values of `type` and `custom_fieldable_type` in the account | The table of kinds and the record types of the catalog come from documentation. The command below shows what the account has |
+| 12 | A list with `custom_fields` in the parameter `fields` returns that member for every record, as an empty list where a record has no value | Decision 24. If the member is missing, every list statement with a custom field fails with X05 |
+| 13 | An update with `custom_fields` next to other members changes both | Documented for the creation of an idea, not for an update |
+| 14 | A number as a JSON number, tags as a JSON list of texts, and a note as plain text are stored as sent | Decision 17. These forms are a guess |
+| 15 | A users field takes a list of user ids. Does it also take e-mail addresses? | Decision 25 |
+| 16 | Empty text clears a text field or a choice list, and an empty list clears a tags field or a users field | Not documented. NULL cannot be written, so this is the way to remove a value |
+| 17 | `GET /custom_field_definitions/{id}/options` has the member `text` for every option, in the order of the list. Are hidden options in it? | The check of a value and the message W32 use these texts |
+| 18 | A value for a custom field that is not in the layout of the product | The definitions are account-wide (decision 22). Aha! shows a field on a record only when the layout has it |
+
+A command for check 11. It only reads:
+
+```
+curl -sS -H "Authorization: Bearer $AHA_API_KEY" -H "Accept: application/json" \
+  "https://$AHA_SUBDOMAIN.aha.io/api/v1/custom_field_definitions?per_page=200" \
+  | jq -r '.custom_field_definitions[] | [.custom_fieldable_type, .type] | @tsv' \
+  | sort | uniq -c
+```
+
+A type that the table of kinds does not have is no error. The server
+refuses that field with message N05, and the table can get a row later.
+
 ## 7. What the deployment template has to allow
 
 The template `mcp-server` in version 0.3.23 forbids environment variables
@@ -155,7 +292,7 @@ Three more points that the template could settle at the same time:
 
 - The template has no rule for secrets. Candidates are: no secret as a key=value argument, and a key file that only its owner can read.
 - The row CONFIG-ENV-VARS also allows "preset files". The template does not say what a preset file is at run time.
-- The specification has two other deviations: the first words `query` and `execute`, and a failed statement as a tool result. They do not depend on this change.
+- The specification has two other deviations: the first words `query` and `execute`, and a failed statement as a tool result. Both were decided on 2026-11-24, so the template needs a rule for further first words and a sentence on tool results. The file `mcp-server.template.diff` is a draft of all three changes.
 
 ## 8. OAuth as an optional later step
 
@@ -212,7 +349,10 @@ with OAuth. B1 comes before B2.
 
 ## 9. Not in this version
 
-- Custom fields, in reading and in writing.
+- Custom fields in INSERT, and custom fields in the result of `*` (decisions 20 and 21).
+- Custom fields of the types worksheet, attachment and checkbox, and relations to other records or to custom tables. A checkbox is the nearest candidate: the documentation has no example of its entry in a record.
+- The filter `custom_fields` of Aha! on the lists of features, epics and initiatives. With it, a condition on a custom field could be applied by Aha!, and a large product would need fewer pages.
+- Custom fields per layout. The product record lists the layouts of the product with their custom fields, an `api_type` and the options of choice lists. With it, DESCRIBE could show only the fields that the records of one product have. The documentation says that the list of all layouts needs an administrator; for the product record it says nothing.
 - An option for the proxy, and the variable ALL_PROXY.
 - JOIN, HAVING, OFFSET, subqueries and relative dates.
 - Writes that find their records by a condition.
@@ -231,6 +371,12 @@ with OAuth. B1 comes before B2.
 ## Sources
 
 - Aha! API: https://www.aha.io/api
+- Aha! API, custom fields: https://www.aha.io/api/resources/custom_fields/list_all_custom_fields and https://www.aha.io/api/resources/custom_fields/list_options_for_a_custom_field
+- Aha! API, update of custom fields: https://www.aha.io/api/resources/features/update_a_features_custom_fields and https://www.aha.io/api/resources/requirements/update_a_requirements_custom_fields
+- Aha! API, an idea with custom fields: https://www.aha.io/api/resources/ideas/create_an_idea_with_custom_fields
+- Aha! API, lists of features with the filter `custom_fields`: https://www.aha.io/api/resources/features/list_features_in_a_release
+- Aha! OpenAPI file: in the workspace archive, file `aha/openapi.json`
+- Aha! GraphQL schema: in the workspace archive, file `aha-studio-0.12.0/vendor/github.com/grokify/aha-go/graphql/schema.graphql`
 - Aha! OAuth2: https://www.aha.io/api/oauth2
 - MCP authorization, version 2025-11-25: https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization
 - kit: https://github.com/mark3labs/kit
