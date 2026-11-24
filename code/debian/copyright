@@ -1,0 +1,39 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: mcp-server-aha-aql
+Upstream-Contact: Matthias G. Eckermann <mge@mailbox.org>
+Source: https://github.com/mge1512/aha-aql
+Comment: generated from spec aha-aql.spec.md sha256:9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262
+
+Files: *
+Copyright: 2026 Matthias G. Eckermann <mge@mailbox.org>
+License: MIT
+
+Files: vendor/github.com/mark3labs/mcp-go/*
+Copyright: 2024 Anthropic, PBC
+License: MIT
+
+Files: vendor/github.com/google/jsonschema-go/*
+Copyright: 2025 JSON Schema Go Project Authors
+License: MIT
+
+Files: vendor/github.com/spf13/cast/*
+Copyright: 2014 Steve Francia
+License: MIT
+
+Files: vendor/github.com/google/uuid/*
+Copyright: 2009, 2014 Google Inc.
+License: BSD-3-Clause
+
+Files: vendor/github.com/yosida95/uritemplate/*
+Copyright: 2016 Kohei YOSHIDA <https://yosida95.com/>
+License: BSD-3-Clause
+
+License: MIT
+ The MIT License. The authoritative text is at
+ https://opensource.org/license/mit and in the file LICENSE of each
+ component in the source package.
+
+License: BSD-3-Clause
+ The 3-Clause BSD License. The authoritative text is at
+ https://opensource.org/license/bsd-3-clause and in the file LICENSE of
+ each component in the source package.
