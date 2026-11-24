@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.10.0
+Version:      0.11.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -393,6 +393,7 @@ Values in an API record:
 - `tags` of a feature is a list of JSON strings.
 - A member that names a status, a user or another record is an object. The catalog writes its source with a dot: `workflow_status.name`, `assigned_to_user.email`, `feature.reference_num`.
 - A feature names its release, its initiative and its epic in members of their own, for example `release_reference_num`. An epic has `initiative_reference_num` and no `release_reference_num`. It names its release in the object `release`, whose member `reference_num` has the id.
+- The success metric of a goal is the object `success_metric`. Its member `name` has the text of the metric, and its member `workflow_status` has the status of the goal. A goal has no member `workflow_status` of its own.
 
 The parameter `fields` of ApiList names top-level members only. For the
 API source `workflow_status.name` it names `workflow_status`, and each
@@ -410,6 +411,8 @@ network connection.
 - `q` is a search for the text inside `name`, without regard to case.
 - A route for a record that the fixture does not have is answered with the status 404.
 - ApiCreate gives the new record the next free reference number.
+- ApiCreate on a goal route needs the member `success_metric` with a `name` that is not empty. Without that member the answer has the status 400 and the body `{"error":"Required parameter missing: success_metric"}`. With an empty name it has the status 400 and the body `{"error":"Validation failed","errors":{"message":"Success metric cannot be blank"}}`. The new goal has the status of `success_metric.workflow_status`, and without that member the first status of the workflow of goals.
+- ApiUpdate on a goal takes the status from the member `workflow_status` of the goal, and the text of the success metric from `success_metric.name`.
 - ApiList on /custom_field_definitions returns the custom field definitions of the fixture account as one list without page information, in the order of the table below. A test can tell FakeAha to add a definition.
 - ApiGet on /custom_field_definitions/{id}/options returns the options of that definition in their order.
 - A record that is read by its id has the member `custom_fields`. A product that is read with ApiGet on /products/{id}, with its NumericId, has that member too. A record of a list has it only when the parameter `fields` names `custom_fields`. The member is a list with one entry per custom field that has a value in the record. It is an empty list for a record without such a value. The entries have the form that custom-fields describes.
@@ -441,6 +444,9 @@ Workflow statuses of features in DEMO, in workflow order: Under
 consideration, In design, Ready to develop, In development, Shipped, Will
 not implement.
 
+Workflow statuses of goals in DEMO, in workflow order: Not started, On
+track, At risk, Achieved.
+
 Releases of DEMO:
 
 | id | name | release_date | parking_lot |
@@ -464,8 +470,8 @@ Features of DEMO, in the order in which the API lists them:
 Other records of the fixture account:
 
 - The initiative DEMO-S-1 "Live coverage" with the status "In progress".
-- The goal DEMO-G-1 "Grow the audience". Its API record has the status "On track" under its success metric and no workflow status of its own.
-- The goal OTHER-G-1 "Other goal".
+- The goal DEMO-G-1 "Grow the audience" with the success metric "Monthly viewers". Its API record has the status "On track" in `success_metric.workflow_status` and no member `workflow_status` of its own.
+- The goal OTHER-G-1 "Other goal" with the success metric "Not defined yet".
 - The requirement DEMO-1-1 "Column selection" of the feature DEMO-1.
 - The epic DEMO-E-1 "Race day" with the status "In design", in the release DEMO-R-3. Its API record names the release in the member `release`, an object with `id`, `reference_num` and `name`. It has no member `release_reference_num` and no member `color`.
 - One comment on DEMO-3 with the id 7000000000000000701, the body "Verified with the provider." and the user Test User.
@@ -1089,7 +1095,7 @@ STEPS:
    a. Parent kind product: run resolve-product without hints; on failure → the error of resolve-product.
    b. Parent kind is a record kind: the parent must be a ReferenceNumber of that kind or a NumericId. For a value of another form: if resolve-product finds it as a product → wrong_kind, message W24; otherwise → not_found, message W25, because no record of that kind can have such an id.
    c. Parent kind any-record (comments): the parent must be a ReferenceNumber of the kind feature, epic, idea, release, initiative, goal or requirement; otherwise → wrong_kind, message K08.
-3. If the field `name` (for comments the field `body`) is absent or empty → bad_value, message W19.
+3. If the field `name` (for comments the field `body`) is absent or empty → bad_value, message W19. For goals the field `success_metric` is required in the same way, because Aha! creates no goal without it.
 4. Run check-write-values for the fields; on failure → the error of check-write-values. When a status is assigned and the parent is a record, check-write-values reads the parent to learn its product.
 5. If dry_run: return a WriteResult without id, with the checked fields as values, and the message "would create <singular> under <parent>". No write request is sent.
 6. Run write-request for the entity and the checked fields. Call ApiCreate on the create route of the entity with the parent and that body. NotFound → not_found, message W25. NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Rejected → api_error, message W30.
@@ -1101,7 +1107,7 @@ POSTCONDITIONS:
 - with dry_run true no ApiCreate call was made
 
 ERRORS:
-- bad_value: parent missing (W18); name or body missing (W19); errors of check-write-values
+- bad_value: parent missing (W18); name, body or the success metric of a goal missing (W19); errors of check-write-values
 - wrong_kind: W24, K08
 - bad_product: from resolve-product (P01)
 - not_found: the parent does not exist, or the value cannot be the id of a parent (W25)
@@ -1412,6 +1418,8 @@ exceptions are:
 | status | workflow_status |
 | assigned_to | assigned_to_user |
 | description of releases | theme |
+| success_metric of goals | success_metric. Its value is an object with the member `name` |
+| status of goals, in INSERT | workflow_status inside the object of success_metric |
 
 ### ENTITY: products
 
@@ -1624,7 +1632,7 @@ exceptions are:
 | Singular | goal |
 | Other names | strategic_imperatives |
 | Kind | goal |
-| About | Goals of a product. |
+| About | Goals of a product. A new goal needs a success metric. |
 | Default fields | id, name |
 | Other field names | parent, parent_id mean product |
 | Read routes, in order | id: GET /goals/{id}. product: GET /products/{product}/goals |
@@ -1640,7 +1648,8 @@ exceptions are:
 |---|---|---|---|---|
 | id | string | reference_num | no | |
 | name | string | name | yes | |
-| status | status | success_metric.workflow_status.name | yes | When that has no value: workflow_status.name |
+| success_metric | string | success_metric.name | yes | The text of the success metric. Required in INSERT. Aha! refuses an empty text |
+| status | status | success_metric.workflow_status.name | yes | Aha! keeps the status of a goal with its success metric |
 | product | key | product_id | no | |
 | progress | number | progress | yes | |
 | value | number | value | no | |
@@ -2139,7 +2148,7 @@ STEPS:
    c. boolean: true or false. An absent value gives null, except where the catalog says false.
    d. key: for the field `product`, the known product; without it, the key of the product whose NumericId the source has. The product list is taken for this at most once per statement, and only when the statement uses the field.
    e. every other type: the value as the API has it.
-3. Apply the notes of the catalog entry. The tags of a feature are joined by a comma and a space, and a feature without tags has null. A requirement without a feature in the API record takes the known parent, and so does a comment without a commented record. The status of a goal has two sources.
+3. Apply the notes of the catalog entry. The tags of a feature are joined by a comma and a space, and a feature without tags has null. A requirement without a feature in the API record takes the known parent, and so does a comment without a commented record.
 4. Custom fields. For every custom field of the input, take its entry from the member `custom_fields` of the API record. Convert the `value` of the entry by the kind of the field, as the table of custom values in custom-fields says. A record without the entry has null in the field.
 5. Collect the other spellings of a value. Conditions accept them; no result shows them.
    - `id`: the NumericId of the record. For products, `key`: the NumericId of the product.
@@ -2350,6 +2359,7 @@ STEPS:
 4. The field `tags`: the tags as a single JSON string, joined by a comma.
 5. The parent of a new record is part of the route. It is not a member of the body.
 6. Custom fields. When the statement assigns a custom field, the object of step 1 has the member `custom_fields`. Its place among the members is the place of the first custom field in the order of the statement. Its value is a JSON object with one member per custom field, in the order of the statement. The name of such a member is the key of the custom field, as its definition writes it. Its value is the value in the request that the table of values to set in custom-fields gives for the kind.
+7. Goals. The field `success_metric` is the member `success_metric`, and its value is a JSON object with the member `name`. In a create request the status of a goal is the member `workflow_status` of that object, after `name`. The goal then has no member `workflow_status` of its own. In an update request the status is the member `workflow_status` of the goal, as for every other entity.
 
 For the statement `UPDATE features SET status = 'In design', assigned_to =
 'me' WHERE id = 'DEMO-1'` on the fixture account, the body is
@@ -2357,9 +2367,13 @@ For the statement `UPDATE features SET status = 'In design', assigned_to =
 For `UPDATE features SET name = 'CSV export 2', custom.priority = 'low'
 WHERE id = 'DEMO-1'` it is
 `{"feature":{"name":"CSV export 2","custom_fields":{"priority":"Low"}}}`.
+For `INSERT INTO goals (parent, name, success_metric, status) VALUES
+('DEMO', 'Win the cup', 'Podium places', 'At risk')` it is
+`{"goal":{"name":"Win the cup","success_metric":{"name":"Podium places","workflow_status":"At risk"}}}`.
 
 POSTCONDITIONS:
 - the body has one member for every catalog field of the statement, the member `custom_fields` with one member for every custom field of the statement, and no other member
+- exception: the status of a new goal is inside the member `success_metric` (step 7)
 - the body has no member for the id, the parent or the product of the record
 
 ERRORS:
@@ -2675,9 +2689,10 @@ W32, `<field>` is that name too. `<options>` are the texts of the options
 in the order of their list, joined by a comma and a space.
 
 In W18, `<parent text>` is `a release`, `a product`, `a feature` or `the
-record to comment on`. In W19, `<field>` is `name`, or `body` for a
-comment. In W21, `<names>` are the names of the workflow statuses in
-workflow order, joined by a comma and a space.
+record to comment on`. In W19, `<field>` is the field that is missing:
+`name`, `body` for a comment, or `success_metric` for a goal. For a goal
+without both it is `name`. In W21, `<names>` are the names of the workflow
+statuses in workflow order, joined by a comma and a space.
 
 In W25, `<PRODUCT>` is the key of the product of the record that the
 statement changes. Without such a record it is the part of the value
@@ -2782,6 +2797,7 @@ ERRORS:
 - The Aha! API lists the custom field definitions of an account on /custom_field_definitions. Each definition has an id, a key, a name, a type and the record type that it belongs to. The API is documented so. This was not observed on an account.
 - The Aha! API returns the member `custom_fields` with a record that is read by its id. It also returns that member with the records of a list when the parameter `fields` names it. The first is documented. The second follows from the documentation of `fields` and was not observed.
 - The Aha! API accepts the member `custom_fields` in an update, next to other members, with one value per key. The documentation shows a text value. The forms of write-request for numbers, tags, users and notes are not documented and were not observed.
+- The Aha! API creates a goal only when the request has a success metric with a name. An update takes the status of a goal as `workflow_status`. Both were observed on one account on 2026-11-24. The documentation shows the status of a new goal inside `success_metric`; this form was not observed. The form of write-request for a new text of the success metric in an update was not observed either.
 
 ## POSTCONDITIONS
 
@@ -3650,6 +3666,24 @@ THEN:
   `there is no release with the id 'DEMO-R-99'. To find the id, use the query tool: SELECT id, name FROM releases WHERE product = 'DEMO'`
   the account has no new feature
 
+### EXAMPLE: insert_goal_without_a_success_metric (of: insert-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool execute is called with statement =
+  `INSERT INTO goals (parent, name) VALUES ('DEMO', 'Win the cup')`
+  and insert-statement finds no success metric
+THEN:
+  the tool result is an error with the message
+  `success_metric is required to create a goal`
+  FakeAha recorded no ApiCreate call
+WHEN:
+  the tool execute is called with statement =
+  `INSERT INTO goals (parent, name, success_metric) VALUES ('DEMO', 'Win the cup', '')`
+THEN:
+  the tool result is an error with the same message
+  FakeAha recorded no ApiCreate call
+
 ### EXAMPLE: update_status_in_any_case (of: update-statement)
 GIVEN:
   the fixture account
@@ -4159,15 +4193,18 @@ THEN:
 
 ### EXAMPLE: goal_status_from_the_success_metric (of: entity-catalog)
 GIVEN:
-  the fixture account, in which the API record of DEMO-G-1 has the status
-  On track under its success metric and no workflow status of its own
+  the fixture account, in which the API record of DEMO-G-1 has the object
+  `success_metric` with the name Monthly viewers and the status On track,
+  and no member `workflow_status` of its own
 WHEN:
   the tool query is called with query =
-  `SELECT id, status FROM goals WHERE product = 'DEMO'`
-  and the entity-catalog gives the two sources of the status
+  `SELECT id, success_metric, status FROM goals WHERE product = 'DEMO'`
+  and the entity-catalog gives the sources of both fields
 THEN:
   the tool result is
-  `{"entity":"goals","scope":"product DEMO","count":1,"records":[{"id":"DEMO-G-1","status":"On track"}]}`
+  `{"entity":"goals","scope":"product DEMO","count":1,"records":[{"id":"DEMO-G-1","success_metric":"Monthly viewers","status":"On track"}]}`
+  the parameter `fields` of the ApiList call names `success_metric` once,
+  and it does not name `workflow_status`
 
 ### EXAMPLE: release_of_an_epic (of: entity-catalog)
 GIVEN:
@@ -5019,6 +5056,27 @@ THEN:
   `{"feature":{"due_date":"2026-05-01","custom_fields":{"markets":["EMEA","LATAM"],"reviewers":["7000000000000000900","second.user@example.com"],"release_notes":"Ready."},"start_date":"2026-04-01"}}`
   the tool result is
   `{"id":"DEMO-1","name":"CSV export","due_date":"2026-05-01","custom.markets":"EMEA, LATAM","custom.reviewers":"test.user@example.com, second.user@example.com","start_date":"2026-04-01","custom.release_notes":"Ready.","message":"Feature DEMO-1 updated"}`
+
+### EXAMPLE: bodies_for_a_goal (of: write-request)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool execute is called with statement =
+  `INSERT INTO goals (parent, name, success_metric, status) VALUES ('DEMO', 'Win the cup', 'Podium places', 'at risk')`
+  and write-request builds the body
+THEN:
+  FakeAha recorded one ApiCreate call on
+  /products/7000000000000000001/goals with the body
+  `{"goal":{"name":"Win the cup","success_metric":{"name":"Podium places","workflow_status":"At risk"}}}`
+  the message of the tool result is `Goal DEMO-G-2 created`
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE goals SET success_metric = 'Weekly viewers', status = 'achieved' WHERE id = 'DEMO-G-1'`
+THEN:
+  FakeAha recorded one ApiUpdate call on /goals/DEMO-G-1 with the body
+  `{"goal":{"success_metric":{"name":"Weekly viewers"},"workflow_status":"Achieved"}}`
+  the tool result is
+  `{"id":"DEMO-G-1","name":"Grow the audience","success_metric":"Weekly viewers","status":"Achieved","message":"Goal DEMO-G-1 updated"}`
 
 ### EXAMPLE: request_address_and_headers (of: aha-request)
 GIVEN:
