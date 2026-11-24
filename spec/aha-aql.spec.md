@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.8.0
+Version:      0.9.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -373,12 +373,37 @@ other host. The only other host that it connects to is an HTTPS proxy that
 the environment gives (see aha-request).
 The bodies of ApiCreate and ApiUpdate are built as write-request says.
 
+The answers of Aha! as JSON. An answer with a status from 200 to 299 has a
+JSON object as its body. ApiDelete needs no body. The table says where an
+operation finds its result in that object:
+
+| Operation | Form of the answer | Result |
+|---|---|---|
+| ApiGet, ApiCreate and ApiUpdate for one record | One member, with an object as its value. The name of the member is the singular of the record: `feature`, `release`, `epic`, `requirement`, `initiative`, `goal`, `idea`, `comment` or `product`. For /me it is `user` | That object is the ApiRecord |
+| ApiList | The records are the list in the member that has the name of the last part of the route: `features` for /releases/{release}/features, `custom_field_definitions` for /custom_field_definitions. The member `pagination` is an object with the numbers `total_records` and `total_pages` | The ListPage. Without the member `pagination` the list is complete, as ApiList says |
+| ApiGet on /products/{product}/workflows | The member `workflows` is a list. A workflow has the member `statusable_type`, which is the record type of the workflow, and the member `workflow_statuses`, a list of objects with `name`, `position` and `complete` | One record per workflow status, as the entity statuses says |
+| ApiGet on /custom_field_definitions/{definition}/options | The member `options` is a list of objects with the member `text` | The options, as custom-fields says |
+
+An answer with such a status that does not have this form is a failure:
+Rejected, with the status and the text `the answer has an unknown form`.
+
+Values in an API record:
+
+- A long text is a JSON object, and its member `body` has the text as HTML. Aha! returns `description` in this form, and `theme` of a release. convert-record takes the text from `body`. A text source whose value is a JSON string is taken as it is, for example `body` of a comment.
+- `tags` of a feature is a list of JSON strings.
+- A member that names a status, a user or another record is an object. The catalog writes its source with a dot: `workflow_status.name`, `assigned_to_user.email`, `feature.reference_num`.
+
+The parameter `fields` of ApiList names top-level members only. For the
+API source `workflow_status.name` it names `workflow_status`, and each
+name is there once.
+
 Test double: FakeAha. It takes the place of the HTTPS connection (see
 aha-request). It gets every request with its method, address, headers and
 body, answers it from memory with a fixture account, and never opens a
 network connection.
 
 - FakeAha serves the subdomain `example` and accepts the credential `fixture-key`. A request with another credential is answered with the status 403. A request to another host is a failure of the test.
+- Every answer of FakeAha has the JSON form of the section above. A record is in the member with its singular name, and a list is in the member with the name of the last part of the route. `description` and `theme` are objects with the member `body`.
 - ApiList returns pages of `per_page` records with correct `total_records` and `total_pages`.
 - A record of a list has the members of the parameter `fields`, and `id`.
 - `q` is a search for the text inside `name`, without regard to case.
@@ -389,7 +414,7 @@ network connection.
 - A record that is read by its id has the member `custom_fields`. A product that is read with ApiGet on /products/{id}, with its NumericId, has that member too. A record of a list has it only when the parameter `fields` names `custom_fields`. The member is a list with one entry per custom field that has a value in the record. It is an empty list for a record without such a value. The entries have the form that custom-fields describes.
 - ApiUpdate with the member `custom_fields` sets these custom values, and the answer has them as entries. For a users field FakeAha accepts the id or the e-mail address of a user of the fixture account.
 - A test can tell FakeAha to leave the member `custom_fields` out of every record of a list.
-- A test can tell FakeAha to answer a route with a given status and header a given number of times, or to give no answer.
+- A test can tell FakeAha to answer a route with a given status and header a given number of times, or to give no answer. A test can also give FakeAha the body of an answer.
 - FakeAha records for every request the proxy that the server chose for it, or that it chose none. A test can tell FakeAha that the proxy does not open the tunnel.
 - FakeAha records every call with its method, address, headers, parameters and body. A test can then check which requests a statement caused, which credential they had, and that a failed statement caused no write request.
 
@@ -2061,7 +2086,7 @@ STEPS:
    c. Too many pages. When page 1 reports more than max_pages pages, and neither a nor b ends the reading on page 1 → scope, message C02. No further page is requested.
    d. In every other case read the list to its last page.
    e. Custom fields. When used_fields has a custom field, the parameter `fields` also names `custom_fields`. When page 1 then has records and none of them has the member `custom_fields` → api_error, message X05. No further page is requested. The server does not deliver such records with empty custom fields, and it does not read them one by one.
-   MECHANISM: every list request has the parameter `fields`. It has the API sources of all fields of the entity that are not heavy, and of the heavy fields among used_fields. It has `custom_fields` only when used_fields has a custom field. One request per page delivers complete records. No request is sent per record of a list.
+   MECHANISM: every list request has the parameter `fields`. It has the API sources of all fields of the entity that are not heavy, and of the heavy fields among used_fields. Of a source with a dot it has the part before the dot (see INTERFACES). It has `custom_fields` only when used_fields has a custom field. One request per page delivers complete records. No request is sent per record of a list.
 9. Lookups for the evaluation. When the WHERE condition compares a field of the type user with `me`, `myself` or `current_user`, read the current user with one ApiGet on /me. When it compares a field of the type key outside the applied conjuncts, take the product list as resolve-product does. Each lookup is read at most once per statement.
 10. A request of the steps 1 to 9 that fails in another way than the steps say: NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Any other failure → api_error, message X03. No partial result is returned.
 
@@ -2108,7 +2133,7 @@ PRECONDITIONS:
 STEPS:
 1. For every field of the entity, take the value from the API source of the catalog. A member that is absent, and a source `a.b` whose member `a` is absent, give null.
 2. Convert by the type of the field.
-   a. text: turn HTML into plain text. The end of a paragraph, of a list item, of a heading, of a block and of a table row, and a line break tag, become a line break. Every other tag is removed. Character references are replaced by their characters. Several spaces in a row become one space. Empty lines and surrounding white space are removed. Empty text gives null.
+   a. text: when the value is a JSON object, take its member `body` (see INTERFACES). Turn HTML into plain text. The end of a paragraph, of a list item, of a heading, of a block and of a table row, and a line break tag, become a line break. Every other tag is removed. Character references are replaced by their characters. Several spaces in a row become one space. Empty lines and surrounding white space are removed. Empty text gives null.
    b. date: the first 10 characters of the value.
    c. boolean: true or false. An absent value gives null, except where the catalog says false.
    d. key: for the field `product`, the known product; without it, the key of the product whose NumericId the source has. The product list is taken for this at most once per statement, and only when the statement uses the field.
@@ -2378,7 +2403,7 @@ STEPS:
 7. Status 429: wait, and send the same request again. The header `X-Ratelimit-Reset` of the answer gives the time when the limit ends, as UTC Unix time. The waiting time is the number of seconds from now to that time, at least 1 second and at most 30 seconds. Without the header it is 5 seconds. The request is sent again at most twice. If the third answer also has the status 429 → RateLimited.
 8. Status 401 or 403 → NotAuthorized, with the status. Status 404 → NotFound.
 9. Every other status outside 200 to 299 → Rejected, with the status and the text of the answer.
-10. Status 200 to 299: the answer is the body, read as JSON. ApiDelete needs no body. If a body that is needed cannot be read as JSON → Rejected, with the status and the text `the answer is not JSON`.
+10. Status 200 to 299: the answer is the body, read as JSON. ApiDelete needs no body. If a body that is needed cannot be read as JSON → Rejected, with the status and the text `the answer is not JSON`. If it is JSON and does not have the form that INTERFACES gives for the operation → Rejected, with the status and the text `the answer has an unknown form`.
 
 A proxy that ends TLS. A sandbox or a company network can use a proxy that
 ends the TLS connection itself and opens its own connection to Aha!. The
@@ -2407,7 +2432,7 @@ ERRORS:
 - NotAuthorized: status 401 or 403
 - NotFound: status 404
 - RateLimited: status 429 three times
-- Rejected: a redirect, another status that is not a success, or an answer that is not JSON
+- Rejected: a redirect, another status that is not a success, an answer that is not JSON, or an answer that does not have the form of INTERFACES
 
 ## BEHAVIOR/INTERNAL: error-messages
 Constraint: required
@@ -2749,6 +2774,7 @@ ERRORS:
 ## PRECONDITIONS
 
 - The Aha! API reports total_records and total_pages for every list.
+- The answers of the Aha! API have the JSON forms that INTERFACES gives. The examples of the API documentation show these forms. The prototype of the test of 2026-11-12 read lists and single records in these forms on one account.
 - The Aha! API accepts the parameter `fields` on the list routes of the catalog and a page size of PageSize. This was observed on one account on 2026-11-12.
 - The Aha! API accepts an API key and an OAuth2 access token in the same way: as a bearer value in the Authorization header.
 - The credential has the permissions in Aha! that a statement needs. The server gives no permission and takes none away.
@@ -4558,6 +4584,42 @@ THEN:
   the tool result is an error with the message
   `comments are listed per record: add parent = '...' to WHERE. Example: SELECT body, user, created_at FROM comments WHERE parent = 'PROD-23'`
 
+### EXAMPLE: answers_in_the_json_form_of_aha (of: plan-fetch)
+GIVEN:
+  the fixture account
+  the answer of FakeAha to GET /releases/DEMO-R-2/features has the member
+  `features` with two records and the member `pagination` with the value
+  `{"total_records":2,"total_pages":1,"current_page":1}`
+  the answer of FakeAha to GET /features/DEMO-1 is an object with the one
+  member `feature`
+WHEN:
+  the tool query is called with query =
+  `SELECT id, status FROM features WHERE release = 'DEMO-R-2'`
+  and plan-fetch reads the list
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"release DEMO-R-2","count":2,"records":[{"id":"DEMO-1","status":"In design"},{"id":"DEMO-2","status":"Under consideration"}]}`
+  the parameter `fields` of the list request names `reference_num` and
+  `workflow_status`, and no name in it has a dot
+WHEN:
+  the tool query is called with query = `SELECT id, status FROM features WHERE id = 'DEMO-1'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"feature DEMO-1","count":1,"records":[{"id":"DEMO-1","status":"In design"}]}`
+
+### EXAMPLE: answer_with_an_unknown_form (of: plan-fetch)
+GIVEN:
+  the fixture account
+  FakeAha answers GET /releases/DEMO-R-2/features with the status 200 and
+  the body `{"items":[]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE release = 'DEMO-R-2'`
+  and plan-fetch reads the list
+THEN:
+  the tool result is an error with the message
+  `aha: API error (status 200) on GET /releases/DEMO-R-2/features: the answer has an unknown form`
+
 ### EXAMPLE: custom_fields_are_requested_only_when_used (of: plan-fetch)
 GIVEN:
   the fixture account
@@ -4623,11 +4685,12 @@ THEN:
 
 ### EXAMPLE: description_is_plain_text (of: convert-record)
 GIVEN:
-  the fixture account, in which the API record of DEMO-1 has the description
-  `<p>Export <b>all</b> columns.</p><p>Keep the order.</p>`
+  the fixture account, in which the member `description` of the API record
+  of DEMO-1 is the object
+  `{"id":"7000000000000000601","body":"<p>Export <b>all</b> columns.</p><p>Keep the order.</p>"}`
 WHEN:
   the tool query is called with query = `SELECT description FROM features WHERE id = 'DEMO-1'`
-  and convert-record converts the API record
+  and convert-record takes the text from the member `body`
 THEN:
   the tool result is
   `{"entity":"features","scope":"feature DEMO-1","count":1,"records":[{"description":"Export all columns.\nKeep the order."}]}`
