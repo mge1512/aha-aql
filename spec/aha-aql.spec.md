@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.5.0
+Version:      0.6.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -131,8 +131,7 @@ AggregateItem := {
   label:    Label
 }
 
-Condition  := Comparison | NullTest | InList
-            | AllOf(List<Condition>) | AnyOf(List<Condition>) | Negation(Condition)
+Condition  := Comparison | NullTest | InList | AllOf | AnyOf | Negation
 Comparison := {
   field:    FieldName,
   operator: "=" | "!=" | "<" | "<=" | ">" | ">=" | "contains" | "like",
@@ -140,6 +139,9 @@ Comparison := {
 }
 NullTest   := { field: FieldName, negated: Boolean }   // IS NULL, IS NOT NULL
 InList     := { field: FieldName, values: List<Value> }
+AllOf      := { members: List<Condition> }   // AND
+AnyOf      := { members: List<Condition> }   // OR
+Negation   := { member: Condition }          // NOT
 // Conjunct: one member of the top-level AllOf of a WHERE condition. A WHERE
 // condition that is not an AllOf has one conjunct, itself.
 
@@ -252,85 +254,93 @@ ListPage := {
   total_pages:   u32
 }
 
-ApiFailure := NotFound | NotAuthorized | RateLimited | Unreachable | Rejected
-// NotFound:      the API answers with status 404. Aha! also answers so
-//                when the credential has no access to the record.
-// NotAuthorized: the API answers with status 401 or 403; it has the status.
-// RateLimited:   the API answers with status 429 after the repetitions of
-//                aha-request.
-// Unreachable:   no connection, a proxy that does not open the tunnel, a
-//                certificate that cannot be verified, or no answer in time.
-// Rejected:      every other status that is not a success; it has the status
-//                and the text of the answer.
+ApiFailure    := NotFound | NotAuthorized | RateLimited | Unreachable | Rejected
+NotFound      := { }
+// The API answers with status 404. Aha! also answers so when the
+// credential has no access to the record.
+NotAuthorized := { status: 401 | 403 }
+// The API answers with status 401 or 403.
+RateLimited   := { }
+// The API answers with status 429 after the repetitions of aha-request.
+Unreachable   := { cause: no_answer | certificate | proxy | connection }
+// No answer in time, a certificate that cannot be verified, a proxy that
+// does not open the tunnel, or no connection. Message X02 has one reason
+// text for each cause.
+Rejected      := { status: u32, text: string }
+// Every other status that is not a success, with the text of the answer.
+
+ErrorKind := syntax | bad_name | scope | bad_args | bad_product | wrong_kind
+           | not_found | bad_value | guard_failed | not_authorized
+           | rate_limited | network | api_error
+// The kind of an AqlError.
+// syntax:         The statement cannot be read, or it is not one of the
+//                 accepted forms
+// bad_name:       Unknown entity or field, or an entity or field that
+//                 cannot be used this way
+// scope:          The statement does not say which product or parent is
+//                 meant, or it would read too much
+// bad_args:       The tool call itself is wrong: parameter missing, empty
+//                 or unknown
+// bad_product:    A product that the account does not have
+// wrong_kind:     An id of another kind of record, or a name where an id
+//                 is needed
+// not_found:      A record that does not exist
+// bad_value:      A value that cannot be written to the field, or a
+//                 required value that is missing
+// guard_failed:   A condition next to the id is not true for the record;
+//                 nothing was changed
+// not_authorized: Aha! did not accept the credential, or the credential
+//                 has no access to the record
+// rate_limited:   Aha! answered that there were too many requests
+// network:        Aha! cannot be reached
+// api_error:      Aha! answered with another error
+
+FieldType := string | text | number | boolean | date | datetime | status
+           | user | key | reference
+// The type of a catalog field.
+// string:    Short text
+// text:      Long text. Read as plain text
+// number:    Integer or decimal number
+// boolean:   true or false
+// date:      A day, written YYYY-MM-DD
+// datetime:  A timestamp as the Aha! API writes it
+// status:    The name of a workflow status
+// user:      A user. Read as an e-mail address, or as a name where the
+//            entity says so
+// key:       A product key
+// reference: The id of another record
+
+CustomKind := text | url | note | number | date | choice | fixed_choice
+            | tags | fixed_tags | users | scorecard
+// The kind of a custom field (see custom-fields).
+// text:         One line of text
+// url:          The address of a web page
+// note:         Long text. Read as plain text
+// number:       Integer or decimal number
+// date:         A day, written YYYY-MM-DD
+// choice:       One value of a list that users can extend
+// fixed_choice: One option of a list that only an administrator changes
+// tags:         Several values of a list that users can extend
+// fixed_tags:   Several options of a list that only an administrator
+//               changes
+// users:        Several users of the account
+// scorecard:    A score that Aha! computes. It can be read, and it cannot
+//               be set
+
+RecordKind := product | release | feature | epic | requirement | initiative
+            | goal | idea | comment | user
+// The kind of a record in Aha!.
+// product:     A product (workspace)
+// release:     A release
+// feature:     A feature
+// epic:        An epic
+// requirement: A requirement of a feature
+// initiative:  An initiative
+// goal:        A goal
+// idea:        An idea
+// comment:     A comment on a record
+// user:        A user of the account
 ```
-
-### TYPE: ErrorKind
-Kind: enum
-
-| Value | Description |
-|---|---|
-| syntax | The statement cannot be read, or it is not one of the accepted forms |
-| bad_name | Unknown entity or field, or an entity or field that cannot be used this way |
-| scope | The statement does not say which product or parent is meant, or it would read too much |
-| bad_args | The tool call itself is wrong: parameter missing, empty or unknown |
-| bad_product | A product that the account does not have |
-| wrong_kind | An id of another kind of record, or a name where an id is needed |
-| not_found | A record that does not exist |
-| bad_value | A value that cannot be written to the field, or a required value that is missing |
-| guard_failed | A condition next to the id is not true for the record; nothing was changed |
-| not_authorized | Aha! did not accept the credential, or the credential has no access to the record |
-| rate_limited | Aha! answered that there were too many requests |
-| network | Aha! cannot be reached |
-| api_error | Aha! answered with another error |
-
-### TYPE: FieldType
-Kind: enum
-
-| Value | Description |
-|---|---|
-| string | Short text |
-| text | Long text. Read as plain text |
-| number | Integer or decimal number |
-| boolean | true or false |
-| date | A day, written YYYY-MM-DD |
-| datetime | A timestamp as the Aha! API writes it |
-| status | The name of a workflow status |
-| user | A user. Read as an e-mail address, or as a name where the entity says so |
-| key | A product key |
-| reference | The id of another record |
-
-### TYPE: CustomKind
-Kind: enum
-
-| Value | Description |
-|---|---|
-| text | One line of text |
-| url | The address of a web page |
-| note | Long text. Read as plain text |
-| number | Integer or decimal number |
-| date | A day, written YYYY-MM-DD |
-| choice | One value of a list that users can extend |
-| fixed_choice | One option of a list that only an administrator changes |
-| tags | Several values of a list that users can extend |
-| fixed_tags | Several options of a list that only an administrator changes |
-| users | Several users of the account |
-| scorecard | A score that Aha! computes. It can be read, and it cannot be set |
-
-### TYPE: RecordKind
-Kind: enum
-
-| Value | Description |
-|---|---|
-| product | A product (workspace) |
-| release | A release |
-| feature | A feature |
-| epic | An epic |
-| requirement | A requirement of a feature |
-| initiative | An initiative |
-| goal | A goal |
-| idea | An idea |
-| comment | A comment on a record |
-| user | A user of the account |
 
 ## INTERFACES
 
