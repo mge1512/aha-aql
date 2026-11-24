@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.9.0
+Version:      0.10.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -392,6 +392,7 @@ Values in an API record:
 - A long text is a JSON object, and its member `body` has the text as HTML. Aha! returns `description` in this form, and `theme` of a release. convert-record takes the text from `body`. A text source whose value is a JSON string is taken as it is, for example `body` of a comment.
 - `tags` of a feature is a list of JSON strings.
 - A member that names a status, a user or another record is an object. The catalog writes its source with a dot: `workflow_status.name`, `assigned_to_user.email`, `feature.reference_num`.
+- A feature names its release, its initiative and its epic in members of their own, for example `release_reference_num`. An epic has `initiative_reference_num` and no `release_reference_num`. It names its release in the object `release`, whose member `reference_num` has the id.
 
 The parameter `fields` of ApiList names top-level members only. For the
 API source `workflow_status.name` it names `workflow_status`, and each
@@ -466,6 +467,7 @@ Other records of the fixture account:
 - The goal DEMO-G-1 "Grow the audience". Its API record has the status "On track" under its success metric and no workflow status of its own.
 - The goal OTHER-G-1 "Other goal".
 - The requirement DEMO-1-1 "Column selection" of the feature DEMO-1.
+- The epic DEMO-E-1 "Race day" with the status "In design", in the release DEMO-R-3. Its API record names the release in the member `release`, an object with `id`, `reference_num` and `name`. It has no member `release_reference_num` and no member `color`.
 - One comment on DEMO-3 with the id 7000000000000000701, the body "Verified with the provider." and the user Test User.
 
 OTHER has no releases and no features. No feature of the fixture account
@@ -1534,14 +1536,13 @@ exceptions are:
 | id | string | reference_num | no | |
 | name | string | name | yes | |
 | status | status | workflow_status.name | yes | |
-| release | reference: release | release_reference_num | no | |
+| release | reference: release | release.reference_num | no | The API record of an epic has its release as an object |
 | initiative | reference: initiative | initiative_reference_num | yes | |
 | assigned_to | user | assigned_to_user.email | no | |
 | product | key | product_id | no | |
 | start_date | date | start_date | yes | |
 | due_date | date | due_date | yes | |
 | progress | number | progress | yes | |
-| color | string | color | yes | |
 | description | text | description | yes | heavy |
 | created_at | datetime | created_at | no | |
 | updated_at | datetime | updated_at | no | |
@@ -4167,6 +4168,29 @@ WHEN:
 THEN:
   the tool result is
   `{"entity":"goals","scope":"product DEMO","count":1,"records":[{"id":"DEMO-G-1","status":"On track"}]}`
+
+### EXAMPLE: release_of_an_epic (of: entity-catalog)
+GIVEN:
+  the fixture account, in which the API record of the epic DEMO-E-1 names
+  its release in the object `release` and has no member
+  `release_reference_num`
+WHEN:
+  the tool query is called with query =
+  `SELECT id, release FROM epics WHERE product = 'DEMO'`
+  and the entity-catalog gives the source of the release
+THEN:
+  the tool result is
+  `{"entity":"epics","scope":"product DEMO","count":1,"records":[{"id":"DEMO-E-1","release":"DEMO-R-3"}]}`
+  the parameter `fields` of the ApiList call on
+  /products/7000000000000000001/epics names `release`, and it names
+  neither `release_reference_num` nor `color`
+WHEN:
+  the tool query is called with query =
+  `SELECT name FROM epics WHERE release = 'demo-r-3'`
+THEN:
+  the tool result is
+  `{"entity":"epics","scope":"release DEMO-R-3","count":1,"records":[{"name":"Race day"}]}`
+  FakeAha recorded one ApiList call on /releases/DEMO-R-3/epics
 
 ### EXAMPLE: statuses_of_an_entity (of: entity-catalog)
 GIVEN:
