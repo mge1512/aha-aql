@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.12.1
+Version:      0.13.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -413,7 +413,7 @@ network connection.
 - A route for a record that the fixture does not have is answered with the status 404.
 - ApiCreate gives the new record the next free reference number.
 - ApiCreate on a goal route needs the member `success_metric` with a `name` that is not empty. Without that member the answer has the status 400 and the body `{"error":"Required parameter missing: success_metric"}`. With an empty name it has the status 400 and the body `{"error":"Validation failed","errors":{"message":"Success metric cannot be blank"}}`. The new goal has the status of `success_metric.workflow_status`, and without that member the first status of the workflow of goals.
-- ApiUpdate on a goal takes the status from the member `workflow_status` of the goal, and the text of the success metric from `success_metric.name`.
+- ApiUpdate on a goal takes the status from the member `workflow_status` of the goal. It ignores the member `success_metric`, as Aha! does: the answer has the status 200, and the text of the success metric is the old one.
 - ApiList on /custom_field_definitions returns the custom field definitions of the fixture account as one list without page information, in the order of the table below. A test can tell FakeAha to add a definition.
 - ApiGet on /custom_field_definitions/{id}/options returns the options of that definition in their order.
 - A record that is read by its id has the member `custom_fields`. A product that is read with ApiGet on /products/{id}, with its NumericId, has that member too. A record of a list has it only when the parameter `fields` names `custom_fields`. The member is a list with one entry per custom field that has a value in the record. It is an empty list for a record without such a value. The entries have the form that custom-fields describes.
@@ -1041,7 +1041,7 @@ STEPS:
 2. With an entity: return an object with these members in this order.
    a. `entity`: the name.
    b. `about`: the about text with {KEY} replaced.
-   c. `fields`: one object per field of the entity in catalog order, with `name`, `type`, and `writable` with the value true when the field is writable. A field that is not writable has no member `writable`. The text of `type` comes from the first table below.
+   c. `fields`: one object per field of the entity in catalog order, with `name`, `type`, and `writable` with the value true when the field is writable. A field that is not writable has no member `writable`. For a field that is writable in INSERT only, the value of `writable` is the text `INSERT only`. The text of `type` comes from the first table below.
    d. `custom_fields`: run custom-fields for the entity without a key; on failure → the error of custom-fields. An empty list gives no member. Otherwise the member is a list with one object per custom field, in the order of custom-fields. An object has `name`, `label`, `type`, and `writable` with the value true when the kind can be set and the entity has the operation update. The text of `type` comes from the table of kinds in custom-fields.
    e. `custom_fields_note`: only when the result has the member `custom_fields`; the text `* shows custom fields only with <id field> = '...', and only those that have a value. To select one by name: SELECT <id field>, <name> FROM <entity> WHERE <id field> = '<example id>'`. `<name>` is the first name of `custom_fields`, and `<example id>` is the example id of error-messages for the kind of the entity.
    f. `filter_by_parent`: only when the entity has parent filters; a list with the text `<field> = '...'` for each of them.
@@ -1143,7 +1143,7 @@ result: WriteResult | AqlError
 ```
 
 PRECONDITIONS:
-- the statement comes from parse-statement: the entity allows update, every assigned field is a writable field or a custom field that can be set, and every guard field is a field or a custom field of the entity
+- the statement comes from parse-statement: the entity allows update, every assigned field is a field that an UPDATE can set or a custom field that can be set, and every guard field is a field or a custom field of the entity
 
 STEPS:
 1. The id must be a RecordId that the entity accepts. For comments: a NumericId. For every other entity: a ReferenceNumber of the entity's kind or a NumericId. A ReferenceNumber of another kind → wrong_kind, message K02. Any other value → wrong_kind, message K04. A ReferenceNumber is used in capital letters from here on.
@@ -1351,7 +1351,7 @@ Rules for a write statement:
 - The entity goes through resolve-names. An unknown entity → bad_name, message W12. An entity without any operation → bad_name, message W13. An entity that does not have the operation of the statement → bad_name, message W14.
 - INSERT has one row of values. A second row → syntax, message W07. A different number of columns and values → syntax, message W08.
 - A column of INSERT is the parent when it is `parent`, the name of the parent kind of the entity, or another name of the parent field of the entity. The parent given twice with different values → syntax, message W09.
-- A column or an assigned field that is the id field of the entity → bad_name, message W15. A column or an assigned field that is unknown or not writable → bad_name, message W16.
+- A column or an assigned field that is the id field of the entity → bad_name, message W15. A column or an assigned field that is unknown or not writable → bad_name, message W16. An assigned field of UPDATE that is writable in INSERT only → bad_name, message W16.
 - An assigned field of UPDATE can be a custom field of the entity. A column or an assigned field that is a custom field of a kind that cannot be set → bad_name, message W16. Every other custom field as a column of INSERT → bad_name, message W31: a custom field is set with UPDATE only.
 - An assignment is `field = value`. Anything between the value and the next `,` or WHERE → syntax, message W10.
 - UPDATE and DELETE need a WHERE clause; without it → syntax, message W04.
@@ -1402,6 +1402,9 @@ The entries give the API source of a field as the member of the API record
 that has the value. `a.b` is member `b` of member `a`. Every field without
 the note "heavy" is requested from a list; a heavy field is requested only
 when the statement uses it (see plan-fetch).
+
+The column Writable has `yes`, `no` or `INSERT only`. A field with `INSERT
+only` can be set when the record is created. An UPDATE cannot set it.
 
 ### Common other names for fields
 
@@ -1659,7 +1662,7 @@ exceptions are:
 |---|---|---|---|---|
 | id | string | reference_num | no | |
 | name | string | name | yes | |
-| success_metric | string | success_metric.name | yes | The text of the success metric. Required in INSERT. Aha! refuses an empty text |
+| success_metric | string | success_metric.name | INSERT only | The text of the success metric. Required in INSERT. Aha! refuses an empty text, and it does not change the text in an update |
 | status | status | success_metric.workflow_status.name | yes | Aha! keeps the status of a goal with its success metric |
 | product | key | product_id | no | |
 | progress | number | progress | yes | |
@@ -2387,7 +2390,7 @@ STEPS:
 4. The field `tags`: the tags as a single JSON string, joined by a comma.
 5. The parent of a new record is part of the route. It is not a member of the body.
 6. Custom fields. When the statement assigns a custom field, the object of step 1 has the member `custom_fields`. Its place among the members is the place of the first custom field in the order of the statement. Its value is a JSON object with one member per custom field, in the order of the statement. The name of such a member is the key of the custom field, as its definition writes it. Its value is the value in the request that the table of values to set in custom-fields gives for the kind.
-7. Goals. The field `success_metric` is the member `success_metric`, and its value is a JSON object with the member `name`. In a create request the status of a goal is the member `workflow_status` of that object, after `name`. The goal then has no member `workflow_status` of its own. In an update request the status is the member `workflow_status` of the goal, as for every other entity.
+7. Goals. The field `success_metric` is in a create request only. It is the member `success_metric`, and its value is a JSON object with the member `name`. In a create request the status of a goal is the member `workflow_status` of that object, after `name`. The goal then has no member `workflow_status` of its own. In an update request the status is the member `workflow_status` of the goal, as for every other entity.
 
 For the statement `UPDATE features SET status = 'In design', assigned_to =
 'me' WHERE id = 'DEMO-1'` on the fixture account, the body is
@@ -2519,7 +2522,7 @@ Placeholders that several messages use:
 | `<example of X>` | The example statement of the entity X, with {KEY} replaced |
 | `<entity list>` | The names of all catalog entities |
 | `<field list>` | The names of all fields of the entity |
-| `<writable list>` | The names of the writable fields of the entity |
+| `<writable list>` | The names of the writable fields of the entity. A field that is writable in INSERT only has ` (INSERT only)` after its name |
 | `<changeable list>` | The names of the entities that have an operation |
 | `<read form>` | `SELECT fields FROM entity [WHERE field = 'value' [AND ...]] [GROUP BY field] [ORDER BY field [DESC]] [LIMIT n]` |
 | `<write forms>` | The three form lines of the description of `execute`, joined by a space, a vertical bar and a space |
@@ -2705,7 +2708,9 @@ In W04, `<KEYWORD>` is `UPDATE` or `DELETE`. In W14, `<done>` is
 
 In W16, `<opening>` is `unknown field '<word>' on <entity>.` for a word
 that resolve-names does not know, and `the field <field> of <entity> cannot
-be set.` for a field that is not writable. `<parent note>` is `, and parent
+be set.` for a field that is not writable. For a field that is writable in
+INSERT only, in an UPDATE, it is `the field <field> of <entity> can be set
+in INSERT only.` `<parent note>` is `, and parent
 in INSERT` when the entity has the operation create, and empty otherwise.
 `<custom write hint>` is `. Custom fields, with UPDATE only: <writable
 custom list>` when the writable custom list is not empty, and empty
@@ -2829,7 +2834,7 @@ ERRORS:
 - The Aha! API accepts the values of write-request in an update of a feature. They are the status as its name, the user as an e-mail address, the release and the initiative as ids, and the tags as one text. This was observed on one account on 2026-11-24.
 - The create route and the delete route of every entity that can be changed work as the catalog says. This was observed on one account on 2026-11-24; a comment was created on a feature only. An update was observed for features, epics, requirements and goals.
 - The record of a product names the workflow of each record kind in a member whose name ends in `_workflow`. The list of workflows of the product has that workflow. This was observed on two products of one account on 2026-11-24, where features, epics and requirements named one workflow. The API documentation shows the same members.
-- The Aha! API creates a goal only when the request has a success metric with a name. An update takes the status of a goal as `workflow_status`. Both were observed on one account on 2026-11-24. The documentation shows the status of a new goal inside `success_metric`; this form was not observed. The form of write-request for a new text of the success metric in an update was not observed either.
+- The Aha! API creates a goal only when the request has a success metric with a name. An update takes the status of a goal as `workflow_status`. Both were observed on one account on 2026-11-24. A new goal takes its status inside `success_metric`, as the documentation shows; this was observed on the same day. An update with a new text in `success_metric.name` is answered without an error and does not change the text. The documentation shows no other form for it.
 
 ## POSTCONDITIONS
 
@@ -3635,6 +3640,20 @@ THEN:
   every object has exactly the members `entity` and `about`
   FakeAha recorded no call
 
+### EXAMPLE: describe_shows_a_field_that_is_set_in_insert_only (of: describe-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query = `DESCRIBE goals`
+  and describe-statement answers it
+THEN:
+  `about` is `Goals of a product. A new goal needs a success metric.`
+  the object of name in `fields` is
+  `{"name":"name","type":"string","writable":true}`
+  the object of success_metric in `fields` is
+  `{"name":"success_metric","type":"string","writable":"INSERT only"}`
+  the object of product in `fields` is `{"name":"product","type":"product key"}`
+
 ### EXAMPLE: insert_with_other_spellings (of: insert-statement)
 GIVEN:
   the fixture account
@@ -4109,6 +4128,19 @@ WHEN:
 THEN:
   the tool result is an error with the message
   `unknown field 'bogus' on features. Fields of features that can be set: name, status, release, initiative, assigned_to, start_date, due_date, tags, description, and parent in INSERT. Custom fields, with UPDATE only: custom.customer, custom.effort_days, custom.go_live, custom.markets, custom.platforms, custom.priority, custom.release_notes, custom.reviewers`
+  no write request
+
+### EXAMPLE: update_of_a_field_that_is_set_in_insert_only (of: parse-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE goals SET success_metric = 'Weekly viewers' WHERE id = 'DEMO-G-1'`
+  and parse-statement reads it
+THEN:
+  the tool result is an error with the message
+  `the field success_metric of goals can be set in INSERT only. Fields of goals that can be set: name, success_metric (INSERT only), status, progress, description, and parent in INSERT`
+  FakeAha recorded no ApiGet call on /goals/DEMO-G-1
   no write request
 
 ### EXAMPLE: assignment_of_a_word_or_an_expression (of: parse-statement)
@@ -5138,12 +5170,12 @@ THEN:
   the message of the tool result is `Goal DEMO-G-2 created`
 WHEN:
   the tool execute is called with statement =
-  `UPDATE goals SET success_metric = 'Weekly viewers', status = 'achieved' WHERE id = 'DEMO-G-1'`
+  `UPDATE goals SET status = 'achieved' WHERE id = 'DEMO-G-1'`
 THEN:
   FakeAha recorded one ApiUpdate call on /goals/DEMO-G-1 with the body
-  `{"goal":{"success_metric":{"name":"Weekly viewers"},"workflow_status":"Achieved"}}`
+  `{"goal":{"workflow_status":"Achieved"}}`
   the tool result is
-  `{"id":"DEMO-G-1","name":"Grow the audience","success_metric":"Weekly viewers","status":"Achieved","message":"Goal DEMO-G-1 updated"}`
+  `{"id":"DEMO-G-1","name":"Grow the audience","status":"Achieved","message":"Goal DEMO-G-1 status changed to 'Achieved'"}`
 
 ### EXAMPLE: request_address_and_headers (of: aha-request)
 GIVEN:
