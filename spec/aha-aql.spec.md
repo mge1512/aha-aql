@@ -2,9 +2,9 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.3.0
+Version:      0.3.1
 Spec-Schema:  0.4.0
-Author:       Matthias G. Eckermann <pcd@mailbox.org>
+Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
 Verification: none
 Safety-Level: QM
@@ -609,10 +609,10 @@ exit code:       0 | 1 | 2
 ```
 
 PRECONDITIONS:
-- the first word of the command line is `query` or `execute`; every other first word is answered as the deployment template says
+- the first word of the command line is `query` or `execute`
 
 STEPS:
-1. Run load-configuration for the mode manual; on failure → exit code 2, with the message of load-configuration on standard error.
+1. Run load-configuration; on failure → exit code 2, with the message of load-configuration on standard error.
 2. Take the statement. For `query` it is the value of the argument `query`, and for `execute` the value of the argument `statement`. If that argument is absent → exit code 2, message G10.
 3. If the value is `-`: read standard input to its end as UTF-8 text. That text is the statement.
 4. If the tool is `execute` and the setting read_only is true → exit code 2, message G11. No request is sent.
@@ -633,15 +633,15 @@ POSTCONDITIONS:
 - no log line of `execute` was written
 
 ERRORS:
-- exit code 2: the start errors G01 to G08 of load-configuration; statement argument missing (G10); `execute` with read_only (G11)
+- exit code 2: the start errors G01 to G08 and G12 of load-configuration; statement argument missing (G10); `execute` with read_only (G11)
 - exit code 1: every AqlError of the tool, with its message
 
 ## BEHAVIOR/INTERNAL: load-configuration
 Constraint: required
 
-Reads the settings of the process from its arguments and from its
-environment. For stdio mode and manual mode it also returns the Account of
-the process.
+Reads the first word of the command line and the settings of the process,
+from its arguments and from its environment. For stdio mode and manual
+mode it also returns the Account of the process.
 
 Every setting of the server has an option. A host or a sandbox usually
 gives some settings to a process through its environment, and these
@@ -654,15 +654,15 @@ arguments of a process can be seen by other users of the same system.
 
 INPUTS:
 ```
-mode:        Mode
-word:        stdio | http | query | execute   // the first word of the command line
-arguments:   List<string>                     // every argument after the first word
+word:        string or none    // the first word of the command line
+arguments:   List<string>      // every argument after the first word
 environment: the variables AHA_SUBDOMAIN, AHA_API_KEY, AHA_DEFAULT_PRODUCT
              and AHA_READ_ONLY
 ```
 
 OUTPUTS:
 ```
+mode:     Mode
 settings: Settings
 account:  Account or none     // none in http mode
 or a start error: one line on standard error, and exit code 2
@@ -672,23 +672,24 @@ PRECONDITIONS:
 - none
 
 STEPS:
-1. Read each argument as `key=value`, split at its first `=`. If an argument has no `=` or an empty key → G01.
-2. In http mode: if the key `api-key-file` is given → G09.
-3. If a key is not an option of the word (see the first table below) → G02. If a key is given twice → G03.
-4. Take from the environment each setting that has a variable (see the first table below) and whose option is absent. A variable that is absent or empty gives no value.
-5. Check the values. In G04 the name of the variable stands for the key when the value comes from a variable.
+1. Take the mode from the first word. `stdio` and `http` are the modes of these names, and `query` and `execute` are manual mode. If the word is another one, or if the command line has no first word → G12. A flag that the deployment template defines, for example `--version`, is not a first word.
+2. Read each argument as `key=value`, split at its first `=`. If an argument has no `=` or an empty key → G01.
+3. In http mode: if the key `api-key-file` is given → G09.
+4. If a key is not an option of the word (see the first table below) → G02. If a key is given twice → G03.
+5. Take from the environment each setting that has a variable (see the first table below) and whose option is absent. A variable that is absent or empty gives no value.
+6. Check the values. In G04 the name of the variable stands for the key when the value comes from a variable.
    a. `read-only` and `dry-run`: `true` or `false`; otherwise → G04.
    b. `subdomain`: put the value into lower case. If it does not match Subdomain → G04.
    c. `default-product` and `api-key-file`: if the option is given with an empty value → G04.
    d. `listen`: the value goes to the http transport of the deployment template. If its host is not a loopback address: write a warning to the diagnostic output. The warning says that every request has a credential and that the connection needs TLS in front of the server.
-6. In http mode: the account is none, and the variable AHA_API_KEY is not read. If that variable is not empty: write a warning to the diagnostic output that says so. Continue with step 10.
-7. In stdio mode and manual mode: if there is no subdomain → G05.
-8. Credential from a file. When the option `api-key-file` is given, the variable AHA_API_KEY is not read.
+7. In http mode: the account is none, and the variable AHA_API_KEY is not read. If that variable is not empty: write a warning to the diagnostic output that says so. Continue with step 11.
+8. In stdio mode and manual mode: if there is no subdomain → G05.
+9. Credential from a file. When the option `api-key-file` is given, the variable AHA_API_KEY is not read.
    a. If the path is not a regular file that the process can read → G07.
    b. On a platform that has permission bits: if a permission bit for the group or for other users is set → G08.
    c. Read at most 4097 bytes. The credential is that text without surrounding white space. If it does not match Credential → G07.
-9. Credential from the environment. Without the option `api-key-file`, the credential is the value of AHA_API_KEY without surrounding white space. If the variable is absent or empty → G06. If the value does not match Credential → G07.
-10. Return the settings and the account.
+10. Credential from the environment. Without the option `api-key-file`, the credential is the value of AHA_API_KEY without surrounding white space. If the variable is absent or empty → G06. If the value does not match Credential → G07.
+11. Return the mode, the settings and the account.
 
 Options:
 
@@ -730,6 +731,12 @@ Start messages. Each one is a single line on standard error:
 | G09 | `error: http mode has no option api-key-file. Each request brings its credential in the header Aha-Api-Key` |
 | G10 | `error: <word> needs <key>=STATEMENT, or <key>=- to read the statement from standard input` |
 | G11 | `error: execute is not available, because read-only is true (option read-only or variable AHA_READ_ONLY)` |
+| G12 | `error: unknown transport '<word>'. Valid: stdio, http, query, execute` |
+
+In G12, `<word>` is the first word as it was given, and it is empty when
+the command line has none. The text has the form of the message of the
+deployment template for an unknown transport, with the two words of manual
+mode added.
 
 In G01, `<n>` is the position of the argument after the first word,
 counted from 1. In G02, `<keys>` are the options of the word in the order
@@ -756,7 +763,7 @@ POSTCONDITIONS:
 - the settings come from the arguments, from the key file and from the variables of the second table, and from no other variable and no other file
 
 ERRORS:
-- start error with exit code 2: G01 to G09
+- start error with exit code 2: G01 to G09, and G12
 
 ## BEHAVIOR/INTERNAL: request-account
 Constraint: required
@@ -2075,7 +2082,7 @@ PRECONDITIONS:
 
 STEPS:
 1. Build the address: `https://`, the subdomain, `.aha.io/api/v1`, the route, and the parameters as a query string. Every value that replaces a route parameter and every parameter value is percent-encoded. No address has another scheme or another host.
-2. Send the request with the headers `Authorization: Bearer <credential>`, `Accept: application/json` and `User-Agent: mcp-server-aha-aql/<version> (<project address>)`. A request with a body also has `Content-Type: application/json`. Aha! asks every client for a way to reach its developer. The project address is the address of the project in the metadata of the package.
+2. Send the request with the headers `Authorization: Bearer <credential>`, `Accept: application/json` and `User-Agent: mcp-server-aha-aql/<version> (https://github.com/mge1512/aha-aql)`. A request with a body also has `Content-Type: application/json`. Aha! asks every client for a way to reach its developer, and the address of the project in the User-Agent is that way.
 3. Proxy. When the environment gives an HTTPS proxy and does not exclude the host of Aha! from it: connect to the proxy and ask it with CONNECT for a tunnel to `<subdomain>.aha.io`, port 443. In every other case connect to that host and port directly.
    MECHANISM: the standard library of the language reads the variables for an https address. HTTPS_PROXY or https_proxy gives the proxy. NO_PROXY or no_proxy gives the hosts without a proxy.
 4. TLS. The connection to Aha!, direct or inside the tunnel, uses TLS. The certificate must be valid for the host name `<subdomain>.aha.io`, and its chain must end in the trust store of the platform. On Linux the variables SSL_CERT_FILE and SSL_CERT_DIR can name that trust store. No setting turns this check off.
@@ -2853,6 +2860,23 @@ WHEN:
 THEN:
   load-configuration returns settings without a subdomain, and no account
   the diagnostic output has no warning
+
+### EXAMPLE: unknown_first_word (of: load-configuration)
+GIVEN:
+  the environment has AHA_SUBDOMAIN = `example` and AHA_API_KEY = `fixture-key`
+WHEN:
+  load-configuration runs for the command line `mcp-server-aha-aql websocket`
+THEN:
+  stderr contains the line
+  `error: unknown transport 'websocket'. Valid: stdio, http, query, execute`
+  exit_code = 2
+  no request was sent
+WHEN:
+  load-configuration runs for the command line `mcp-server-aha-aql`
+THEN:
+  stderr contains the line
+  `error: unknown transport ''. Valid: stdio, http, query, execute`
+  exit_code = 2
 
 ### EXAMPLE: http_request_brings_its_account (of: request-account)
 GIVEN:
@@ -4011,7 +4035,8 @@ THEN:
   GET https://example.aha.io/api/v1/features/DEMO-3
   the request has the headers `Authorization: Bearer fixture-key` and
   `Accept: application/json`
-  its `User-Agent` header starts with `mcp-server-aha-aql/`
+  its `User-Agent` header starts with `mcp-server-aha-aql/` and ends with
+  `(https://github.com/mge1512/aha-aql)`
 
 ### EXAMPLE: request_through_the_proxy_of_the_environment (of: aha-request)
 GIVEN:
@@ -4336,7 +4361,7 @@ Exit codes:
 |---|---|
 | 0 | Manual mode: the tool returned a result. stdio and http: the server ended as the deployment template says |
 | 1 | Manual mode: the statement failed with an AqlError. http: see the deployment template |
-| 2 | The command line or the configuration is wrong: start messages G01 to G11, and an unknown first word as the deployment template says |
+| 2 | The command line or the configuration is wrong: start messages G01 to G12 |
 
 External services:
 
@@ -4350,7 +4375,7 @@ Deviations from the deployment template:
 | Template key | The template says | This specification says |
 |---|---|---|
 | CONFIG-ENV-VARS | No configuration from environment variables. The template says this in the table, in a PRECONDITION and in an INVARIANT | The server reads the environment variables of the table in load-configuration, in addition to its options and the key file. A host or a sandbox gives a process its credentials in this way. The template will be changed to allow it. Until then a translator follows this specification on this point |
-| TRANSPORT-SELECTION | The first word selects a transport: stdio or http | The first word can also be `query` or `execute`. These two select no transport. They make one tool call and end |
+| TRANSPORT-SELECTION | The first word selects a transport: stdio or http. The message for another word lists these two | The first word can also be `query` or `execute`. These two select no transport. They make one tool call and end. The message for another word lists all four words (G12). The template will get a rule for such words |
 | ERROR-HANDLING | All errors are JSON-RPC error responses | A statement that fails is answered with a tool result that is marked as an error, so that the language model reads the message. Protocol errors and internal errors are JSON-RPC error responses |
 
 Platform: as the deployment template says. The check of the permission
