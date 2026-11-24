@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.2.0
+Version:      0.3.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <pcd@mailbox.org>
 License:      MIT
@@ -24,11 +24,11 @@ The dialect differs from the original in four points:
 - A statement reads one entity.
 - A write statement changes one record, and it finds that record by its id.
 
-The server calls the Aha! REST API directly. The account name and the
-credential come from its options or from two environment variables. In
-http mode they come from each request (see load-configuration and
-request-account). The server does not obtain a credential itself: this
-version has no OAuth flow.
+The server calls the Aha! REST API directly. Its settings come from
+options and from environment variables. The credential comes from a key
+file or from an environment variable, and in http mode from each request
+(see load-configuration and request-account). The server does not obtain a
+credential itself: this version has no OAuth flow.
 
 ## TYPES
 
@@ -61,7 +61,8 @@ Subdomain := string where matches("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 Credential := string where matches("^[!-~]{1,4096}$")
 // A bearer value that Aha! accepts: an API key or an OAuth2 access token.
 // It has 1 to 4096 printable ASCII characters and no space. The server
-// does not interpret it. It only sends it to Aha!.
+// does not interpret it. It only sends it to Aha!. In a sandbox it can be a
+// placeholder that the sandbox replaces on the way to Aha!.
 
 Account := { subdomain: Subdomain, credential: Credential }
 // What one tool call runs with (see request-account).
@@ -74,6 +75,8 @@ Settings := {
   listen:          string,           // http mode; default of the deployment template
   dry_run:         Boolean           // manual mode, tool execute; default false
 }
+// subdomain, default_product and read_only come from an option or from an
+// environment variable. The option takes precedence (see load-configuration).
 
 StatementKind := select | describe | insert | update | delete
 
@@ -237,8 +240,8 @@ ApiFailure := NotFound | NotAuthorized | RateLimited | Unreachable | Rejected
 // NotAuthorized: the API answers with status 401 or 403; it has the status.
 // RateLimited:   the API answers with status 429 after the repetitions of
 //                aha-request.
-// Unreachable:   no connection, a certificate that cannot be verified, or
-//                no answer in time.
+// Unreachable:   no connection, a proxy that does not open the tunnel, a
+//                certificate that cannot be verified, or no answer in time.
 // Rejected:      every other status that is not a success; it has the status
 //                and the text of the answer.
 ```
@@ -318,7 +321,9 @@ AhaAPI
       DELETE. Deletes one record.
 ```
 
-The server uses no other operation of Aha!, and it calls no other host.
+The server uses no other operation of Aha!, and it sends requests for no
+other host. The only other host that it connects to is an HTTPS proxy that
+the environment gives (see aha-request).
 The bodies of ApiCreate and ApiUpdate are built as write-request says.
 
 Test double: FakeAha. It takes the place of the HTTPS connection (see
@@ -333,6 +338,7 @@ network connection.
 - A route for a record that the fixture does not have is answered with the status 404.
 - ApiCreate gives the new record the next free reference number.
 - A test can tell FakeAha to answer a route with a given status and header a given number of times, or to give no answer.
+- FakeAha records for every request the proxy that the server chose for it, or that it chose none. A test can tell FakeAha that the proxy does not open the tunnel.
 - FakeAha records every call with its method, address, headers, parameters and body. A test can then check which requests a statement caused, which credential they had, and that a failed statement caused no write request.
 
 The EXAMPLES use this fixture account. Unless an example says otherwise:
@@ -633,9 +639,15 @@ ERRORS:
 ## BEHAVIOR/INTERNAL: load-configuration
 Constraint: required
 
-Reads the settings of the process from its arguments and from two
-environment variables. For stdio mode and manual mode it also returns the
-Account of the process.
+Reads the settings of the process from its arguments and from its
+environment. For stdio mode and manual mode it also returns the Account of
+the process.
+
+Every setting of the server has an option. A host or a sandbox usually
+gives some settings to a process through its environment, and these
+settings also have an environment variable. An option takes precedence
+over its variable. The credential comes from a key file or from a
+variable.
 
 The command line has no option that takes the credential itself. The
 arguments of a process can be seen by other users of the same system.
@@ -645,7 +657,8 @@ INPUTS:
 mode:        Mode
 word:        stdio | http | query | execute   // the first word of the command line
 arguments:   List<string>                     // every argument after the first word
-environment: the variables AHA_SUBDOMAIN and AHA_API_KEY
+environment: the variables AHA_SUBDOMAIN, AHA_API_KEY, AHA_DEFAULT_PRODUCT
+             and AHA_READ_ONLY
 ```
 
 OUTPUTS:
@@ -660,34 +673,47 @@ PRECONDITIONS:
 
 STEPS:
 1. Read each argument as `key=value`, split at its first `=`. If an argument has no `=` or an empty key → G01.
-2. If a key is not an option of the word (see the first table below) → G02. If a key is given twice → G03.
-3. Check the values.
+2. In http mode: if the key `api-key-file` is given → G09.
+3. If a key is not an option of the word (see the first table below) → G02. If a key is given twice → G03.
+4. Take from the environment each setting that has a variable (see the first table below) and whose option is absent. A variable that is absent or empty gives no value.
+5. Check the values. In G04 the name of the variable stands for the key when the value comes from a variable.
    a. `read-only` and `dry-run`: `true` or `false`; otherwise → G04.
    b. `subdomain`: put the value into lower case. If it does not match Subdomain → G04.
-   c. `default-product` and `api-key-file`: if the value is empty → G04.
+   c. `default-product` and `api-key-file`: if the option is given with an empty value → G04.
    d. `listen`: the value goes to the http transport of the deployment template. If its host is not a loopback address: write a warning to the diagnostic output. The warning says that every request has a credential and that the connection needs TLS in front of the server.
-4. Subdomain. Take the option `subdomain`. Without it, take the variable AHA_SUBDOMAIN and check it as step 3 b says; in G04 its name stands for the key. A variable that is empty counts as absent.
-5. In http mode: if the option `api-key-file` is given or the variable AHA_API_KEY is not empty → G09. The account is none. Continue with step 9.
-6. In stdio mode and manual mode: if there is no subdomain → G05.
-7. Credential from a file. When the option `api-key-file` is given, the variable AHA_API_KEY is not read.
+6. In http mode: the account is none, and the variable AHA_API_KEY is not read. If that variable is not empty: write a warning to the diagnostic output that says so. Continue with step 10.
+7. In stdio mode and manual mode: if there is no subdomain → G05.
+8. Credential from a file. When the option `api-key-file` is given, the variable AHA_API_KEY is not read.
    a. If the path is not a regular file that the process can read → G07.
    b. On a platform that has permission bits: if a permission bit for the group or for other users is set → G08.
    c. Read at most 4097 bytes. The credential is that text without surrounding white space. If it does not match Credential → G07.
-8. Credential from the environment. Without the option `api-key-file`, the credential is the value of AHA_API_KEY without surrounding white space. If the variable is absent or empty → G06. If the value does not match Credential → G07.
-9. Return the settings and the account.
+9. Credential from the environment. Without the option `api-key-file`, the credential is the value of AHA_API_KEY without surrounding white space. If the variable is absent or empty → G06. If the value does not match Credential → G07.
+10. Return the settings and the account.
 
 Options:
 
-| Key | Value | Accepted for | Default |
-|---|---|---|---|
-| subdomain | The account name: the part of the address before `.aha.io` | stdio, http, query, execute | The variable AHA_SUBDOMAIN |
-| api-key-file | The path of a file that has the credential | stdio, query, execute | The variable AHA_API_KEY |
-| default-product | The key, the numeric id or the name of a product. It is used as the ExampleKey | stdio, http, query, execute | none |
-| read-only | true or false. With true the tool `execute` is not offered | stdio, http, query, execute | false |
-| listen | host:port for the http transport | http | As the deployment template says |
-| dry-run | true or false. See manual-mode | execute | false |
-| query | One read statement or describe statement, or `-` | query | Required |
-| statement | One write statement, or `-` | execute | Required |
+| Key | Value | Accepted for | Variable | Default |
+|---|---|---|---|---|
+| subdomain | The account name: the part of the address before `.aha.io` | stdio, http, query, execute | AHA_SUBDOMAIN | none |
+| api-key-file | The path of a file that has the credential | stdio, query, execute | none. Without the option, the credential itself comes from AHA_API_KEY | none |
+| default-product | The key, the numeric id or the name of a product. It is used as the ExampleKey | stdio, http, query, execute | AHA_DEFAULT_PRODUCT | none |
+| read-only | true or false. With true the tool `execute` is not offered | stdio, http, query, execute | AHA_READ_ONLY | false |
+| listen | host:port for the http transport | http | none | As the deployment template says |
+| dry-run | true or false. See manual-mode | execute | none | false |
+| query | One read statement or describe statement, or `-` | query | none | Required |
+| statement | One write statement, or `-` | execute | none | Required |
+
+Environment variables. The server reads these variables and no other:
+
+| Variable | Use | Read in |
+|---|---|---|
+| AHA_SUBDOMAIN | The setting subdomain, when the option is absent | load-configuration |
+| AHA_API_KEY | The credential in stdio mode and manual mode, when the option `api-key-file` is absent | load-configuration |
+| AHA_DEFAULT_PRODUCT | The setting default_product, when the option is absent | load-configuration |
+| AHA_READ_ONLY | The setting read_only, when the option is absent | load-configuration |
+| HTTPS_PROXY, https_proxy | The proxy for the connection to Aha! | aha-request |
+| NO_PROXY, no_proxy | The hosts that are reached without the proxy | aha-request |
+| SSL_CERT_FILE, SSL_CERT_DIR | The trust store, on Linux | aha-request |
 
 Start messages. Each one is a single line on standard error:
 
@@ -701,9 +727,9 @@ Start messages. Each one is a single line on standard error:
 | G06 | `error: no credential. Use api-key-file=PATH or set AHA_API_KEY` |
 | G07 | `error: no usable credential in <source>: <reason>` |
 | G08 | `error: <path> can be read by other users. Run: chmod 600 <path>` |
-| G09 | `error: http mode takes the credential from each request. Remove api-key-file and unset AHA_API_KEY` |
+| G09 | `error: http mode has no option api-key-file. Each request brings its credential in the header Aha-Api-Key` |
 | G10 | `error: <word> needs <key>=STATEMENT, or <key>=- to read the statement from standard input` |
-| G11 | `error: execute is not available with read-only=true` |
+| G11 | `error: execute is not available, because read-only is true (option read-only or variable AHA_READ_ONLY)` |
 
 In G01, `<n>` is the position of the argument after the first word,
 counted from 1. In G02, `<keys>` are the options of the word in the order
@@ -714,7 +740,7 @@ In G04, `<what>` depends on the key:
 
 | Key | `<what>` |
 |---|---|
-| read-only, dry-run | `true or false` |
+| read-only, dry-run, AHA_READ_ONLY | `true or false` |
 | subdomain, AHA_SUBDOMAIN | `the account name before .aha.io, for example mycompany` |
 | default-product | `a product key, id or name` |
 | api-key-file | `a file path` |
@@ -725,8 +751,9 @@ and `not a single value of at most 4096 printable characters`.
 
 POSTCONDITIONS:
 - no request was sent
-- no start message has the credential, and none has the value of an argument other than the path of the key file
-- the process takes its configuration from its arguments and from the two variables only: it reads no other environment variable for it and no configuration file
+- an option took precedence over its variable, and the key file over AHA_API_KEY
+- no start message and no warning has the credential, and none has the value of an argument or of a variable other than the path of the key file
+- the settings come from the arguments, from the key file and from the variables of the second table, and from no other variable and no other file
 
 ERRORS:
 - start error with exit code 2: G01 to G09
@@ -2029,11 +2056,13 @@ answer. Every request of the server to Aha! goes through this behavior.
 
 INPUTS:
 ```
-account:    Account
-method:     GET | POST | PUT | DELETE
-route:      string                 // from the catalog, with its parameters replaced
-parameters: Map<string, string>    // the parameters of ApiList
-body:       JSON object or none    // from write-request
+account:     Account
+method:      GET | POST | PUT | DELETE
+route:       string                 // from the catalog, with its parameters replaced
+parameters:  Map<string, string>    // the parameters of ApiList
+body:        JSON object or none    // from write-request
+environment: the variables HTTPS_PROXY, https_proxy, NO_PROXY, no_proxy,
+             SSL_CERT_FILE and SSL_CERT_DIR
 ```
 
 OUTPUTS:
@@ -2045,29 +2074,45 @@ PRECONDITIONS:
 - the subdomain of the Account matches Subdomain, and its credential matches Credential
 
 STEPS:
-1. Build the address: `https://`, the subdomain, `.aha.io/api/v1`, the route, and the parameters as a query string. Every value that replaces a route parameter and every parameter value is percent-encoded. No other scheme and no other host is used.
+1. Build the address: `https://`, the subdomain, `.aha.io/api/v1`, the route, and the parameters as a query string. Every value that replaces a route parameter and every parameter value is percent-encoded. No address has another scheme or another host.
 2. Send the request with the headers `Authorization: Bearer <credential>`, `Accept: application/json` and `User-Agent: mcp-server-aha-aql/<version> (<project address>)`. A request with a body also has `Content-Type: application/json`. Aha! asks every client for a way to reach its developer. The project address is the address of the project in the metadata of the package.
-3. The connection uses TLS and checks the certificate of Aha! against the trust store of the system. No setting turns this check off. The server connects directly and reads no proxy setting.
-4. If the connection or the certificate check fails, or no answer arrives within 60 seconds → Unreachable. The request is not sent again.
-5. A redirect is not followed. An answer with a status from 300 to 399 → Rejected, with the status.
-6. Status 429: wait, and send the same request again. The header `X-Ratelimit-Reset` of the answer gives the time when the limit ends, as UTC Unix time. The waiting time is the number of seconds from now to that time, at least 1 second and at most 30 seconds. Without the header it is 5 seconds. The request is sent again at most twice. If the third answer also has the status 429 → RateLimited.
-7. Status 401 or 403 → NotAuthorized, with the status. Status 404 → NotFound.
-8. Every other status outside 200 to 299 → Rejected, with the status and the text of the answer.
-9. Status 200 to 299: the answer is the body, read as JSON. ApiDelete needs no body. If a body that is needed cannot be read as JSON → Rejected, with the status and the text `the answer is not JSON`.
+3. Proxy. When the environment gives an HTTPS proxy and does not exclude the host of Aha! from it: connect to the proxy and ask it with CONNECT for a tunnel to `<subdomain>.aha.io`, port 443. In every other case connect to that host and port directly.
+   MECHANISM: the standard library of the language reads the variables for an https address. HTTPS_PROXY or https_proxy gives the proxy. NO_PROXY or no_proxy gives the hosts without a proxy.
+4. TLS. The connection to Aha!, direct or inside the tunnel, uses TLS. The certificate must be valid for the host name `<subdomain>.aha.io`, and its chain must end in the trust store of the platform. On Linux the variables SSL_CERT_FILE and SSL_CERT_DIR can name that trust store. No setting turns this check off.
+5. Failures before an answer. In each of these cases → Unreachable, and the request is not sent again:
+   a. the proxy cannot be reached, or it does not open the tunnel;
+   b. the connection or the certificate check fails;
+   c. no answer arrives within 60 seconds.
+6. A redirect is not followed. An answer with a status from 300 to 399 → Rejected, with the status.
+7. Status 429: wait, and send the same request again. The header `X-Ratelimit-Reset` of the answer gives the time when the limit ends, as UTC Unix time. The waiting time is the number of seconds from now to that time, at least 1 second and at most 30 seconds. Without the header it is 5 seconds. The request is sent again at most twice. If the third answer also has the status 429 → RateLimited.
+8. Status 401 or 403 → NotAuthorized, with the status. Status 404 → NotFound.
+9. Every other status outside 200 to 299 → Rejected, with the status and the text of the answer.
+10. Status 200 to 299: the answer is the body, read as JSON. ApiDelete needs no body. If a body that is needed cannot be read as JSON → Rejected, with the status and the text `the answer is not JSON`.
+
+A proxy that ends TLS. A sandbox or a company network can use a proxy that
+ends the TLS connection itself and opens its own connection to Aha!. The
+server then gets the certificate of that proxy in step 4. It accepts that
+certificate only when the trust store has the certificate authority of the
+proxy. The operator of the environment decides this with the trust store.
+In such an environment the credential can be a placeholder that the proxy
+replaces on the way to Aha!. The server sends it as it is.
 
 MECHANISM: the HTTPS connection can be replaced as a whole, and FakeAha
-takes its place in tests. The waiting of step 6 goes through a clock that
+takes its place in tests. The choice of the proxy is a function of the
+environment and the address. FakeAha calls it for every request and
+records the result. The waiting of step 7 goes through a clock that
 tests replace, so that no test waits. It is the clock of the log line of
 `execute`.
 
 POSTCONDITIONS:
-- the request went to the account of the Account and to no other host
+- the request was for the account of the Account and for no other host
+- the server connected to that host or to the proxy of the environment, and to nothing else
 - the credential was sent in the Authorization header of that request and nowhere else
 - a request was sent again only after the status 429, and at most twice
-- no failure has the credential in its text
+- no failure has the credential or the address of the proxy in its text
 
 ERRORS:
-- Unreachable: no connection, a certificate that cannot be verified, or no answer in time
+- Unreachable: no connection, a proxy that does not open the tunnel, a certificate that cannot be verified, or no answer in time
 - NotAuthorized: status 401 or 403
 - NotFound: status 404
 - RateLimited: status 429 three times
@@ -2310,11 +2355,17 @@ Messages for failed requests:
 | X03 | api_error | `aha: API error (status <n>) on <method> <route>: <answer>` |
 | X04 | not_authorized | `Aha! refused the request (status <n>): the API key is not valid for the account <subdomain>, or it has no permission for this record. Repeating the statement does not help.` |
 
-In X02, `<reason>` is `no answer within 60 seconds`, `the certificate of
-<subdomain>.aha.io could not be verified`, or `the connection to
-<subdomain>.aha.io failed`. `<write hint>` is empty for ApiList and ApiGet.
-For ApiCreate, ApiUpdate and ApiDelete it is ` The change may have been
-made. Read the record before you send the statement again.`
+In X02, `<reason>` is one of these texts:
+
+- `no answer within 60 seconds`
+- `the certificate of <subdomain>.aha.io could not be verified`
+- `the proxy did not open a connection to <subdomain>.aha.io`
+- `the connection to <subdomain>.aha.io failed`
+
+`<write hint>` is ` The change may have been made. Read the record before
+you send the statement again.` for ApiCreate, ApiUpdate and ApiDelete. It
+is empty for ApiList and ApiGet. It is also empty when the reason is the
+certificate or the proxy, because then no request was sent.
 
 In X03 and W30, `<answer>` is the first 300 characters of the text that
 the API returned, and `(no text)` when it returned none. W30 has the text
@@ -2418,10 +2469,12 @@ ERRORS:
 - [observable] a statement that fails is answered with a tool result that is marked as an error and has the message as its text; it is not answered with a JSON-RPC error
 - [observable] manual mode writes to standard output the same text that the MCP tool returns for the same statement and the same Account
 - [observable] the credential is in no tool result, no message, no note, no log line, no start message, no warning and no output of manual mode, and no option of the command line takes it
-- [observable] every request of the server goes to https://<subdomain>.aha.io/api/v1 with the subdomain of the Account of the call; the server follows no redirect and calls no other host
-- [observable] in http mode a request without a credential reaches no tool and no tool list, and the server has no credential of its own
+- [observable] every request of the server is for https://<subdomain>.aha.io/api/v1 with the subdomain of the Account of the call; the server follows no redirect, and the only other host that it connects to is the HTTPS proxy of the environment
+- [observable] the server reads these environment variables and no other: AHA_SUBDOMAIN, AHA_API_KEY, AHA_DEFAULT_PRODUCT and AHA_READ_ONLY for its settings, HTTPS_PROXY, https_proxy, NO_PROXY and no_proxy for the way to Aha!, SSL_CERT_FILE and SSL_CERT_DIR for the trust store
+- [observable] an option takes precedence over its environment variable, and the key file over AHA_API_KEY
+- [observable] in http mode a request without a credential reaches no tool and no tool list, and the server uses no credential of its own
 - [observable] in http mode nothing that was read with the credential of one request is part of the answer to another request
-- [implementation] the certificate of Aha! is checked on every connection, and no setting turns the check off
+- [implementation] the certificate for the host of Aha! is checked against the trust store on every connection, also inside the tunnel of a proxy, and no setting turns the check off
 - [implementation] in http mode the server keeps no credential and no data of Aha! after a request is answered
 - [implementation] the server has no direct dependency other than the MCP framework that the deployment template selects
 - [implementation] the entity-catalog is the single source for name resolution, DESCRIBE, the parameter fields, record conversion, value checks, request bodies and the lists in messages; the server has no second list of entities or fields
@@ -2653,7 +2706,16 @@ WHEN:
   manual-mode runs for the command line
   `mcp-server-aha-aql execute read-only=true statement="DELETE FROM features WHERE id = 'DEMO-6'"`
 THEN:
-  stderr contains the line `error: execute is not available with read-only=true`
+  stderr contains the line
+  `error: execute is not available, because read-only is true (option read-only or variable AHA_READ_ONLY)`
+  exit_code = 2
+  FakeAha recorded no call
+WHEN:
+  the environment also has AHA_READ_ONLY = `true`
+  and manual-mode runs for the command line
+  `mcp-server-aha-aql execute statement="DELETE FROM features WHERE id = 'DEMO-6'"`
+THEN:
+  stderr contains the same line
   exit_code = 2
   FakeAha recorded no call
 
@@ -2669,7 +2731,8 @@ THEN:
 
 ### EXAMPLE: arguments_take_precedence (of: load-configuration)
 GIVEN:
-  the environment has AHA_SUBDOMAIN = `other` and AHA_API_KEY = `environment-key`
+  the environment has AHA_SUBDOMAIN = `other`, AHA_API_KEY = `environment-key`,
+  AHA_DEFAULT_PRODUCT = `OTHER` and AHA_READ_ONLY = `false`
   the file /run/user/1000/aha-key has the content `fixture-key` and a line
   break, and only its owner can read it
 WHEN:
@@ -2678,6 +2741,32 @@ WHEN:
 THEN:
   the Account has the subdomain `example` and the credential `fixture-key`
   default_product is `DEMO` and read_only is true
+
+### EXAMPLE: settings_from_the_environment (of: load-configuration)
+GIVEN:
+  the fixture account
+  the environment has AHA_SUBDOMAIN = `example`, AHA_API_KEY = `fixture-key`,
+  AHA_DEFAULT_PRODUCT = `demo` and AHA_READ_ONLY = `true`
+WHEN:
+  load-configuration runs for the command line `mcp-server-aha-aql stdio`
+  and an MCP client lists the tools
+THEN:
+  the Account has the subdomain `example` and the credential `fixture-key`
+  default_product is `demo` and read_only is true
+  the tool list has `query` and no other tool
+  the description of `query` has the line
+  `id is the reference number of a record, for example 'DEMO-23'.`
+
+### EXAMPLE: read_only_variable_of_the_wrong_form (of: load-configuration)
+GIVEN:
+  the environment has AHA_SUBDOMAIN = `example`, AHA_API_KEY = `fixture-key`
+  and AHA_READ_ONLY = `1`
+WHEN:
+  load-configuration runs for the command line `mcp-server-aha-aql stdio`
+THEN:
+  stderr contains the line `error: AHA_READ_ONLY must be true or false`
+  exit_code = 2
+  no request was sent
 
 ### EXAMPLE: start_without_an_account (of: load-configuration)
 GIVEN:
@@ -2739,14 +2828,23 @@ THEN:
   stderr contains the line `error: read-only must be true or false`
   exit_code = 2
 
-### EXAMPLE: http_mode_starts_without_a_credential (of: load-configuration)
+### EXAMPLE: http_mode_uses_no_credential_of_the_process (of: load-configuration)
 GIVEN:
-  the environment has AHA_API_KEY = `fixture-key`
+  the environment has AHA_SUBDOMAIN = `example` and AHA_API_KEY = `fixture-key`
 WHEN:
   load-configuration runs for the command line `mcp-server-aha-aql http`
 THEN:
+  load-configuration returns settings with the subdomain `example`, and no
+  account
+  the diagnostic output has a warning that AHA_API_KEY is not read in http
+  mode, and the warning does not contain `fixture-key`
+  the server starts and sends no request to Aha!
+WHEN:
+  load-configuration runs for the command line
+  `mcp-server-aha-aql http api-key-file=/home/user/aha-key`
+THEN:
   stderr contains the line
-  `error: http mode takes the credential from each request. Remove api-key-file and unset AHA_API_KEY`
+  `error: http mode has no option api-key-file. Each request brings its credential in the header Aha-Api-Key`
   exit_code = 2
 WHEN:
   the environment has neither AHA_SUBDOMAIN nor AHA_API_KEY
@@ -2754,7 +2852,7 @@ WHEN:
   `mcp-server-aha-aql http listen=127.0.0.1:8080`
 THEN:
   load-configuration returns settings without a subdomain, and no account
-  the server starts and sends no request to Aha!
+  the diagnostic output has no warning
 
 ### EXAMPLE: http_request_brings_its_account (of: request-account)
 GIVEN:
@@ -3915,6 +4013,46 @@ THEN:
   `Accept: application/json`
   its `User-Agent` header starts with `mcp-server-aha-aql/`
 
+### EXAMPLE: request_through_the_proxy_of_the_environment (of: aha-request)
+GIVEN:
+  the fixture account
+  the environment has HTTPS_PROXY = `http://10.200.0.1:3128`
+WHEN:
+  the tool query is called with query = `SELECT id FROM features WHERE id = 'DEMO-3'`
+  and aha-request sends the request
+THEN:
+  FakeAha recorded exactly one request:
+  GET https://example.aha.io/api/v1/features/DEMO-3
+  the proxy that the server chose for it is `http://10.200.0.1:3128`
+  the tool result is
+  `{"entity":"features","scope":"feature DEMO-3","count":1,"records":[{"id":"DEMO-3"}]}`
+
+### EXAMPLE: host_of_aha_without_the_proxy (of: aha-request)
+GIVEN:
+  the fixture account
+  the environment has HTTPS_PROXY = `http://10.200.0.1:3128` and
+  NO_PROXY = `.aha.io`
+WHEN:
+  the tool query is called with query = `SELECT id FROM features WHERE id = 'DEMO-3'`
+  and aha-request sends the request
+THEN:
+  FakeAha recorded exactly one request, and the server chose no proxy for it
+
+### EXAMPLE: proxy_does_not_open_the_tunnel (of: aha-request)
+GIVEN:
+  the fixture account
+  the environment has HTTPS_PROXY = `http://10.200.0.1:3128`
+  FakeAha is told that the proxy does not open the tunnel
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE features SET name = 'CSV export 2' WHERE id = 'DEMO-1'`
+  and aha-request sends the first request of the statement
+THEN:
+  the tool result is an error with the message
+  `cannot reach Aha!: the proxy did not open a connection to example.aha.io.`
+  the message does not contain `10.200.0.1`
+  FakeAha recorded no ApiUpdate call
+
 ### EXAMPLE: too_many_requests_is_sent_again (of: aha-request)
 GIVEN:
   the fixture account
@@ -4118,6 +4256,10 @@ Where the account name and the credential come from:
 | stdio, manual | The option `subdomain`. Without it, the variable AHA_SUBDOMAIN | The file of the option `api-key-file`. Without it, the variable AHA_API_KEY |
 | http | The option `subdomain` or the variable AHA_SUBDOMAIN. Without both, the header `Aha-Subdomain` of each request | The header `Aha-Api-Key` of each request |
 
+The settings default_product and read_only have an option and a variable
+in the same way. The table of environment variables in load-configuration
+is the complete list of what the server reads from its environment.
+
 Manual mode at a shell. The statement is in double quotes, because AQL
 writes text in single quotes:
 
@@ -4155,6 +4297,15 @@ mcpServers:
 With the second form the configuration file of the host has a secret, and
 it needs the protection of a key file.
 
+In a sandbox. A sandbox that gives a process its credentials as
+environment variables needs no key file and no option: the server takes
+AHA_SUBDOMAIN and AHA_API_KEY from its environment. When the sandbox
+sends all traffic through a proxy, the server uses the proxy of the
+variable HTTPS_PROXY. When that proxy ends the TLS connection itself, its
+certificate authority has to be in the trust store, for example through
+SSL_CERT_FILE. The value of AHA_API_KEY can then be a placeholder that the
+sandbox replaces on the way to Aha!.
+
 HTTP mode. The server starts without a credential, for example from the
 systemd unit of the package:
 
@@ -4191,13 +4342,14 @@ External services:
 
 | Service | Address | Use |
 |---|---|---|
-| Aha! REST API, version 1 | `https://<subdomain>.aha.io/api/v1`, port 443 | Every read and every write. The server contacts no other host |
+| Aha! REST API, version 1 | `https://<subdomain>.aha.io/api/v1`, port 443 | Every read and every write. The server sends requests for no other host |
+| HTTPS proxy, only when the environment gives one | The address in HTTPS_PROXY | The tunnel to Aha! |
 
 Deviations from the deployment template:
 
 | Template key | The template says | This specification says |
 |---|---|---|
-| CONFIG-ENV-VARS | No configuration from environment variables | The two variables AHA_SUBDOMAIN and AHA_API_KEY are read. A credential must not be an argument of a process, and the configuration of an MCP host gives values to a local server as arguments or as environment variables |
+| CONFIG-ENV-VARS | No configuration from environment variables. The template says this in the table, in a PRECONDITION and in an INVARIANT | The server reads the environment variables of the table in load-configuration, in addition to its options and the key file. A host or a sandbox gives a process its credentials in this way. The template will be changed to allow it. Until then a translator follows this specification on this point |
 | TRANSPORT-SELECTION | The first word selects a transport: stdio or http | The first word can also be `query` or `execute`. These two select no transport. They make one tool call and end |
 | ERROR-HANDLING | All errors are JSON-RPC error responses | A statement that fails is answered with a tool result that is marked as an error, so that the language model reads the message. Protocol errors and internal errors are JSON-RPC error responses |
 
