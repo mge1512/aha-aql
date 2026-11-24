@@ -1,0 +1,25 @@
+# generated from spec: aha-aql.spec.md sha256:9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262
+# Translation workflow of mcp-server-aha-aql (translator: claude-opus-5-5)
+
+Spec: box "aha-aql.spec.md" "v0.13.0" fit
+arrow right
+Tmpl: box "mcp-server" "template v0.3.24" fit
+arrow right
+Hints: box "mcp-go hints" "v0.46.0" fit
+
+down
+arrow from Tmpl.s
+Tests: box "Phase 1" "independent_tests/" "claude-opus-5-5" fit
+arrow
+Impl: box "Phase 2" "main.go, go.mod" "+ 9 Go files" fit
+arrow
+Pack: box "Phase 3" "Makefile, RPM, DEB," "Containerfile, unit" fit
+arrow
+Docs: box "Phase 5" "README.md, man page" fit
+arrow
+Gate: box "Phase 6" "go mod tidy, go build," "go test" fit
+arrow
+Report: box "Phase 7" "TRANSLATION_REPORT.md" fit
+
+FakeAha: box "FakeAha" "HTTPS proxy + test CA" fit with .w at Tests.e + (0.6,0)
+arrow from Tests.e to FakeAha.w "black-box" above

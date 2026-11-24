@@ -1,0 +1,21 @@
+Source: mcp-server-aha-aql
+Section: net
+Priority: optional
+Maintainer: Matthias G. Eckermann <mge@mailbox.org>
+Build-Depends: debhelper-compat (= 13), golang-go (>= 2:1.24~), pandoc
+Standards-Version: 4.6.2
+Homepage: https://github.com/mge1512/aha-aql
+Rules-Requires-Root: no
+X-PCD-Spec-SHA256: 9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262
+
+Package: mcp-server-aha-aql
+Architecture: any
+Depends: ${misc:Depends}
+Built-Using: ${misc:Built-Using}
+Description: MCP server for Aha! with the query language AQL
+ mcp-server-aha-aql is a small MCP server for the Aha! product management
+ service. A language model works with Aha! through one query language, AQL,
+ and two tools: query reads, and execute changes one record. The same two
+ tools can be called from the command line. The server serves MCP over
+ standard input and output and over HTTP. The package includes a systemd
+ service unit for the http mode.
