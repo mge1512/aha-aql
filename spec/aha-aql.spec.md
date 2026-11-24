@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.12.0
+Version:      0.12.1
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -2818,14 +2818,16 @@ ERRORS:
 
 ## PRECONDITIONS
 
-- The Aha! API reports total_records and total_pages for every list.
-- The answers of the Aha! API have the JSON forms that INTERFACES gives. The examples of the API documentation show these forms. The prototype of the test of 2026-11-12 read lists and single records in these forms on one account.
-- The Aha! API accepts the parameter `fields` on the list routes of the catalog and a page size of PageSize. This was observed on one account on 2026-11-12.
+- The Aha! API reports total_records and total_pages for every list. An empty list reports 0 for both. This was observed on one account on 2026-11-24.
+- The answers of the Aha! API have the JSON forms that INTERFACES gives. The examples of the API documentation show these forms. The prototype of the test of 2026-11-12 read lists and single records in these forms on one account. A run of 2026-11-24 found them on one account. It read the lists, a feature, an epic, a goal, a product, the workflows and /me.
+- The Aha! API accepts the parameter `fields` on the list routes of the catalog and a page size of PageSize. This was observed on one account on 2026-11-12, and on 2026-11-24 for 20 list routes of the catalog. Not requested then: /epics/{epic}/features and the comment lists of releases, epics, ideas, initiatives, goals and requirements.
 - The Aha! API accepts an API key and an OAuth2 access token in the same way: as a bearer value in the Authorization header.
 - The credential has the permissions in Aha! that a statement needs. The server gives no permission and takes none away.
-- The Aha! API lists the custom field definitions of an account on /custom_field_definitions. Each definition has an id, a key, a name, a type and the record type that it belongs to. The API is documented so. This was not observed on an account.
-- The Aha! API returns the member `custom_fields` with a record that is read by its id. It also returns that member with the records of a list when the parameter `fields` names it. The first is documented. The second follows from the documentation of `fields` and was not observed.
-- The Aha! API accepts the member `custom_fields` in an update, next to other members, with one value per key. The documentation shows a text value. The forms of write-request for numbers, tags, users and notes are not documented and were not observed.
+- The Aha! API lists the custom field definitions of an account on /custom_field_definitions. Each definition has an id, a key, a name, a type and the record type that it belongs to. The API is documented so. One account answered so on 2026-11-24, with all its definitions in one answer without page information.
+- The Aha! API returns the member `custom_fields` with a record that is read by its id. It also returns that member with the records of a list when the parameter `fields` names it. The first is documented. Both were observed on one account on 2026-11-24, the second on the feature list of a product and on the product list.
+- The Aha! API accepts the member `custom_fields` in an update, next to other members, with one value per key. The documentation shows a text value. On 2026-11-24 an update with this member alone set lists with fixed options on one account. One option was sent as its text, and several options as a list of texts. An empty list removed them. The forms of write-request for numbers, dates, tags, users and notes are not documented and were not observed. This member next to other members was not observed either.
+- The Aha! API accepts the values of write-request in an update of a feature. They are the status as its name, the user as an e-mail address, the release and the initiative as ids, and the tags as one text. This was observed on one account on 2026-11-24.
+- The create route and the delete route of every entity that can be changed work as the catalog says. This was observed on one account on 2026-11-24; a comment was created on a feature only. An update was observed for features, epics, requirements and goals.
 - The record of a product names the workflow of each record kind in a member whose name ends in `_workflow`. The list of workflows of the product has that workflow. This was observed on two products of one account on 2026-11-24, where features, epics and requirements named one workflow. The API documentation shows the same members.
 - The Aha! API creates a goal only when the request has a success metric with a name. An update takes the status of a goal as `workflow_status`. Both were observed on one account on 2026-11-24. The documentation shows the status of a new goal inside `success_metric`; this form was not observed. The form of write-request for a new text of the success metric in an update was not observed either.
 
