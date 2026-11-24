@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.7.0
+Version:      0.8.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -386,7 +386,7 @@ network connection.
 - ApiCreate gives the new record the next free reference number.
 - ApiList on /custom_field_definitions returns the custom field definitions of the fixture account as one list without page information, in the order of the table below. A test can tell FakeAha to add a definition.
 - ApiGet on /custom_field_definitions/{id}/options returns the options of that definition in their order.
-- A record that is read by its id has the member `custom_fields`. A record of a list has it only when the parameter `fields` names `custom_fields`. The member is a list with one entry per custom field that has a value in the record. It is an empty list for a record without such a value. The entries have the form that custom-fields describes.
+- A record that is read by its id has the member `custom_fields`. A product that is read with ApiGet on /products/{id}, with its NumericId, has that member too. A record of a list has it only when the parameter `fields` names `custom_fields`. The member is a list with one entry per custom field that has a value in the record. It is an empty list for a record without such a value. The entries have the form that custom-fields describes.
 - ApiUpdate with the member `custom_fields` sets these custom values, and the answer has them as entries. For a users field FakeAha accepts the id or the e-mail address of a user of the fixture account.
 - A test can tell FakeAha to leave the member `custom_fields` out of every record of a list.
 - A test can tell FakeAha to answer a route with a given status and header a given number of times, or to give no answer.
@@ -535,7 +535,7 @@ STEPS:
 POSTCONDITIONS:
 - only ApiList and ApiGet were called
 - `records` has at most max_limit rows
-- each row has the labels of the select items, each with a value or null; a grouped result also has the fields of GROUP BY that are not selected (see build-rows)
+- each row has the labels of the select items, each with a value or null; a grouped result also has the fields of GROUP BY that are not selected, and a record that `*` selects by its id field also has its custom fields that have a value (see build-rows)
 
 ERRORS:
 - bad_args: unknown parameter (A02); missing or empty statement (A01)
@@ -939,14 +939,17 @@ PRECONDITIONS:
 - the statement comes from parse-statement: its entity is a catalog name, and every field in it is a catalog name or the name of a custom field of the entity
 
 STEPS:
-1. Replace a Star item by fields. A Star item stands for catalog fields only: a custom field is in a result only when the statement names it.
+1. Replace a Star item by fields. They are catalog fields. Custom fields come to a Star item only in step 6 a, for one record that the statement selects by its id field.
    a. When the WHERE condition has a conjunct that compares the id field of the entity with `=`: all fields of the entity.
-   b. Otherwise: the default fields of the entity, followed by the other fields that the statement selects by name. Add note H01.
+   b. Otherwise: the default fields of the entity, followed by the other fields that the statement selects by name. Add note H01. Here a custom field is in the result only when the statement names it.
 2. Collect the used fields: the fields of the select items, of the WHERE condition, of GROUP BY and of ORDER BY. Custom fields are among them.
 3. Run plan-fetch with the statement and the used fields; on failure → the error of plan-fetch. plan-fetch returns the API records, the scope and the applied conjuncts. It also returns the total of a list that was not read to its end, and the mark that page 1 was read for a count only.
 4. Run convert-record for every API record, with the custom fields among the used fields.
 5. Keep each record for which evaluate-condition is true for the WHERE condition. A conjunct that the route has applied counts as true.
-6. Run build-rows with the kept records, and with the total and the count-only mark of plan-fetch. It returns the rows, count, total and truncated.
+6. Run build-rows with the kept records, the star custom fields, and the total and the count-only mark of plan-fetch. It returns the rows, count, total and truncated.
+   a. Star custom fields. There are some only when all of this is true: step 1 a applied, the statement has no aggregate item and no GROUP BY, and one record is kept. Then run custom-fields for the entity without a key; on failure → the error of custom-fields. The star custom fields are the custom fields of its result that the statement does not select by name. Their values are taken as step 4 of convert-record says, from the API record that step b names.
+   b. The API record for these values. For a record that plan-fetch read by its id route, it is the API record of the kept record. A product comes from the product list, which has no custom fields. When the list of star custom fields is not empty, read the kept product with one ApiGet on /products/{product}, with its NumericId. Its answer is the API record. NotFound → no star custom field has a value. Any other failure → the error that step 10 of plan-fetch gives for it.
+   c. In every other case there are no star custom fields, and a Star item causes no request for custom field definitions.
 7. If truncated: add note H02.
 8. If there is no row and the statement has no aggregate item and no GROUP BY: add notes that explain the empty result, at most two. Go through the conjuncts that are a Comparison with a Text value, in the order of the statement. A `%` at the start or at the end of the value is ignored for these tests.
    a. The id field of the entity with the operator `=` gives H03.
@@ -960,10 +963,13 @@ POSTCONDITIONS:
 - every row satisfies the WHERE condition of the statement
 - no matching record is absent from rows unless truncated is true or the statement has a LIMIT, and then total gives the number of matching rows
 - every selected field is in every row; a field without a value is null
+- a star custom field is in the row only when it has a value in the record
 - only ApiList and ApiGet were called
 
 ERRORS:
 - every error of plan-fetch (scope, bad_product, wrong_kind, not_found, not_authorized, rate_limited, network, api_error), passed on unchanged; a list that comes without the custom fields of the statement is one of them (X05)
+- rate_limited, network, api_error: X01, X02, X03, from custom-fields for the star custom fields
+- not_authorized, rate_limited, network, api_error: X04, X01, X02, X03, from the reading of a product for its star custom fields
 
 ## BEHAVIOR/INTERNAL: describe-statement
 Constraint: required
@@ -993,7 +999,7 @@ STEPS:
    b. `about`: the about text with {KEY} replaced.
    c. `fields`: one object per field of the entity in catalog order, with `name`, `type`, and `writable` with the value true when the field is writable. A field that is not writable has no member `writable`. The text of `type` comes from the first table below.
    d. `custom_fields`: run custom-fields for the entity without a key; on failure → the error of custom-fields. An empty list gives no member. Otherwise the member is a list with one object per custom field, in the order of custom-fields. An object has `name`, `label`, `type`, and `writable` with the value true when the kind can be set and the entity has the operation update. The text of `type` comes from the table of kinds in custom-fields.
-   e. `custom_fields_note`: only when the result has the member `custom_fields`; the text `* does not show custom fields. Select them by name, for example: SELECT <id field>, <name> FROM <entity> WHERE <id field> = '<example id>'`. `<name>` is the first name of `custom_fields`, and `<example id>` is the example id of error-messages for the kind of the entity.
+   e. `custom_fields_note`: only when the result has the member `custom_fields`; the text `* shows custom fields only with <id field> = '...', and only those that have a value. To select one by name: SELECT <id field>, <name> FROM <entity> WHERE <id field> = '<example id>'`. `<name>` is the first name of `custom_fields`, and `<example id>` is the example id of error-messages for the kind of the entity.
    f. `filter_by_parent`: only when the entity has parent filters; a list with the text `<field> = '...'` for each of them.
    g. `status_values`: only when the entity has a field `status`; the text `SELECT name FROM statuses WHERE product = '{KEY}' AND entity = '<entity>'`.
    h. `change_with_execute`: the text "read-only" when the entity has no operation. Otherwise a list with one text per operation of the entity, in the order create, update, delete. The texts come from the second table below.
@@ -1392,7 +1398,7 @@ exceptions are:
 | Other field names | id, reference_prefix, prefix, reference_num, ref_num, ref, product, product_key, product_id mean key. parent_id means parent. title means name |
 | Read | The product list: GET /products, all pages. Conditions are evaluated on the list |
 | Parent filters | none |
-| Custom fields | Record type Project. They can be read and cannot be set, because products are read only |
+| Custom fields | Record type Project. They can be read and cannot be set, because products are read only. For a Star item the product is read with GET /products/{product} (see read-statement) |
 | Create, update, delete | not offered |
 | Example | SELECT key, name FROM products |
 
@@ -1781,8 +1787,9 @@ Aha! account defines for one type of record. The catalog does not have
 these fields, so the server reads their definitions from the account. A
 statement writes a custom field as `custom.` followed by its key, for
 example `custom.priority`. The tables of this section say how a custom
-field is read and how it is set. describe-statement, convert-record,
-evaluate-condition, check-write-values and write-request use them.
+field is read and how it is set. describe-statement, read-statement,
+convert-record, evaluate-condition, check-write-values and write-request
+use them.
 
 INPUTS:
 ```
@@ -2084,7 +2091,8 @@ entity:        EntityName
 api_record:    ApiRecord
 known_product: ProductKey or none   // the route was a product route
 known_parent:  RecordId or none     // the route was a parent route
-custom:        List<CustomField>    // the custom fields that the statement uses
+custom:        List<CustomField>    // the custom fields that the statement uses,
+                                    // or the star custom fields of read-statement
 ```
 
 OUTPUTS:
@@ -2185,6 +2193,9 @@ INPUTS:
 ```
 statement:  ReadStatement     // Star already replaced by fields
 records:    the kept records, in the order in which they were read
+star_custom: List<CustomField>   // the star custom fields of read-statement,
+                                 // with their values in the kept record;
+                                 // empty in most statements
 list_total: u32 or none       // total of plan-fetch
 count_only: Boolean           // count_only of plan-fetch
 ```
@@ -2208,6 +2219,7 @@ STEPS:
    c. One row per group. First the group fields that the statement does not select, under their field names. Then the select items in the order of the statement: a field item has the value of the first record of the group, and an aggregate item has its result.
    d. COUNT(*) is the number of records of the group. COUNT(field) is the number of records with a value in the field. COUNT(DISTINCT field) is the number of different values. SUM and AVG use the values that are numbers. MIN and MAX use the order of step 4. Without a value the result is null, and 0 for COUNT. A result that is a whole number is written without decimals; every other result is rounded to two decimals.
 3. Plain result: when the statement has no aggregate item and no GROUP BY. Sort the records as step 4 says. Make one row per record with the select items in the order of the statement, each under its label. With DISTINCT, leave out a row that equals an earlier row in all values.
+   a. Star custom fields. After the select items, the row gets every star custom field that has a value in the record. Each one is under the name of the field, and they are in the order of these names. A star custom field without a value is not in the row.
 4. ORDER BY. Sort by the first key. Rows that are equal in it are sorted by the next key, and so on. Rows that are equal in all keys keep their order. A key is a field, the label of an aggregate item, or an aggregate that the statement selects. Numbers come before text. Numbers are sorted by value and text by its comparison form. A row without a value in the key comes last, with ASC and with DESC. A grouped result is sorted after step 2.
 5. Limits. The limit is the LIMIT of the statement, and default_limit without a LIMIT. It is never more than max_limit. rows are the first rows up to the limit, and count is their number.
 6. total has a value in two cases. When step 5 cut rows, it is the number of rows before the cut. When plan-fetch did not read the list to its end, it is list_total.
@@ -2216,6 +2228,7 @@ STEPS:
 POSTCONDITIONS:
 - an aggregate is computed over all matching records, also when step 5 cuts the rows of a grouped result
 - every row has the labels of the statement in its order; in a grouped result the group fields that are not selected come first
+- after these labels a row has the star custom fields that have a value, and no other label
 - count is never above max_limit
 
 ERRORS:
@@ -2758,7 +2771,7 @@ ERRORS:
 - [observable] a read result has every matching record, unless truncated is true or the statement has a LIMIT, and then total gives the number of matching rows
 - [observable] every field and every custom field that describe-statement lists for an entity is delivered by read-statement with its value or with null when a statement names it, and every other field word gets an error with the list of the valid names
 - [observable] every read result gives its scope: the record, the parent, the product or the account-wide list that was read
-- [observable] a result row has the labels of the select items in the order of the statement, a grouped result has the fields of GROUP BY that are not selected before them, and a field without a value is null
+- [observable] a result row has the labels of the select items in the order of the statement, a grouped result has the fields of GROUP BY that are not selected before them, and a field without a value is null; the custom fields that `*` adds for one record that is selected by its id field follow these labels, and of them only those that have a value
 - [observable] one call of execute creates, changes or deletes at most one record
 - [observable] a write statement is checked completely before its write request: an unknown column, an unknown field, a value of the wrong form, an unknown status, a value that a fixed list of options does not have and a guard that is not true are errors, and none of them changes data
 - [observable] an accepted write statement sends every field that it assigns; no column, assignment or condition is ignored without an error
@@ -2780,8 +2793,8 @@ ERRORS:
 - [observable] an option takes precedence over its environment variable, and the key file over AHA_API_KEY
 - [observable] in http mode a request without a credential reaches no tool and no tool list, and the server uses no credential of its own
 - [observable] in http mode nothing that was read with the credential of one request is part of the answer to another request
-- [observable] a read statement or a write statement whose field words are all catalog names causes no request for custom field definitions, and its list requests do not ask for custom fields
-- [observable] a result has a custom field only when the statement names it; `*` stands for catalog fields only
+- [observable] a read statement or a write statement whose field words are all catalog names causes no request for custom field definitions, and its list requests do not ask for custom fields; the one exception is a read statement with `*` that selects one record by its id field, which reads the definitions when it has found the record
+- [observable] a result has a custom field only when the statement names it, or when the statement has `*` and selects one record by its id field: then the row also has the custom fields that have a value in that record; in every other statement `*` stands for catalog fields only
 - [observable] a custom field is set with UPDATE only; INSERT with a custom field is an error and creates no record
 - [observable] a list that Aha! returns without the custom fields of the request is an error of the statement; no result shows a custom field as empty for that reason
 - [implementation] the certificate for the host of Aha! is checked against the trust store on every connection, also inside the tunnel of a proxy, and no setting turns the check off
@@ -3286,13 +3299,14 @@ WHEN:
   and read-statement runs it
 THEN:
   `scope` is `feature DEMO-3` and `count` is 1
-  the row has the 17 fields of features in catalog order
+  the row has the 17 fields of features in catalog order, and after them
+  the six custom fields that have a value in DEMO-3
   id is `DEMO-3`, name is `Live dashboard`, status is `In development`,
   release is `DEMO-R-3`, initiative is `DEMO-S-1` and product is `DEMO`
   epic and assigned_to are null
   the result has no `note`
   FakeAha recorded one ApiGet call on /features/DEMO-3, one ApiList call on
-  /products and no other call
+  /products, one ApiList call on /custom_field_definitions and no other call
 
 ### EXAMPLE: field_without_value_is_null (of: read-statement)
 GIVEN:
@@ -3348,6 +3362,7 @@ WHEN:
 THEN:
   the tool result is
   `{"entity":"features","scope":"feature DEMO-99","count":0,"records":[],"note":"There is no feature with the id 'DEMO-99'."}`
+  FakeAha recorded no call on /custom_field_definitions
 
 ### EXAMPLE: default_limit_is_reported (of: read-statement)
 GIVEN:
@@ -3373,21 +3388,85 @@ THEN:
   the tool result is an error with the message
   `releases are listed per product: add product = '...' to WHERE. Example: SELECT id, name, release_date FROM releases WHERE product = 'PROD'`
 
-### EXAMPLE: star_does_not_show_custom_fields (of: read-statement)
+### EXAMPLE: star_with_an_id_shows_custom_values (of: read-statement)
 GIVEN:
   the fixture account, in which DEMO-1 has custom values
 WHEN:
   the tool query is called with query = `SELECT * FROM features WHERE id = 'DEMO-1'`
-  and read-statement replaces the Star item
+  and read-statement adds the star custom fields
 THEN:
-  the row has the 17 fields of features in catalog order and no other label
-  FakeAha recorded no call on /custom_field_definitions
+  the row has the 17 fields of features in catalog order
+  after them it has exactly these labels and values, in this order:
+  `custom.customer` with `Acme`, `custom.effort_days` with 12.5,
+  `custom.go_live` with `2026-04-15`, `custom.markets` with `EMEA, APAC`,
+  `custom.priority` with `High`, `custom.release_notes` with the JSON
+  string `"Adds the export.\nSee the handbook."`, `custom.reviewers` with
+  `second.user@example.com`, and `custom.value_score` with 31
+  the row has no label `custom.platforms`, because DEMO-1 has no value there
+  the row has no label `custom.business_case`, because the server does not
+  read a field of that type
+  FakeAha recorded one ApiList call on /custom_field_definitions
+WHEN:
+  the tool query is called with query = `SELECT * FROM features WHERE id = 'DEMO-2'`
+THEN:
+  after the 17 fields the row has `custom.effort_days` with 8 and
+  `custom.priority` with `Medium`, and no other label
+WHEN:
+  the tool query is called with query =
+  `SELECT *, custom.platforms FROM features WHERE id = 'DEMO-2'`
+THEN:
+  the row has the 17 fields, then `custom.platforms` with null, then
+  `custom.effort_days` with 8 and `custom.priority` with `Medium`
 WHEN:
   the tool query is called with query =
   `SELECT id, custom.priority FROM features WHERE id = 'DEMO-1'`
 THEN:
   the tool result is
   `{"entity":"features","scope":"feature DEMO-1","count":1,"records":[{"id":"DEMO-1","custom.priority":"High"}]}`
+
+### EXAMPLE: star_without_an_id_has_catalog_fields_only (of: read-statement)
+GIVEN:
+  the fixture account, in which the features of DEMO-R-2 and the product
+  DEMO have custom values
+WHEN:
+  the tool query is called with query = `SELECT * FROM features WHERE release = 'DEMO-R-2'`
+  and read-statement replaces the Star item
+THEN:
+  each of the two rows has the labels id, name, status and release, and no
+  other label
+  `note` starts with `* shows id, name, status, release.`
+  FakeAha recorded no call on /custom_field_definitions, and the parameter
+  `fields` of the list request does not name `custom_fields`
+WHEN:
+  the tool query is called with query = `SELECT * FROM products`
+THEN:
+  each of the two rows has the labels key and name, and no other label
+  FakeAha recorded no call on /custom_field_definitions and no ApiGet call
+  on a product
+
+### EXAMPLE: star_shows_the_custom_values_of_a_product (of: read-statement)
+GIVEN:
+  the fixture account, in which the product DEMO has the cost_center
+  CC-100 and the product OTHER has no custom value
+WHEN:
+  the tool query is called with query = `SELECT * FROM products WHERE key = 'DEMO'`
+  and read-statement reads the product for its star custom fields
+THEN:
+  the row has the 7 fields of products in catalog order, and after them
+  `custom.cost_center` with `CC-100`, and no other label
+  FakeAha recorded one ApiList call on /custom_field_definitions and one
+  ApiGet call on /products/7000000000000000001
+WHEN:
+  the tool query is called with query = `SELECT * FROM products WHERE key = 'OTHER'`
+THEN:
+  the row has the 7 fields of products and no other label
+WHEN:
+  FakeAha answers every ApiList call on /custom_field_definitions with
+  the status 403, and the tool query is called with query =
+  `SELECT * FROM products WHERE key = 'DEMO'`
+THEN:
+  the row has the 7 fields of products and no other label
+  FakeAha recorded no ApiGet call on a product for this statement
 
 ### EXAMPLE: custom_fields_in_group_by_and_order_by (of: read-statement)
 GIVEN:
@@ -3441,7 +3520,7 @@ THEN:
   `{"name":"custom.value_score","label":"Value score","type":"number"}`
   no object has the name custom.business_case
   `custom_fields_note` is
-  `* does not show custom fields. Select them by name, for example: SELECT id, custom.customer FROM features WHERE id = 'PROD-23'`
+  `* shows custom fields only with id = '...', and only those that have a value. To select one by name: SELECT id, custom.customer FROM features WHERE id = 'PROD-23'`
   `filter_by_parent` is `["product = '...'","release = '...'","initiative = '...'","epic = '...'"]`
   `status_values` is
   `SELECT name FROM statuses WHERE product = 'PROD' AND entity = 'features'`
@@ -4117,14 +4196,14 @@ THEN:
   `custom_fields` is
   `[{"name":"custom.segment","label":"Segment","type":"one option of a list","writable":true}]`
   `custom_fields_note` is
-  `* does not show custom fields. Select them by name, for example: SELECT id, custom.segment FROM ideas WHERE id = 'PROD-I-1'`
+  `* shows custom fields only with id = '...', and only those that have a value. To select one by name: SELECT id, custom.segment FROM ideas WHERE id = 'PROD-I-1'`
 WHEN:
   the tool query is called with query = `DESCRIBE products`
 THEN:
   `custom_fields` is
   `[{"name":"custom.cost_center","label":"Cost center","type":"string"}]`
   `custom_fields_note` is
-  `* does not show custom fields. Select them by name, for example: SELECT key, custom.cost_center FROM products WHERE key = 'PROD'`
+  `* shows custom fields only with key = '...', and only those that have a value. To select one by name: SELECT key, custom.cost_center FROM products WHERE key = 'PROD'`
 WHEN:
   the tool query is called with query = `DESCRIBE goals`
 THEN:
@@ -4207,6 +4286,11 @@ WHEN:
   the tool query is called with query = `DESCRIBE features`
 THEN:
   `fields` has 17 objects, and the result has no member `custom_fields`
+WHEN:
+  the tool query is called with query = `SELECT * FROM features WHERE id = 'DEMO-1'`
+THEN:
+  the tool result is no error
+  the row has the 17 fields of features in catalog order and no other label
 WHEN:
   the tool query is called with query =
   `SELECT id, name FROM features WHERE release = 'DEMO-R-2'`
