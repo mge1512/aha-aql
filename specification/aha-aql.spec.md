@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.22.1
+Version:      0.23.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -675,8 +675,8 @@ ERRORS:
 Constraint: required
 
 Decides which tools the MCP server offers, what their descriptions say,
-and the instructions that the server gives in its answers to `initialize`
-and `server/discover`.
+the instructions that the server gives in its answers to `initialize` and
+`server/discover`, and its one MCP prompt, `start`.
 The server has two tools, `query` and `execute`. No other BEHAVIOR of this
 specification is an MCP tool. The descriptions are what a language model
 learns the language from, so their text is part of this specification.
@@ -690,6 +690,7 @@ OUTPUTS:
 ```
 registered tools: query; execute unless read_only
 instructions:     the server instructions below, in the answers to initialize and server/discover
+prompt:           start, with the prompt text below
 ```
 
 PRECONDITIONS:
@@ -698,10 +699,11 @@ PRECONDITIONS:
 STEPS:
 1. Register `query` with the description below. It has one parameter, `query`: text, required, with the description "One AQL statement". Its annotations say that it only reads: readOnlyHint true, destructiveHint false, idempotentHint true, openWorldHint true.
 2. Unless read_only is true: register `execute` with the description below. It has one parameter, `statement`: text, required, with the description "One AQL statement". Its annotations say that it changes data and can delete: readOnlyHint false, destructiveHint true, idempotentHint false, openWorldHint true.
-3. Register no other tool, no MCP resource and no MCP prompt.
+3. Register no other tool and no MCP resource. The only MCP prompt is `start` (step 7).
 4. When the tool list is answered: replace every {KEY} in both descriptions by the ExampleKey of the Account that asks (see choose-example-key).
 5. A call with a parameter that the tool does not declare reaches the tool and is answered with message A02. It is not ignored, and it is not answered with a JSON-RPC error.
 6. Give the server instructions below as `instructions` in the answer to `initialize` and in the answer to `server/discover`. A client of the protocol version 2026-07-28 sends no `initialize`, and it can ask with `server/discover`. The instructions are the same for every Account and have no {KEY}, so neither answer causes a request to Aha!. An MCP host decides whether the language model sees them; the description of `query` therefore starts with the same entry point.
+7. Register the MCP prompt `start`, with the description "How to start with AQL" and no argument, and declare the capability prompts. When a client gets the prompt, the answer has one message with the role `user`. Its text is the prompt text below, with every {KEY} replaced by the ExampleKey of the Account that asks (see choose-example-key). A user picks the prompt in the MCP host, and the host puts the message into the conversation.
 
 Description of `query`:
 
@@ -752,15 +754,28 @@ Start with SELECT key, name FROM products, then DESCRIBE an entity for its field
 Most error messages show what to write instead; then send the corrected statement.
 ```
 
-Each line of a description and of the server instructions ends with a
-line break. The entity list in the
+Prompt text of `start`:
+
+```
+Use the tool query of the Aha! server, with one AQL statement in each call.
+1. SELECT key, name FROM products
+2. DESCRIBE features lists the fields of features; DESCRIBE alone lists the entities.
+3. SELECT id, name, status FROM features WHERE product = '{KEY}'
+Search by word: SELECT id, name FROM features WHERE product = '{KEY}' AND name CONTAINS 'word'
+A workspace or project is a product; a milestone or version is a release; an objective is a goal.
+Most error messages show what to write instead; then send the corrected statement.
+```
+
+Each line of a description, of the server instructions and of the prompt
+text ends with a line break. The entity list in the
 description of `query` is the list of catalog entities in catalog
 order.
 
 POSTCONDITIONS:
 - the tool list is `query` and `execute`, or `query` alone when read_only is true
 - the answers to `initialize` and to `server/discover` have the server instructions, and they have no product key of the account
-- no description contains a product key of the account other than the product of the setting default_product
+- no description and no prompt text contains a product key of the account other than the product of the setting default_product
+- the prompt list is `start` alone
 
 ERRORS:
 - none
@@ -3221,6 +3236,23 @@ THEN:
   `Search by word: SELECT id, name FROM features WHERE product = 'DEMO' AND name CONTAINS 'word'`
   the description of `query` has the line
   `In name and description: SELECT id, name FROM features WHERE release = 'DEMO-R-3' AND (name CONTAINS 'word' OR description CONTAINS 'word')`
+
+### EXAMPLE: start_prompt (of: tool-registration)
+GIVEN:
+  the fixture account
+  the setting default_product is `demo`
+WHEN:
+  an MCP client lists the prompts
+THEN:
+  the list has one prompt, `start`, with the description
+  `How to start with AQL` and no argument
+WHEN:
+  the client gets the prompt `start`
+THEN:
+  the answer has one message, with the role `user`
+  its text is the prompt text of `start` with `DEMO` in place of {KEY}
+  its line that starts with `3.` is
+  `3. SELECT id, name, status FROM features WHERE product = 'DEMO'`
 
 ### EXAMPLE: manual_query_prints_the_tool_result (of: manual-mode)
 GIVEN:
@@ -6002,7 +6034,7 @@ WHEN:
   example statements of the description of `query`, and the statements
   of its lines that start with `Start with:`, `Search by word:` and
   `In name and description:`; the three example statements of the
-  description of `execute`;
+  description of `execute`; the statements of the prompt text of `start`;
   `SELECT status, COUNT(*) FROM features WHERE product = 'PROD' GROUP BY status`;
   `SELECT COUNT(*) FROM features WHERE product = 'PROD'`;
   `SELECT key, name FROM products`;
