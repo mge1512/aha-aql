@@ -3,12 +3,13 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.19.0
+Version:      0.20.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
 Verification: none
 Safety-Level: QM
+Module:       github.com/mge1512/aha-aql
 
 This specification describes mcp-server-aha-aql, a small MCP server for the
 Aha! product management service. A language model works with Aha! through
@@ -402,12 +403,23 @@ The parameter `fields` of ApiList names top-level members only. For the
 API source `workflow_status.name` it names `workflow_status`, and each
 name is there once.
 
-Test double: FakeAha. It takes the place of the HTTPS connection (see
-aha-request). It gets every request with its method, address, headers and
-body, answers it from memory with a fixture account, and never opens a
-network connection.
+Test double: FakeAha. FakeAha is an HTTPS server outside the server
+process, and it is the HTTPS proxy of the test. A test gives the server
+the address of FakeAha in HTTPS_PROXY and the certificate authority of
+the test in SSL_CERT_FILE, as a sandbox does (see aha-request). The
+server then asks FakeAha with CONNECT for a tunnel to `example.aha.io`,
+port 443. Inside the tunnel FakeAha ends the TLS connection with a
+certificate for that host name, which the certificate authority of the
+test has signed. FakeAha gets every request with its method, address,
+headers and body, and answers it from memory with a fixture account. It
+opens no network connection of its own.
 
-- FakeAha serves the subdomain `example` and accepts the credential `fixture-key`. A request with another credential is answered with the status 403. A request to another host is a failure of the test.
+The server has no hook for tests: no option, no variable and no part of
+its code is there for a test only. A test starts the server as a user
+starts it, and sees what a user sees: the tool results, the two output
+streams, the exit code, and the requests that arrive at FakeAha.
+
+- FakeAha serves the subdomain `example` and accepts the credential `fixture-key`. A request with another credential is answered with the status 403. A CONNECT request for another host is a failure of the test.
 - Every answer of FakeAha has the JSON form of the section above. A record is in the member with its singular name, and a list is in the member with the name of the last part of the route. `description` and `theme` are objects with the member `body`.
 - ApiList returns pages of `per_page` records with correct `total_records` and `total_pages`.
 - A record of a list has the members of the parameter `fields`, and `id`.
@@ -421,13 +433,14 @@ network connection.
 - A record that is read by its id has the member `custom_fields`. A product that is read with ApiGet on /products/{id}, with its NumericId, has that member too. A record of a list has it only when the parameter `fields` names `custom_fields`. The member is a list with one entry per custom field that has a value in the record. It is an empty list for a record without such a value. The entries have the form that custom-fields describes.
 - ApiUpdate with the member `custom_fields` sets these custom values, and the answer has them as entries. For a users field FakeAha accepts the id or the e-mail address of a user of the fixture account.
 - A test can tell FakeAha to leave the member `custom_fields` out of every record of a list.
-- A test can tell FakeAha to answer a route with a given status and header a given number of times, or to give no answer. A test can also give FakeAha the body of an answer.
-- FakeAha records for every request the proxy that the server chose for it, or that it chose none. A test can tell FakeAha that the proxy does not open the tunnel.
-- FakeAha records every call with its method, address, headers, parameters and body. A test can then check which requests a statement caused, which credential they had, and that a failed statement caused no write request.
+- A test can tell FakeAha to answer a route with a given status and header a given number of times, or to give no answer. The value of such a header can be a time: the UTC Unix time of the answer plus a number of seconds. A test can also give FakeAha the body of an answer.
+- FakeAha records every CONNECT request with its host, its port and its headers. A test can tell FakeAha to refuse CONNECT: that is a proxy that does not open the tunnel.
+- FakeAha records every call with its method, address, headers, parameters and body, and with the time when it arrived. A test can then check which requests a statement caused, which credential they had, and that a failed statement caused no write request.
 
 The EXAMPLES use this fixture account. Unless an example says otherwise:
 
 - The server runs in stdio mode. Its Account has the subdomain `example` and the credential `fixture-key`.
+- The environment of the server has HTTPS_PROXY with the address of FakeAha and SSL_CERT_FILE with the certificate authority of the test. It has no NO_PROXY and no other proxy variable.
 - The setting default_product has no value, and read_only is false.
 - The tool list was answered before the call of the example. The ExampleKey is therefore chosen, and it is PROD.
 - The calls that an example counts are the calls that its statement caused.
@@ -648,8 +661,6 @@ without an error:
 The line has no value of a field, no text of the statement and no
 credential.
 
-MECHANISM: the time comes from a clock that tests replace.
-
 POSTCONDITIONS:
 - at most one record of the account was created, changed or deleted
 - when the result is an error that was found before the write request, no ApiCreate, ApiUpdate or ApiDelete call was made
@@ -681,7 +692,7 @@ PRECONDITIONS:
 - load-configuration has succeeded
 
 STEPS:
-1. Register `query` with the description below. It has one parameter, `query`: text, required, with the description "One AQL statement". Its annotations say that it only reads: readOnlyHint true, openWorldHint true.
+1. Register `query` with the description below. It has one parameter, `query`: text, required, with the description "One AQL statement". Its annotations say that it only reads: readOnlyHint true, destructiveHint false, idempotentHint true, openWorldHint true.
 2. Unless read_only is true: register `execute` with the description below. It has one parameter, `statement`: text, required, with the description "One AQL statement". Its annotations say that it changes data and can delete: readOnlyHint false, destructiveHint true, idempotentHint false, openWorldHint true.
 3. Register no other tool, no MCP resource and no MCP prompt.
 4. When the tool list is answered: replace every {KEY} in both descriptions by the ExampleKey of the Account that asks (see choose-example-key).
@@ -829,8 +840,8 @@ STEPS:
    a. `read-only` and `dry-run`: `true` or `false`; otherwise → G04.
    b. `subdomain`: put the value into lower case. If it does not match Subdomain → G04.
    c. `default-product` and `api-key-file`: if the option is given with an empty value → G04.
-   d. `listen`: the value goes to the http transport of the deployment template. If its host is not a loopback address: write a warning to the diagnostic output. The warning says that every request has a credential and that the connection needs TLS in front of the server.
-7. In http mode: the account is none, and the variable AHA_API_KEY is not read. If that variable is not empty: write a warning to the diagnostic output that says so. Continue with step 11.
+   d. `listen`: the value goes to the http transport of the deployment template. If its host is not a loopback address: write the warning G13 to the diagnostic output. The server starts.
+7. In http mode: the account is none, and the variable AHA_API_KEY is not read. If that variable is not empty: write the warning G14 to the diagnostic output. Continue with step 11.
 8. In stdio mode and manual mode: if there is no subdomain → G05.
 9. Credential from a file. When the option `api-key-file` is given, the variable AHA_API_KEY is not read.
    a. If the path is not a regular file that the process can read → G07.
@@ -852,7 +863,12 @@ Options:
 | query | One read statement or describe statement, or `-` | query | none | Required |
 | statement | One write statement, or `-` | execute | none | Required |
 
-Environment variables. The server reads these variables and no other:
+Environment variables. The code of the server reads the first four
+variables of this table and no other variable. They give settings. The
+standard library of the language reads the other variables of the table
+for the connection to Aha!. A variable that the standard library or the
+runtime of the language reads for another purpose is not a setting of
+the server:
 
 | Variable | Use | Read in |
 |---|---|---|
@@ -881,6 +897,19 @@ Start messages. Each one is a single line on standard error:
 | G11 | `error: execute is not available, because read-only is true (option read-only or variable AHA_READ_ONLY)` |
 | G12 | `error: unknown transport '<word>'. Valid: stdio, http, query, execute` |
 
+Warnings. Each one is a single line on standard error. After a warning
+the server goes on:
+
+| ID | Text | Written by |
+|---|---|---|
+| G13 | `warning: the listen address is not a loopback address. Every request has a credential: put a TLS endpoint in front of the server` | load-configuration, step 6 d |
+| G14 | `warning: AHA_API_KEY is not read in http mode. Each request brings its credential in the header Aha-Api-Key` | load-configuration, step 7 |
+| G15 | `warning: default-product names no product of the account. Examples use the key <KEY>` | choose-example-key, step 4 |
+| G16 | `warning: the product list could not be read. Examples use the key PROD` | choose-example-key, step 5 |
+
+In G15, `<KEY>` is the ExampleKey that step 3 of choose-example-key
+gives. No warning has the value of an option or of a variable.
+
 In G12, `<word>` is the first word as it was given, and it is empty when
 the command line has none. The text has the form of the message of the
 deployment template for an unknown transport, with the two words of manual
@@ -908,7 +937,7 @@ POSTCONDITIONS:
 - no request was sent
 - an option took precedence over its variable, and the key file over AHA_API_KEY
 - no start message and no warning has the credential, and none has the value of an argument or of a variable other than the path of the key file
-- the settings come from the arguments, from the key file and from the variables of the second table, and from no other variable and no other file
+- the settings come from the arguments, from the key file and from the four AHA_ variables of the second table, and from no other variable and no other file
 
 ERRORS:
 - start error with exit code 2: G01 to G09, and G12
@@ -2513,13 +2542,6 @@ proxy. The operator of the environment decides this with the trust store.
 In such an environment the credential can be a placeholder that the proxy
 replaces on the way to Aha!. The server sends it as it is.
 
-MECHANISM: the HTTPS connection can be replaced as a whole, and FakeAha
-takes its place in tests. The choice of the proxy is a function of the
-environment and the address. FakeAha calls it for every request and
-records the result. The waiting of step 7 goes through a clock that
-tests replace, so that no test waits. It is the clock of the log line of
-`execute`.
-
 POSTCONDITIONS:
 - the request was for the account of the Account and for no other host
 - the server connected to that host or to the proxy of the environment, and to nothing else
@@ -2911,8 +2933,8 @@ STEPS:
 1. Choose the ExampleKey when it is first needed. That is when the tool list is answered, or when a DESCRIBE result, a message or a note shows it. In stdio mode and manual mode it is chosen once for the process. It is the one value from Aha! that the process keeps between statements; the product list that was read for it is not kept. In http mode it is chosen at most once for each request, with the Account of that request.
 2. When the setting default_product has a value and resolve-product finds it: the ExampleKey is the key of that product.
 3. In every other case the ExampleKey is PROD. While a product of the account has the ExampleKey as its key, in any case, add the letter X at its end.
-4. When the setting default_product has a value and resolve-product does not find it: write a warning to the diagnostic output and continue with step 3.
-5. When the product list cannot be read: the ExampleKey is PROD. Write a warning to the diagnostic output. The failed reading is not an error of the call that needed the key.
+4. When the setting default_product has a value and resolve-product does not find it: continue with step 3, and then write the warning G15 to the diagnostic output.
+5. When the product list cannot be read: the ExampleKey is PROD. Write the warning G16 to the diagnostic output, and not G15. The failed reading is not an error of the call that needed the key.
 
 POSTCONDITIONS:
 - the ExampleKey is the key of the product of the setting default_product, or a key that no product of the account had when the key was chosen, or PROD when the product list could not be read
@@ -2972,7 +2994,7 @@ ERRORS:
 - [observable] manual mode writes to standard output the same text that the MCP tool returns for the same statement and the same Account
 - [observable] the credential is in no tool result, no message, no note, no log line, no start message, no warning and no output of manual mode, and no option of the command line takes it
 - [observable] every request of the server is for https://<subdomain>.aha.io/api/v1 with the subdomain of the Account of the call; the server follows no redirect, and the only other host that it connects to is the HTTPS proxy of the environment
-- [observable] the server reads these environment variables and no other: AHA_SUBDOMAIN, AHA_API_KEY, AHA_DEFAULT_PRODUCT and AHA_READ_ONLY for its settings, HTTPS_PROXY, https_proxy, NO_PROXY and no_proxy for the way to Aha!, SSL_CERT_FILE and SSL_CERT_DIR for the trust store
+- [observable] the settings of the server come from its arguments, from the key file and from the variables AHA_SUBDOMAIN, AHA_API_KEY, AHA_DEFAULT_PRODUCT and AHA_READ_ONLY, and no other variable changes a setting
 - [observable] an option takes precedence over its environment variable, and the key file over AHA_API_KEY
 - [observable] in http mode a request without a credential reaches no tool and no tool list, and the server uses no credential of its own
 - [observable] in http mode nothing that was read with the credential of one request is part of the answer to another request
@@ -2983,6 +3005,7 @@ ERRORS:
 - [observable] a list that Aha! returns without the custom fields of the request is an error of the statement; no result shows a custom field as empty for that reason
 - [implementation] the certificate for the host of Aha! is checked against the trust store on every connection, also inside the tunnel of a proxy, and no setting turns the check off
 - [implementation] in http mode the server keeps no credential and no data of Aha! after a request is answered
+- [implementation] the code of the server reads the variables AHA_SUBDOMAIN, AHA_API_KEY, AHA_DEFAULT_PRODUCT and AHA_READ_ONLY and no other; the standard library of the language reads HTTPS_PROXY, https_proxy, NO_PROXY and no_proxy for the way to Aha!, and SSL_CERT_FILE and SSL_CERT_DIR for the trust store
 - [implementation] the server has no direct dependency other than the MCP framework that the deployment template selects
 - [implementation] the entity-catalog is the single source for name resolution, DESCRIBE, the parameter fields, record conversion, value checks, request bodies and the lists in messages; the server has no second list of entities or fields, and it has no built-in list of custom fields: these come from the definitions of the account
 - [implementation] no list is read with one request per record
@@ -3082,28 +3105,30 @@ THEN:
 ### EXAMPLE: execute_writes_a_log_line (of: execute)
 GIVEN:
   the fixture account
-  the clock of the test shows 2026-11-13T09:30:00Z
 WHEN:
   the tool execute is called with statement =
   `UPDATE features SET status = 'shipped' WHERE id = 'demo-1'`
 THEN:
   the tool result is
   `{"id":"DEMO-1","name":"CSV export","status":"Shipped","message":"Feature DEMO-1 status changed to 'Shipped'"}`
-  the diagnostic output has the line
-  `2026-11-13T09:30:00Z execute account=example op=update entity=features id=DEMO-1 result=ok`
+  the diagnostic output has exactly one new line, and it has the form
+  `<time> execute account=example op=update entity=features id=DEMO-1 result=ok`
+  `<time>` has the form YYYY-MM-DDThh:mm:ssZ; it is not before the second
+  in which the call started and not after the second in which it ended,
+  both in UTC
 
 ### EXAMPLE: execute_logs_a_refused_statement (of: execute)
 GIVEN:
   the fixture account
-  the clock of the test shows 2026-11-13T09:30:00Z
 WHEN:
   the tool execute is called with statement =
   `DELETE FROM features WHERE name = 'CSV export'`
 THEN:
   the tool result is an error whose message starts with
   `one statement changes one record: the WHERE must start with id = '...'.`
-  the diagnostic output has the line
-  `2026-11-13T09:30:00Z execute account=example op=none entity=none id=none result=syntax`
+  the diagnostic output has exactly one new line, and it has the form
+  `<time> execute account=example op=none entity=none id=none result=syntax`
+  `<time>` has the form YYYY-MM-DDThh:mm:ssZ
   the diagnostic output does not contain `CSV export` and does not contain `fixture-key`
   FakeAha recorded no call
 
@@ -3347,8 +3372,9 @@ WHEN:
 THEN:
   load-configuration returns settings with the subdomain `example`, and no
   account
-  the diagnostic output has a warning that AHA_API_KEY is not read in http
-  mode, and the warning does not contain `fixture-key`
+  stderr contains the line
+  `warning: AHA_API_KEY is not read in http mode. Each request brings its credential in the header Aha-Api-Key`
+  stderr does not contain `fixture-key`
   the server starts and sends no request to Aha!
 WHEN:
   load-configuration runs for the command line
@@ -3364,6 +3390,24 @@ WHEN:
 THEN:
   load-configuration returns settings without a subdomain, and no account
   the diagnostic output has no warning
+
+### EXAMPLE: listen_address_that_is_not_loopback (of: load-configuration)
+GIVEN:
+  the environment has AHA_SUBDOMAIN = `example`
+  192.0.2.1 is an address for documentation, which the machine of the
+  test does not have
+WHEN:
+  load-configuration runs for the command line
+  `mcp-server-aha-aql http listen=192.0.2.1:8080`
+THEN:
+  stderr contains the line
+  `warning: the listen address is not a loopback address. Every request has a credential: put a TLS endpoint in front of the server`
+  FakeAha recorded no call
+WHEN:
+  load-configuration runs for the command line
+  `mcp-server-aha-aql http listen=127.0.0.1:8080`
+THEN:
+  stderr has no line that starts with `warning:`
 
 ### EXAMPLE: unknown_first_word (of: load-configuration)
 GIVEN:
@@ -5741,33 +5785,37 @@ THEN:
 ### EXAMPLE: request_through_the_proxy_of_the_environment (of: aha-request)
 GIVEN:
   the fixture account
-  the environment has HTTPS_PROXY = `http://10.200.0.1:3128`
+  the environment has HTTPS_PROXY with the address of FakeAha, as in
+  every example
 WHEN:
   the tool query is called with query = `SELECT id FROM features WHERE id = 'DEMO-3'`
   and aha-request sends the request
 THEN:
-  FakeAha recorded exactly one request:
+  FakeAha recorded one CONNECT request, for `example.aha.io:443`
+  no header of the CONNECT request has `fixture-key`
+  FakeAha recorded exactly one request inside the tunnel:
   GET https://example.aha.io/api/v1/features/DEMO-3
-  the proxy that the server chose for it is `http://10.200.0.1:3128`
   the tool result is
   `{"entity":"features","scope":"feature DEMO-3","count":1,"records":[{"id":"DEMO-3"}]}`
 
-### EXAMPLE: host_of_aha_without_the_proxy (of: aha-request)
+### EXAMPLE: certificate_that_the_trust_store_does_not_have (of: aha-request)
 GIVEN:
   the fixture account
-  the environment has HTTPS_PROXY = `http://10.200.0.1:3128` and
-  NO_PROXY = `.aha.io`
+  the environment has SSL_CERT_FILE with a certificate authority that did
+  not sign the certificate of FakeAha
 WHEN:
   the tool query is called with query = `SELECT id FROM features WHERE id = 'DEMO-3'`
-  and aha-request sends the request
+  and aha-request checks the certificate inside the tunnel
 THEN:
-  FakeAha recorded exactly one request, and the server chose no proxy for it
+  the tool result is an error with the message
+  `cannot reach Aha!: the certificate of example.aha.io could not be verified.`
+  FakeAha recorded no request inside the tunnel, so the credential was
+  not sent
 
 ### EXAMPLE: proxy_does_not_open_the_tunnel (of: aha-request)
 GIVEN:
   the fixture account
-  the environment has HTTPS_PROXY = `http://10.200.0.1:3128`
-  FakeAha is told that the proxy does not open the tunnel
+  FakeAha is told to refuse CONNECT
 WHEN:
   the tool execute is called with statement =
   `UPDATE features SET name = 'CSV export 2' WHERE id = 'DEMO-1'`
@@ -5775,21 +5823,22 @@ WHEN:
 THEN:
   the tool result is an error with the message
   `cannot reach Aha!: the proxy did not open a connection to example.aha.io.`
-  the message does not contain `10.200.0.1`
-  FakeAha recorded no ApiUpdate call
+  the message does not contain the address of FakeAha
+  FakeAha recorded no request inside a tunnel
 
 ### EXAMPLE: too_many_requests_is_sent_again (of: aha-request)
 GIVEN:
   the fixture account
-  the clock of the test shows 2026-11-13T09:30:00Z
   FakeAha answers the route /features/DEMO-3 once with the status 429 and
-  the header `X-Ratelimit-Reset: 1794562202`, and after that as usual
+  with the header `X-Ratelimit-Reset`, whose value is the UTC Unix time of
+  that answer plus 2, and after that as usual
 WHEN:
   the tool query is called with query = `SELECT id FROM features WHERE id = 'DEMO-3'`
   and aha-request sends the request
 THEN:
-  the clock of the test was asked to wait 2 seconds, once
   FakeAha recorded two calls on /features/DEMO-3
+  the second call arrived at least 1 second and less than 5 seconds after
+  the first
   the tool result is
   `{"entity":"features","scope":"feature DEMO-3","count":1,"records":[{"id":"DEMO-3"}]}`
 
@@ -5802,8 +5851,9 @@ WHEN:
   the tool query is called with query = `SELECT id FROM features WHERE id = 'DEMO-3'`
   and aha-request sends the request
 THEN:
-  the clock of the test was asked to wait 5 seconds, twice
   FakeAha recorded three calls on /features/DEMO-3
+  the second call arrived at least 5 seconds after the first, and the
+  third at least 5 seconds after the second
   the tool result is an error with the message
   `aha: API error (status 429): too many requests`
 
@@ -5947,6 +5997,19 @@ THEN:
   `INSERT INTO features (parent, name) VALUES ('PRODX-R-3', 'Export to CSV')`
   no description contains `'PROD-`
 
+### EXAMPLE: default_product_that_the_account_does_not_have (of: choose-example-key)
+GIVEN:
+  the fixture account
+  the setting default_product is `nope`
+WHEN:
+  an MCP client lists the tools for the first time and choose-example-key
+  runs
+THEN:
+  the description of `query` has the line
+  `id is the reference number of a record, for example 'PROD-23'.`
+  stderr contains the line
+  `warning: default-product names no product of the account. Examples use the key PROD`
+
 ### EXAMPLE: example_key_is_chosen_when_it_is_needed (of: choose-example-key)
 GIVEN:
   the fixture account
@@ -5981,8 +6044,9 @@ THEN:
   the tool list is returned, with `query` and `execute`
   the description of `query` has the line
   `id is the reference number of a record, for example 'PROD-23'.`
-  the diagnostic output has a warning, and the warning does not contain
-  `fixture-key`
+  stderr contains the line
+  `warning: the product list could not be read. Examples use the key PROD`
+  stderr does not contain `fixture-key`
 
 ## DEPENDENCIES
 
@@ -6029,7 +6093,9 @@ Where the account name and the credential come from:
 
 The settings default_product and read_only have an option and a variable
 in the same way. The table of environment variables in load-configuration
-is the complete list of what the server reads from its environment.
+lists the variables that the server uses: four for its settings, and the
+variables that the standard library reads for the proxy and for the
+trust store.
 
 Manual mode at a shell. The statement is in double quotes, because AQL
 writes text in single quotes:
@@ -6090,6 +6156,17 @@ specification. The http transport of the deployment template speaks plain
 HTTP. On an address that is not a loopback address, a TLS endpoint in
 front of the server is necessary, because every request has a credential.
 
+Container image. The image has the certificate authorities of its build
+as its trust store, because the server checks the certificate of Aha!. An
+image that is built again has the current list. An operator can also
+give a trust store of their own with SSL_CERT_FILE. The server in the
+image listens on `127.0.0.1:8080`, the default of the deployment
+template. A TLS endpoint in the same pod, or in the same network
+namespace, reaches it at that address. An operator who publishes the
+port of the container sets `listen=0.0.0.0:8080` in the command of the
+container. The server then writes the warning G13, and the TLS endpoint
+in front of it is the task of the operator.
+
 Authentication with OAuth: this version has no OAuth flow. Aha! accepts an
 OAuth2 access token wherever it accepts an API key. A token that was
 obtained in another way can therefore be used as the credential.
@@ -6122,7 +6199,7 @@ these only when a specification declares it:
 | Template key | Declared here |
 |---|---|
 | COMMAND-WORDS | The command words are `query` and `execute`. Each makes one tool call and ends, and it selects no transport (see manual-mode). Their arguments are in the table of options in load-configuration. Their output and their exit codes are in the tables of output streams and exit codes above. An unknown first word gets the message G12, which lists the two transports and then the two command words |
-| CONFIG-ENV-VARS | The server reads the environment variables of the table in load-configuration, and no other. An option takes precedence over its variable |
+| CONFIG-ENV-VARS | The settings of the server come from the four AHA_ variables of the table in load-configuration, and from no other variable. An option takes precedence over its variable. The same table names the variables for the proxy and for the trust store, which the standard library of the language reads |
 | TOOL-EXECUTION-ERRORS | Every AqlError of `query` and of `execute` is a tool execution error. The tool result is marked as an error and has the message as its only text, so that the language model reads it. Protocol errors and internal errors of the server are JSON-RPC error responses |
 
 Platform: as the deployment template says. The check of the permission
