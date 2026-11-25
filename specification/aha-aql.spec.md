@@ -3,7 +3,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.18.0
+Version:      0.18.1
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -2561,6 +2561,7 @@ STEPS:
 4. Take lists of entities and of fields from the catalog, in catalog order, joined by a comma and a space.
 5. Show at most MaxListed entries of a list of records, of product keys, of custom fields or of options. When there are more, end the list with `, and <n> more`.
 6. The message of an error is the complete tool result of `query` and of `execute` for that error. A note is part of the result of a read statement.
+7. Articles. Where a text below has the word `a` directly before `<kind>`, `<expected kind>` or `<singular>`, the message has `an` when the word that replaces the placeholder starts with a, e, i, o or u: `an epic`, `an idea`, `an initiative`.
 
 The messages speak of the query tool and the execute tool. In manual mode
 these are the two commands of the same names; the texts stay the same.
@@ -2583,7 +2584,7 @@ Placeholders that several messages use:
 | `<apostrophe hint>` | Empty, unless the statement has an apostrophe directly between a letter or digit and a letter. Then: ` The text contains an apostrophe (<word>). Inside text, write an apostrophe twice: <word doubled>`. `<word>` is the run of characters without a space around the first such apostrophe, without the characters ' " % ( ) , ; at its ends |
 | `<example id>` | By kind: feature `<KEY>-23`, release `<KEY>-R-3`, initiative `<KEY>-S-1`, epic `<KEY>-E-1`, goal `<KEY>-G-1`, idea `<KEY>-I-1`, requirement `<KEY>-23-1`, product `<KEY>` |
 | `<records>` | One entry `<id> (<name>)` per record, joined by a comma and a space; `none` when there is no record |
-| `<singular>`, `<kind>` | The singular of the entity, or the name of the record kind |
+| `<singular>`, `<kind>` | The singular of the entity, or the name of the record kind. For the entity me the singular is `user` |
 | `<custom list>` | The names of the custom fields of the entity, as custom-fields returns them without a key, joined by a comma and a space |
 | `<writable custom list>` | The names of the custom list whose kind can be set |
 | `<custom hint>` | Empty when the custom list is empty. Otherwise: ` Custom fields of <entity>: <custom list>.` |
@@ -2611,7 +2612,7 @@ Messages for a statement that cannot be read:
 | S02 | syntax | `unexpected character <c> at position <n>.<apostrophe hint>` |
 | S03 | syntax | `cannot read the statement at <where>: expected <what>.<apostrophe hint> Form: <read form>. Example: <example of features>` |
 | S04 | syntax | `a statement starts with SELECT or DESCRIBE.<apostrophe hint> Form: <read form>. Example: <example of features>` |
-| S05 | syntax | `<id> is an id, not a statement. To read that record: SELECT * FROM <entity> WHERE id = '<id>'` |
+| S05 | syntax | `<ID> is an id, not a statement. To read that record: SELECT * FROM <entity> WHERE id = '<ID>'` |
 | S06 | syntax | `<word> is an entity, not a statement. To list its records: <example of entity>. To see its fields: DESCRIBE <entity>` |
 | S07 | syntax | `query only reads. Use the execute tool for INSERT, UPDATE and DELETE.` |
 | S08 | syntax | `JOIN is not supported. Read one entity per statement and filter by its parent, for example: <example of features>` |
@@ -2623,6 +2624,9 @@ Messages for a statement that cannot be read:
 | S14 | syntax | `DESCRIBE <entity> lists the fields of <entity> and takes nothing else. To read records: <example of entity>` |
 | S15 | syntax | `two select items have the label '<label>'. Give one of them another label, in the form: field AS label` |
 | S16 | syntax | `the label '<label>' is also the name of a field of <entity>. Choose another label, in the form: field AS label` |
+
+In S05, `<ID>` is the id of the text in capital letters: the text `demo-3`
+gets `DEMO-3`.
 
 In S15 and S16, `<label>` is the label as the statement writes it. In S15
 it is the label of the first pair of items that parse-statement refuses.
@@ -2816,6 +2820,12 @@ statement changes. Without such a record it is the part of the value
 before its first `-`, when that part is the key of a product. In every
 other case it is the ExampleKey.
 
+For the kind requirement the statement of W25 is `SELECT id, name FROM
+requirements WHERE feature = '<FEATURE>'`, because requirements are listed
+per feature and not per product. `<FEATURE>` is the value in capital
+letters without its last hyphen and the number after it: `DEMO-1` for
+`DEMO-1-9`.
+
 In W29, for a field without a value the text is `nothing was changed:
 <singular> <id> has no <field>, not '<value>'`.
 
@@ -2854,7 +2864,7 @@ Notes in the result of a read statement:
 |---|---|
 | H01 | `* shows <default fields>. Other fields of <entity>: <other fields>.` |
 | H02 | `Showing <count> of <total> records. Narrow the result with WHERE, raise LIMIT (up to <max_limit>), or count with COUNT(*).` |
-| H03 | `There is no <singular> with the id '<value>'.` |
+| H03 | `There is no <singular> with the <id field> '<value>'.` |
 | H04 | `'<value>' is the key of a product, not its name. Use: SELECT key, name FROM products WHERE key = '<PRODUCT>'` |
 | H05 | `'<value>' looks like an id, not a name. Use: WHERE id = '<VALUE>'` |
 | H06 | `'<value>' looks like the id of a <kind>, not a name. Use: WHERE <kind> = '<VALUE>'` |
@@ -5797,6 +5807,7 @@ WHEN:
   `SELECT COUNT(*) FROM features WHERE product = 'PROD'`;
   `SELECT key, name FROM products`;
   `SELECT id, name FROM releases WHERE product = 'PROD'`;
+  `SELECT id, name FROM requirements WHERE feature = 'PROD-23'`;
   `SELECT * FROM features WHERE name CONTAINS 'x'`;
   `SELECT id, body FROM comments WHERE parent = 'PROD-23'`;
   `SELECT name FROM statuses WHERE product = 'PROD' AND entity = 'features'`;
@@ -5805,6 +5816,47 @@ WHEN:
   `UPDATE features SET custom.priority = '...' WHERE id = '...'`
 THEN:
   parse-statement returns a statement for each of them
+
+### EXAMPLE: articles_and_ids_in_messages (of: error-messages)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query = `SELECT * FROM features WHERE epic = 'DEMO'`
+  and error-messages writes the article before the kind
+THEN:
+  the tool result is an error with the message
+  `'DEMO' is a product, not an epic. Use: WHERE product = 'DEMO'`
+WHEN:
+  the tool query is called with query = `SELECT * FROM epics WHERE id = 'DEMO-S-1'`
+THEN:
+  the tool result is an error with the message
+  `'DEMO-S-1' is the id of an initiative, not of an epic. For the epics of that initiative: SELECT * FROM epics WHERE initiative = 'DEMO-S-1'`
+WHEN:
+  the tool execute is called with statement = `INSERT INTO ideas (parent) VALUES ('DEMO')`
+THEN:
+  the tool result is an error with the message
+  `name is required to create an idea`
+WHEN:
+  the tool query is called with query = `SELECT * FROM products WHERE key = 'NOPE'`
+THEN:
+  the tool result is
+  `{"entity":"products","scope":"all products","count":0,"records":[],"note":"There is no product with the key 'NOPE'."}`
+WHEN:
+  the tool query is called with query = `demo-3`
+THEN:
+  the tool result is an error with the message
+  `DEMO-3 is an id, not a statement. To read that record: SELECT * FROM features WHERE id = 'DEMO-3'`
+WHEN:
+  the tool query is called with query = `SELECT * FROM me WHERE name = 'x'`
+THEN:
+  the note of the tool result ends with
+  `No user has exactly the name 'x'. name = compares the whole name; to search inside names use: name CONTAINS 'x'`
+WHEN:
+  the tool execute is called with statement =
+  `INSERT INTO comments (parent, body) VALUES ('DEMO-1-9', 'c')`
+THEN:
+  the tool result is an error with the message
+  `there is no requirement with the id 'DEMO-1-9'. To find the id, use the query tool: SELECT id, name FROM requirements WHERE feature = 'DEMO-1'`
 
 ### EXAMPLE: example_key_is_the_default_product (of: choose-example-key)
 GIVEN:
