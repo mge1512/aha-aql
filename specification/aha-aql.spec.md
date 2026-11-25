@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.16.0
+Version:      0.17.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -482,6 +482,9 @@ Features of DEMO, in the order in which the API lists them:
 Every feature of DEMO has the created_at `2026-02-01T08:00:00.000Z`.
 DEMO-1 has the updated_at `2026-02-02T08:00:00.000Z`, and the other five
 features have the updated_at `2026-02-03T23:30:00.000Z`.
+
+DEMO-3 has the tags live and dashboard, in this order, and DEMO-4 has
+the tag live. No other feature of the fixture account has tags.
 
 Other records of the fixture account:
 
@@ -2160,7 +2163,7 @@ STEPS:
    d. In every other case read the list to its last page.
    e. Custom fields. When used_fields has a custom field, the parameter `fields` also names `custom_fields`. When page 1 then has records and none of them has the member `custom_fields` → api_error, message X05. No further page is requested. The server does not deliver such records with empty custom fields, and it does not read them one by one.
    MECHANISM: every list request has the parameter `fields`. It has the API sources of all fields of the entity that are not heavy, and of the heavy fields among used_fields. Of a source with a dot it has the part before the dot (see INTERFACES). It has `custom_fields` only when used_fields has a custom field. One request per page delivers complete records. No request is sent per record of a list.
-9. Lookups for the evaluation. When the WHERE condition compares a field of the type user with `me`, `myself` or `current_user`, read the current user with one ApiGet on /me. When it compares a field of the type key outside the applied conjuncts, take the product list as resolve-product does. Each lookup is read at most once per statement.
+9. Lookups for the evaluation. When the WHERE condition compares a field of the type user with `me`, `myself` or `current_user`, read the current user with one ApiGet on /me. For a custom field of the kind users, one part of a value with commas that is such a word counts in the same way (evaluate-condition, step 11 c). When it compares a field of the type key outside the applied conjuncts, take the product list as resolve-product does. Each lookup is read at most once per statement.
 10. A request of the steps 1 to 9 that fails in another way than the steps say: NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Any other failure → api_error, message X03. No partial result is returned.
 
 POSTCONDITIONS:
@@ -2223,6 +2226,7 @@ STEPS:
    - `parent` of comments: the NumericId of the commented record.
    - `entity` of statuses: the singular of the entity and the part of the member name before `_workflow`.
    - a custom field of the kind users: the names of its users, joined by a comma and a space. The NumericIds of its users, joined in the same way, are a second spelling.
+   - a field with several values: each single value, as the API record lists it. These fields are `tags` of features, and a custom field of the kind tags, fixed_tags or users. For a users field the single values are the e-mail address, the name and the NumericId of each user. evaluate-condition, step 11, uses them.
 
 POSTCONDITIONS:
 - the record has every field of the entity and every custom field of the input, each with a value or null
@@ -2276,11 +2280,18 @@ STEPS:
 7. `!=` is true when `=` is not true. It is true for a field without a value.
 8. CONTAINS is true when the comparison form of the value is inside the comparison form of the field or of one of its other spellings. LIKE is true when the pattern covers the text from its first to its last character, where `%` stands for any text and `_` for one character. Both are false for a field without a value.
 9. `<`, `<=`, `>` and `>=` are false for a field without a value. A field of the type number is compared as a number. A field of the type date is compared by its day with the day of the value, as text. A field of the type datetime is compared with a DateText by its day in UTC, and with a timestamp as a point in time. A value of a datetime field that cannot be read as a timestamp is compared as text. Every other field is compared in the order of text that build-rows, step 4, gives: a run of digits counts as a number.
-10. Custom fields. A custom field has the field type that the table of kinds in custom-fields gives for its kind. The steps 1 to 9 apply to it as to a catalog field of that type.
+10. Custom fields. A custom field has the field type that the table of kinds in custom-fields gives for its kind. The steps 1 to 9 and step 11 apply to it as to a catalog field of that type.
+11. A field with several values: `tags` of features, and a custom field of the kind tags, fixed_tags or users. convert-record gives each single value of such a field as another spelling.
+   a. `=` is therefore true when one value of the field equals the value of the statement. `tags = 'urgent'` is true for a feature with the tags urgent and customer.
+   b. A value of the statement that has a comma is also read as several values: it is split as check-write-values, step 8, says. `=` is then true as well when the field has each of these values, in any order. The field can have more values. A value without any part after the split adds nothing.
+   c. For a users field, step 4 a applies to each value of the statement: `me` stands for the current user. A value is compared with the e-mail address, the name and the NumericId of each user of the field.
+   d. `!=` is true when `=` is not true, and IN is true when `=` is true for one value of its list.
+   e. The steps 2, 8 and 9 are not changed for such a field. The test for no value, CONTAINS, LIKE and the operators `<`, `<=`, `>` and `>=` work on the joined text, and CONTAINS also on the other spellings. GROUP BY, ORDER BY and DISTINCT use the joined text.
 
 POSTCONDITIONS:
 - the result depends only on the record, the condition and the lookups
 - `=` on `name` is equality of the complete name, not a search
+- `=` on a field with several values is true for every record that has the value among the values of the field
 
 ERRORS:
 - none
@@ -5136,6 +5147,69 @@ WHEN:
 THEN:
   the tool result is
   `{"entity":"features","scope":"product DEMO","count":3,"records":[{"id":"DEMO-4"},{"id":"DEMO-5"},{"id":"DEMO-6"}]}`
+
+### EXAMPLE: fields_with_several_values (of: evaluate-condition)
+GIVEN:
+  the fixture account, in which the current user is test.user@example.com
+  DEMO-1 has the markets EMEA and APAC and the reviewer Second User
+  DEMO-3 has the market EMEA and the reviewers Test User and Second User
+  DEMO-3 has the tags live and dashboard, and DEMO-4 has the tag live
+WHEN:
+  the tool query is called with query =
+  `SELECT id, custom.markets FROM features WHERE product = 'DEMO' AND custom.markets = 'emea'`
+  and evaluate-condition looks for the value among the values of the field
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":2,"records":[{"id":"DEMO-1","custom.markets":"EMEA, APAC"},{"id":"DEMO-3","custom.markets":"EMEA"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND custom.markets = 'APAC, EMEA'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":1,"records":[{"id":"DEMO-1"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND custom.markets != 'APAC'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":5,"records":[{"id":"DEMO-2"},{"id":"DEMO-3"},{"id":"DEMO-4"},{"id":"DEMO-5"},{"id":"DEMO-6"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND custom.reviewers = 'me'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":1,"records":[{"id":"DEMO-3"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND custom.reviewers = 'second.user@example.com, me'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":1,"records":[{"id":"DEMO-3"}]}`
+  FakeAha recorded one ApiGet call on /me
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND custom.reviewers IN ('Second User', 'nobody@example.com')`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":2,"records":[{"id":"DEMO-1"},{"id":"DEMO-3"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id, tags FROM features WHERE product = 'DEMO' AND tags = 'LIVE'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":2,"records":[{"id":"DEMO-3","tags":"live, dashboard"},{"id":"DEMO-4","tags":"live"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND tags = 'dashboard, live'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":1,"records":[{"id":"DEMO-3"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND tags CONTAINS 'board'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":1,"records":[{"id":"DEMO-3"}]}`
 
 ### EXAMPLE: timestamps_are_points_in_time (of: evaluate-condition)
 GIVEN:
