@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.22.0
+Version:      0.22.1
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -675,7 +675,8 @@ ERRORS:
 Constraint: required
 
 Decides which tools the MCP server offers, what their descriptions say,
-and the instructions that the server gives in its answer to `initialize`.
+and the instructions that the server gives in its answers to `initialize`
+and `server/discover`.
 The server has two tools, `query` and `execute`. No other BEHAVIOR of this
 specification is an MCP tool. The descriptions are what a language model
 learns the language from, so their text is part of this specification.
@@ -688,7 +689,7 @@ read_only: Boolean   // the setting read_only
 OUTPUTS:
 ```
 registered tools: query; execute unless read_only
-instructions:     the server instructions below, in the answer to initialize
+instructions:     the server instructions below, in the answers to initialize and server/discover
 ```
 
 PRECONDITIONS:
@@ -700,7 +701,7 @@ STEPS:
 3. Register no other tool, no MCP resource and no MCP prompt.
 4. When the tool list is answered: replace every {KEY} in both descriptions by the ExampleKey of the Account that asks (see choose-example-key).
 5. A call with a parameter that the tool does not declare reaches the tool and is answered with message A02. It is not ignored, and it is not answered with a JSON-RPC error.
-6. Answer `initialize` with the server instructions below as `instructions`. They are the same for every Account and have no {KEY}, so the answer to `initialize` causes no request to Aha!. An MCP host decides whether the language model sees them; the description of `query` therefore starts with the same entry point.
+6. Give the server instructions below as `instructions` in the answer to `initialize` and in the answer to `server/discover`. A client of the protocol version 2026-07-28 sends no `initialize`, and it can ask with `server/discover`. The instructions are the same for every Account and have no {KEY}, so neither answer causes a request to Aha!. An MCP host decides whether the language model sees them; the description of `query` therefore starts with the same entry point.
 
 Description of `query`:
 
@@ -758,7 +759,7 @@ order.
 
 POSTCONDITIONS:
 - the tool list is `query` and `execute`, or `query` alone when read_only is true
-- the answer to `initialize` has the server instructions, and they have no product key of the account
+- the answers to `initialize` and to `server/discover` have the server instructions, and they have no product key of the account
 - no description contains a product key of the account other than the product of the setting default_product
 
 ERRORS:
@@ -3205,6 +3206,11 @@ WHEN:
 THEN:
   `instructions` of the result is the text of the server instructions,
   with a line break after each of its four lines
+  FakeAha recorded no request
+WHEN:
+  a client sends `server/discover`
+THEN:
+  `instructions` of the result is the same text
   FakeAha recorded no request
 WHEN:
   the client lists the tools
