@@ -1,4 +1,4 @@
-// generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
+// generated from spec: aha-aql.spec.md sha256:caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e
 
 package main
 
@@ -66,8 +66,11 @@ func newAhaClient() *ahaClient {
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: requestTimeout,
 		DialContext:         (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
-		// The trust store of the platform; on Linux SSL_CERT_FILE and
-		// SSL_CERT_DIR can name it. No setting turns the check off.
+		// The trust store of the platform (RootCAs nil): on Linux
+		// SSL_CERT_FILE and SSL_CERT_DIR can name it; on macOS it is the
+		// keychain and on Windows the certificate store of the system, and
+		// the two variables have no effect there. No setting turns the
+		// check off.
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 	}
 	return &ahaClient{hc: &http.Client{

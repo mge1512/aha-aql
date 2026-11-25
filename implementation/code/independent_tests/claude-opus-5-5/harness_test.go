@@ -1,4 +1,4 @@
-// generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
+// generated from spec: aha-aql.spec.md sha256:caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e
 // tests by: claude-opus-5-5
 
 // The harness starts the binary mcp-server-aha-aql as a user starts it and
@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -26,7 +27,7 @@ import (
 	"time"
 )
 
-const specSHA = "b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268"
+const specSHA = "caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e"
 
 var binPath string
 
@@ -38,7 +39,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	binPath = filepath.Join(dir, "mcp-server-aha-aql")
+	binPath = filepath.Join(dir, binaryName())
 	if p := os.Getenv("AHA_AQL_TEST_BINARY"); p != "" {
 		binPath = p
 	} else {
@@ -66,8 +67,47 @@ type env struct {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
+	skipWithoutFakeAha(t)
 	dir := t.TempDir()
 	return &env{t: t, dir: dir, fake: NewFakeAha(t, dir)}
+}
+
+// binaryName is the name of the binary on the platform of the test. On
+// Windows it is mcp-server-aha-aql.exe.
+func binaryName() string {
+	if runtime.GOOS == "windows" {
+		return "mcp-server-aha-aql.exe"
+	}
+	return "mcp-server-aha-aql"
+}
+
+// skipWithoutFakeAha skips a test that needs FakeAha on a platform where
+// the server does not take its trust store from SSL_CERT_FILE. Only Linux
+// does; on macOS and Windows the server checks the certificate of FakeAha
+// against the trust store of the system, which does not have the
+// certificate authority of the test (spec: "Platforms of the tests").
+func skipWithoutFakeAha(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skipf("needs FakeAha: on %s the server ignores SSL_CERT_FILE and uses the trust store of the system", runtime.GOOS)
+	}
+}
+
+// newLocalEnv is the sandbox of a test that sends no request to Aha!: the
+// command line, the configuration, the version and the start of the MCP
+// protocol. Such a test runs on every platform. FakeAha is still the proxy
+// of the environment, so that a request that should not happen is seen:
+// when the server opens a tunnel, the test fails.
+func newLocalEnv(t *testing.T) *env {
+	t.Helper()
+	dir := t.TempDir()
+	e := &env{t: t, dir: dir, fake: NewFakeAha(t, dir)}
+	t.Cleanup(func() {
+		if n := e.fake.Tunnels(); n > 0 {
+			t.Errorf("a test that runs on every platform sent %d request(s) to Aha!; it must use newEnv", n)
+		}
+	})
+	return e
 }
 
 // vars gives the environment of the server process: HOME in the sandbox,
@@ -397,7 +437,13 @@ func (e *env) http(extra map[string]string, args ...string) *httpSrv {
 	}
 	go func() { s.exited <- cmd.Wait() }()
 	e.t.Cleanup(func() {
-		_ = cmd.Process.Signal(syscall.SIGTERM)
+		// Windows cannot send SIGTERM to a process; the process is ended
+		// there at once.
+		if runtime.GOOS == "windows" {
+			_ = cmd.Process.Kill()
+		} else {
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+		}
 		select {
 		case <-s.exited:
 		case <-time.After(10 * time.Second):

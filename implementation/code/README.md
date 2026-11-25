@@ -1,4 +1,4 @@
-<!-- generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268 -->
+<!-- generated from spec: aha-aql.spec.md sha256:caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e -->
 
 # mcp-server-aha-aql
 
@@ -47,6 +47,14 @@ make man
 make test
 sudo make install
 ```
+
+On Windows the binary has the name `mcp-server-aha-aql.exe`.
+
+The tests that need the fake Aha! account of the test suite run on Linux
+only, because only there does the server take its trust store from
+`SSL_CERT_FILE`. On macOS and Windows these tests are skipped, and the tests
+of the command line, the configuration, the version and the start of the MCP
+protocol run.
 
 `make build` runs `go mod vendor` the first time. A package build uses the
 vendor tarball (`make vendor-tarball`) and needs no network.
@@ -247,12 +255,16 @@ The server reads these environment variables and no others:
 | `AHA_READ_ONLY` | The setting read_only |
 | `HTTPS_PROXY`, `https_proxy` | The proxy for the connection to Aha! (read by the Go standard library) |
 | `NO_PROXY`, `no_proxy` | Hosts that are reached without the proxy (read by the Go standard library) |
-| `SSL_CERT_FILE`, `SSL_CERT_DIR` | The trust store on Linux (read by the Go standard library) |
+| `SSL_CERT_FILE`, `SSL_CERT_DIR` | The trust store on Linux (read by the Go standard library). They have no effect on macOS and Windows |
 
 The server always checks the certificate of `<subdomain>.aha.io`, also inside
-the tunnel of a proxy. If a proxy ends the TLS connection itself, put the
-certificate authority of the proxy into the trust store, for example with
-`SSL_CERT_FILE`. No setting turns the check off.
+the tunnel of a proxy, against the trust store of the platform. On Linux
+`SSL_CERT_FILE` and `SSL_CERT_DIR` can name that trust store. On macOS the
+trust store is the keychain, and on Windows it is the certificate store of
+the system. If a proxy ends the TLS connection itself, put the certificate
+authority of the proxy into the trust store: on Linux with `SSL_CERT_FILE`,
+on macOS into the keychain, and on Windows into the certificate store of the
+system. No setting turns the check off.
 
 ## Container image
 

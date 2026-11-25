@@ -1,4 +1,4 @@
-// generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
+// generated from spec: aha-aql.spec.md sha256:caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e
 // tests by: claude-opus-5-5
 
 // FakeAha is the test double that the INTERFACES section of the spec
@@ -82,6 +82,7 @@ type FakeAha struct {
 	mu          sync.Mutex
 	calls       []Call
 	connects    []Connect
+	tunnels     int // every CONNECT request; Reset does not clear it
 	badConnects []string
 	refuse      bool
 	omitCF      bool
@@ -226,6 +227,7 @@ func (f *FakeAha) serveProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	f.connects = append(f.connects, Connect{Host: r.Host, Header: r.Header.Clone()})
+	f.tunnels++
 	refuse := f.refuse
 	if r.Host != "example.aha.io:443" {
 		f.badConnects = append(f.badConnects, r.Host)
@@ -296,6 +298,9 @@ func (f *FakeAha) Connects() []Connect {
 	defer f.mu.Unlock()
 	return append([]Connect(nil), f.connects...)
 }
+
+// Tunnels is the number of CONNECT requests since the start of FakeAha.
+func (f *FakeAha) Tunnels() int { f.mu.Lock(); defer f.mu.Unlock(); return f.tunnels }
 
 func (f *FakeAha) RefuseConnect(v bool) { f.mu.Lock(); f.refuse = v; f.mu.Unlock() }
 

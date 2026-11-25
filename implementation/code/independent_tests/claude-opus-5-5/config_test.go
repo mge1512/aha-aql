@@ -1,4 +1,4 @@
-// generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
+// generated from spec: aha-aql.spec.md sha256:caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e
 // tests by: claude-opus-5-5
 
 package aqltests
@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -28,7 +29,7 @@ func (e *env) wantNoRequest() {
 
 func TestVersionFlag(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	r := e.run("", nil, "--version")
 	if r.code != 0 || !strings.Contains(r.stdout+r.stderr, "spec:"+specSHA) || !regexp.MustCompile(`[0-9a-f]{64}`).MatchString(r.stdout) {
 		t.Fatalf("version: code %d out %q err %q", r.code, r.stdout, r.stderr)
@@ -41,7 +42,7 @@ func TestVersionFlag(t *testing.T) {
 
 func TestUnknownFirstWord(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	r := e.run("", nil, "websocket")
 	if r.code != 2 || !hasLine(r.stderr, `error: unknown transport 'websocket'. Valid: stdio, http, query, execute`) {
 		t.Fatalf("code %d stderr %q", r.code, r.stderr)
@@ -120,7 +121,7 @@ func TestSettingsFromTheEnvironment(t *testing.T) {
 
 func TestReadOnlyVariableOfTheWrongForm(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	r := e.startAndStop(map[string]string{"AHA_READ_ONLY": "1"})
 	if r.code != 2 || !hasLine(r.stderr, `error: AHA_READ_ONLY must be true or false`) {
 		t.Fatalf("code %d stderr %q", r.code, r.stderr)
@@ -134,7 +135,7 @@ func TestReadOnlyVariableOfTheWrongForm(t *testing.T) {
 
 func TestStartWithoutAnAccount(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	none := map[string]string{"AHA_SUBDOMAIN": "", "AHA_API_KEY": ""}
 	r := e.startAndStop(none)
 	if r.code != 2 || strings.TrimSpace(r.stderr) != `error: no Aha! account. Use subdomain=NAME or set AHA_SUBDOMAIN` {
@@ -149,7 +150,10 @@ func TestStartWithoutAnAccount(t *testing.T) {
 
 func TestKeyFileThatOtherUsersCanRead(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("the check of the permission bits of the key file applies on linux and darwin, not on windows")
+	}
+	e := newLocalEnv(t)
 	keyFile := writeSandboxFile(t, e.dir, "aha-key", []byte("fixture-key"), 0o644)
 	r := e.startAndStop(map[string]string{"AHA_API_KEY": ""}, "subdomain=example", "api-key-file="+keyFile)
 	want := "error: " + keyFile + " can be read by other users. Run: chmod 600 " + keyFile
@@ -161,7 +165,7 @@ func TestKeyFileThatOtherUsersCanRead(t *testing.T) {
 
 func TestKeyFileThatCannotBeUsed(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	missing := filepath.Join(e.dir, "missing-key")
 	r := e.startAndStop(nil, "api-key-file="+missing)
 	if r.code != 2 || strings.TrimSpace(r.stderr) != "error: no usable credential in "+missing+": no such file" {
@@ -195,7 +199,7 @@ func TestKeyFileThatCannotBeUsed(t *testing.T) {
 
 func TestCredentialIsNotAnOption(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	r := e.startAndStop(map[string]string{"AHA_API_KEY": ""}, "api-key=fixture-key")
 	if r.code != 2 || !hasLine(r.stderr, `error: unknown option 'api-key' for stdio. Options: subdomain, api-key-file, default-product, read-only`) ||
 		strings.Contains(r.stderr, "fixture-key") {
@@ -206,7 +210,7 @@ func TestCredentialIsNotAnOption(t *testing.T) {
 
 func TestValuesOfTheWrongForm(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	r := e.startAndStop(map[string]string{"AHA_SUBDOMAIN": ""}, "subdomain=https://example.aha.io")
 	if r.code != 2 || !hasLine(r.stderr, `error: subdomain must be the account name before .aha.io, for example mycompany`) {
 		t.Fatalf("code %d stderr %q", r.code, r.stderr)
@@ -232,7 +236,7 @@ func TestValuesOfTheWrongForm(t *testing.T) {
 
 func TestArgumentsOfTheWrongForm(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	r := e.startAndStop(nil, "subdomain=example", "verbose")
 	if r.code != 2 || strings.TrimSpace(r.stderr) != `error: argument 2 is not key=value` {
 		t.Fatalf("code %d stderr %q", r.code, r.stderr)
@@ -266,7 +270,7 @@ func TestArgumentsOfTheWrongForm(t *testing.T) {
 
 func TestHTTPModeUsesNoCredentialOfTheProcess(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	s := e.http(nil)
 	time.Sleep(300 * time.Millisecond)
 	if !hasLine(s.stderr.String(), `warning: AHA_API_KEY is not read in http mode. Each request brings its credential in the header Aha-Api-Key`) ||
@@ -287,7 +291,7 @@ func TestHTTPModeUsesNoCredentialOfTheProcess(t *testing.T) {
 
 func TestListenAddressThatIsNotLoopback(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	r := runBin(t, e.dir, e.vars(map[string]string{"AHA_API_KEY": ""}), "", 30*time.Second, "http", "listen=192.0.2.1:8080")
 	if !hasLine(r.stderr, `warning: the listen address is not a loopback address. Every request has a credential: put a TLS endpoint in front of the server`) {
 		t.Fatalf("stderr %q", r.stderr)
@@ -307,7 +311,7 @@ func TestListenAddressThatIsNotLoopback(t *testing.T) {
 
 func TestHTTPBindError(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	s := e.http(map[string]string{"AHA_API_KEY": ""})
 	addr := strings.TrimSuffix(strings.TrimPrefix(s.base, "http://"), "/mcp")
 	r := runBin(t, e.dir, e.vars(map[string]string{"AHA_API_KEY": ""}), "", 30*time.Second, "http", "listen="+addr)

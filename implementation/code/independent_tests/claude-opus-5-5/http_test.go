@@ -1,4 +1,4 @@
-// generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
+// generated from spec: aha-aql.spec.md sha256:caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e
 // tests by: claude-opus-5-5
 
 package aqltests
@@ -49,7 +49,7 @@ func TestHTTPRequestBringsItsAccount(t *testing.T) {
 
 func TestHTTPRequestWithoutACredential(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	s := e.http(map[string]string{"AHA_API_KEY": ""})
 	c := s.client(nil)
 	a := c.request("tools/list", map[string]any{}, 30*time.Second)
@@ -65,7 +65,7 @@ func TestHTTPRequestWithoutACredential(t *testing.T) {
 
 func TestHTTPRequestForAnotherAccount(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	s := e.http(map[string]string{"AHA_API_KEY": ""})
 	c := s.client(map[string]string{"Aha-Api-Key": "fixture-key", "Aha-Subdomain": "other"})
 	a := c.request("tools/call", map[string]any{"name": "query", "arguments": map[string]any{"query": "SELECT email FROM me"}}, 30*time.Second)
@@ -77,7 +77,7 @@ func TestHTTPRequestForAnotherAccount(t *testing.T) {
 
 func TestHTTPRequestWithoutAnAccount(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	s := e.http(map[string]string{"AHA_SUBDOMAIN": "", "AHA_API_KEY": ""})
 	c := s.client(map[string]string{"Aha-Api-Key": "fixture-key"})
 	wantRefused(t, c.request("tools/list", map[string]any{}, 30*time.Second), 400, `no Aha! account. Send the header Aha-Subdomain`)
@@ -86,7 +86,7 @@ func TestHTTPRequestWithoutAnAccount(t *testing.T) {
 
 func TestHTTPRequestFromAWebPage(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	s := e.http(map[string]string{"AHA_API_KEY": ""})
 	c := s.client(map[string]string{"Origin": "https://pages.example", "Aha-Api-Key": "fixture-key"})
 	wantRefused(t, c.request("tools/list", map[string]any{}, 30*time.Second), 403, `requests from a web page are not accepted`)
