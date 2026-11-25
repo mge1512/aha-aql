@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.15.0
+Version:      0.16.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -285,8 +285,8 @@ ErrorKind := syntax | bad_name | scope | bad_args | bad_product | wrong_kind
 // wrong_kind:     An id of another kind of record, or a name where an id
 //                 is needed
 // not_found:      A record that does not exist
-// bad_value:      A value that cannot be written to the field, or a
-//                 required value that is missing
+// bad_value:      A value that cannot be written to the field or compared
+//                 with it, or a required value that is missing
 // guard_failed:   A condition next to the id is not true for the record;
 //                 nothing was changed
 // not_authorized: Aha! did not accept the credential, or the credential
@@ -395,6 +395,7 @@ Values in an API record:
 - A member that names a status, a user or another record is an object. The catalog writes its source with a dot: `workflow_status.name`, `assigned_to_user.email`, `feature.reference_num`.
 - A feature names its release, its initiative and its epic in members of their own, for example `release_reference_num`. An epic has `initiative_reference_num` and no `release_reference_num`. It names its release in the object `release`, whose member `reference_num` has the id.
 - The success metric of a goal is the object `success_metric`. Its member `name` has the text of the metric, and its member `workflow_status` has the status of the goal. A goal has no member `workflow_status` of its own.
+- A timestamp is a JSON string in an ISO 8601 form, for example `2026-02-02T08:00:00.000Z`. evaluate-condition reads it as a point in time. The result of a comparison does not depend on the number of digits after the seconds, and it does not depend on how the zone is written.
 
 The parameter `fields` of ApiList names top-level members only. For the
 API source `workflow_status.name` it names `workflow_status`, and each
@@ -477,6 +478,10 @@ Features of DEMO, in the order in which the API lists them:
 | DEMO-4 | Live video feed | Under consideration | DEMO-R-3 | DEMO-S-1 | (none) |
 | DEMO-5 | Rider's handbook | Shipped | DEMO-R-3 | (none) | (none) |
 | DEMO-6 | Route planner | Under consideration | DEMO-R-1 | (none) | (none) |
+
+Every feature of DEMO has the created_at `2026-02-01T08:00:00.000Z`.
+DEMO-1 has the updated_at `2026-02-02T08:00:00.000Z`, and the other five
+features have the updated_at `2026-02-03T23:30:00.000Z`.
 
 Other records of the fixture account:
 
@@ -1151,7 +1156,7 @@ STEPS:
 2. Call ApiGet on the id route of the entity. NotFound → not_found, message W20. NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Rejected → api_error, message X03.
    MECHANISM: the record is read with one request by its id. The statement never lists records to find the record to change.
 3. Run convert-record for the record, with the custom fields that the statement uses.
-4. For each guard, in the order of the statement: run evaluate-condition with the operator "=" on the record. The first guard that is not true → guard_failed, message W29.
+4. For each guard, in the order of the statement: run evaluate-condition for it on the record. A guard is a comparison with the operator "=", or the test for no value that parse-statement reads from `field = ''`. The first guard that is not true → guard_failed, message W29.
 5. Run check-write-values for the assigned fields with the product of the record; on failure → the error of check-write-values.
 6. If dry_run: return a WriteResult with the id, the assigned fields with their checked values, and the message "would update <singular> <id>". A checked value that is a TextList is shown as text, joined by a comma and a space. No write request is sent.
 7. Run write-request for the entity and the checked fields. Call ApiUpdate on the update route with that body. NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. NotFound, when the statement assigns exactly one reference → not_found, message W25 for that reference. Any other failure → api_error, message W30.
@@ -1322,6 +1327,9 @@ Rules for a read statement:
 - Without SELECT, the item is `*`.
 - NOT binds stronger than AND, and AND binds stronger than OR.
 - `field = NULL` is read as `field IS NULL`, and `field != NULL` as `field IS NOT NULL`.
+- `field = ''` is read as `field IS NULL`, and `field != ''` as `field IS NOT NULL`. No field has empty text as its value: evaluate-condition takes empty text as no value.
+- In an IN list, NULL and empty text stand for a field without a value (see evaluate-condition, step 3).
+- The value of a comparison with `=`, `!=`, `<`, `<=`, `>`, `>=`, IN or BETWEEN must fit the type of its field, as the table of values in a condition says (below). A custom field has the field type of its kind (see custom-fields). A value that does not fit → bad_value, message V01. `<`, `<=`, `>`, `>=` or BETWEEN on a field of the type boolean → bad_value, message V02. The check needs no record, and it is made before the first request for records. CONTAINS and LIKE take any text.
 - `field BETWEEN a AND b` is read as `field >= a AND field <= b`.
 - NOT before IN, CONTAINS, LIKE or BETWEEN negates that comparison.
 - The label of a field item is the word as the statement writes it, without a qualifier, or the label after AS. The label of an aggregate item is the label after AS, or the function name in capital letters with its argument in parentheses as written: `COUNT(*)`, `COUNT(name)`, `COUNT(DISTINCT status)`.
@@ -1336,6 +1344,22 @@ Rules for a read statement:
 - A word directly followed by `(` that is not one of the five functions → syntax, message S12.
 - A word that is not a keyword, where a value is expected → syntax, message S13.
 - LIMIT takes a whole number that is not negative.
+
+Values in a condition:
+
+| Type of the field | Accepted value | Compared as |
+|---|---|---|
+| number | A Number, or Text that reads as a number | A number |
+| boolean | TRUE or FALSE, the number 1 or 0, or the text `true` or `false` in any case | A truth value |
+| date | A DateText that is a day of the calendar, or a timestamp | A day: the first 10 characters of the value |
+| datetime | A DateText that is a day of the calendar, or a timestamp | A day or a point in time, as evaluate-condition says |
+| every other type | Text, a Number or a Boolean | Text, as evaluate-condition says |
+
+A timestamp is text that starts with a DateText. `T` or one space follows,
+and then the time as hh:mm. The time can go on with :ss and with a fraction
+of the second. `Z`, or an offset of the form +hh:mm or -hh:mm, can end the
+text. Without `Z` and without an offset the timestamp is in UTC. NULL fits
+every type.
 
 Form of a describe statement:
 
@@ -1363,7 +1387,7 @@ Rules for a write statement:
 - An assignment is `field = value`. Anything between the value and the next `,` or WHERE → syntax, message W10.
 - UPDATE and DELETE need a WHERE clause; without it → syntax, message W04.
 - The first condition of the WHERE clause must compare the id field of the entity with `=`. The id field may have any spelling that resolve-names accepts. Any other first condition → syntax, message W05. The value must be a text or a number; otherwise → syntax, message W03.
-- Each further condition must be joined with AND and have the form `field = value`. OR, NOT or parentheses → syntax, message W05. Another operator → syntax, message W06. A field that is not a field of the entity → bad_name, message W17. A custom field of the entity is a field of the entity here. These conditions are the guards of the statement.
+- Each further condition must be joined with AND and have the form `field = value`. OR, NOT or parentheses → syntax, message W05. Another operator → syntax, message W06. A field that is not a field of the entity → bad_name, message W17. A custom field of the entity is a field of the entity here. These conditions are the guards of the statement. The value of a guard must fit the type of its field, as the table of values in a condition says; otherwise → bad_value, message V01. A guard `field = ''` is read as `field IS NULL`: it is true when the field has no value.
 - NULL as a value → syntax, message W11. A word that is not a keyword, where a value is expected → syntax, message S13.
 - Any other departure from the forms → syntax, message W03.
 
@@ -1375,6 +1399,7 @@ POSTCONDITIONS:
 ERRORS:
 - syntax: S03 to S14, W01 to W11, and S01 and S02 from tokenize
 - bad_name: W12 to W17 and W31, and N01 to N07 from resolve-names
+- bad_value: a value in a condition or in a guard that does not fit the type of its field (V01), and an ordering operator on a boolean field (V02)
 - rate_limited, network, api_error: X01, X02, X03, when resolve-names needs the custom field definitions and they cannot be read
 
 ## BEHAVIOR/INTERNAL: entity-catalog
@@ -2122,7 +2147,7 @@ STEPS:
    d. the field is `id` → message K04;
    e. the field is release, initiative or epic, and the WHERE condition has a conjunct `product = value` that resolve-product finds → message K05. The records of that kind in the product are read for it with one list request;
    f. in every other case → message K06.
-5. Route by a list of values. This step applies when step 2 took no route. Take the first conjunct of the form `field IN (values)` that has at most MaxInValues values and whose field has a read route. The route of the field `product` counts here. Read every value as step 3 says, each list to its last page; the steps 8 a and 8 b do not apply. Put the records together and leave out a record that was read before. Scope: the scopes of the values, joined by a comma and a space. The conjunct is applied.
+5. Route by a list of values. This step applies when step 2 took no route. Take the first conjunct of the form `field IN (values)` that has at most MaxInValues values and whose field has a read route. The route of the field `product` counts here. A list with NULL or with empty text is not taken, because no route reads the records without a value. Read every value as step 3 says, each list to its last page; the steps 8 a and 8 b do not apply. Put the records together and leave out a record that was read before. Scope: the scopes of the values, joined by a comma and a space. The conjunct is applied.
 6. Route by product. This step applies when no route was taken so far and the entity has a read route for the field `product`. When the WHERE condition has a conjunct `product = value`: read it as step 3 b says, and the conjunct is applied.
 7. Account-wide list. This step applies when no route was taken so far.
    a. When the entity has no account-wide list → scope, message C01.
@@ -2140,6 +2165,7 @@ STEPS:
 
 POSTCONDITIONS:
 - every record of the result belongs to the scope
+- the scope is never empty text
 - every page of a list was requested at most once, with increasing page numbers
 - the number of requests does not grow with the number of records in a page
 - at most max_pages pages of one list were requested
@@ -2227,12 +2253,13 @@ result: Boolean
 
 PRECONDITIONS:
 - every field of the condition is a field of the record
+- every value of the condition fits the type of its field: parse-statement has checked it against the table of values in a condition
 - the lookups that the condition needs were read; update-statement and delete-statement read them in the same way before they check their guards, and a failed request there is the error of plan-fetch, step 10
 
 STEPS:
 1. AllOf is true when every member is true. AnyOf is true when at least one member is true. Negation is true when its member is not true.
 2. NullTest: a field has no value when it is null or empty text. IS NULL is true for a field without a value, and IS NOT NULL for a field with a value.
-3. InList is true when the comparison `field = value` is true for at least one of its values.
+3. InList is true when the comparison `field = value` is true for at least one of its values. NULL or empty text in the list stands for a field without a value: the list is then also true for such a field.
 4. Comparison. First replace the value of the statement in three cases.
    a. The field has the type user and the value is `me`, `myself` or `current_user` in any case. The value becomes the e-mail address of the current user. Where the field is read as a name, it becomes the name of the current user.
    b. The field has the type key and resolve-product finds the value. The value becomes the key of that product.
@@ -2241,12 +2268,14 @@ STEPS:
 6. `=` is true when the value equals the value of the field or one of its other spellings:
    a. when one side is a Boolean: the truth values are equal, where the texts `true` and `false` and the numbers 1 and 0 are read as truth values;
    b. when the field has the type number: the numbers are equal;
-   c. when the field has the type date or datetime and the value has 10 characters: the first 10 characters of the field equal the value;
-   d. in every other case: the comparison forms are equal.
+   c. when the field has the type date: the day of the field equals the day of the value. The day is the first 10 characters;
+   d. when the field has the type datetime and the value is a DateText: the day of the field in UTC equals the value;
+   e. when the field has the type datetime and the value is a timestamp: both are the same point in time;
+   f. in every other case: the comparison forms are equal.
    A field without a value equals nothing.
 7. `!=` is true when `=` is not true. It is true for a field without a value.
 8. CONTAINS is true when the comparison form of the value is inside the comparison form of the field or of one of its other spellings. LIKE is true when the pattern covers the text from its first to its last character, where `%` stands for any text and `_` for one character. Both are false for a field without a value.
-9. `<`, `<=`, `>` and `>=` are false for a field without a value. A field of the type number is compared as a number. A field of the type date or datetime is compared as text, and against a value of 10 characters only its first 10 characters are compared. Every other field is compared in the order of text that build-rows, step 4, gives: a run of digits counts as a number.
+9. `<`, `<=`, `>` and `>=` are false for a field without a value. A field of the type number is compared as a number. A field of the type date is compared by its day with the day of the value, as text. A field of the type datetime is compared with a DateText by its day in UTC, and with a timestamp as a point in time. A value of a datetime field that cannot be read as a timestamp is compared as text. Every other field is compared in the order of text that build-rows, step 4, gives: a run of digits counts as a number.
 10. Custom fields. A custom field has the field type that the table of kinds in custom-fields gives for its kind. The steps 1 to 9 apply to it as to a catalog field of that type.
 
 POSTCONDITIONS:
@@ -2659,6 +2688,24 @@ order, joined by a comma and a space.
 In K04, for comments the text is `'<value>' is not the id of a comment. To
 find the id: SELECT id, body FROM comments WHERE parent = '<KEY>-23'`.
 
+Messages for a value in a condition or in a guard:
+
+| ID | Kind | Text |
+|---|---|---|
+| V01 | bad_value | `<field> is <type text>: write the value as <form>. Got '<value>'.` |
+| V02 | bad_value | `<field> is true or false: compare it with = or !=, for example <field> = TRUE` |
+
+In V01 and V02, `<field>` is the name of the field; for a custom field it
+is `custom.` and its key. In V01, `<type text>` and `<form>` depend on the
+type of the field:
+
+| Type of the field | `<type text>` | `<form>` |
+|---|---|---|
+| number | `a number` | `5 or 2.5` |
+| boolean | `true or false` | `TRUE or FALSE` |
+| date | `a date` | `'YYYY-MM-DD'` |
+| datetime | `a timestamp` | `'YYYY-MM-DD' or 'YYYY-MM-DDThh:mm:ssZ'` |
+
 Messages of write statements:
 
 | ID | Kind | Text |
@@ -2668,7 +2715,7 @@ Messages of write statements:
 | W03 | syntax | `<problem><apostrophe hint> Forms: <write forms>` |
 | W04 | syntax | `<KEYWORD> needs WHERE id = '...' with the id of the one record to change.<apostrophe hint> Forms: <write forms>` |
 | W05 | syntax | `one statement changes one record: the WHERE must start with id = '...'. Further conditions are joined with AND and have the form field = 'value'. To change several records, find their ids with the query tool and send one statement per record.` |
-| W06 | syntax | `after WHERE id = '...', further conditions must have the form AND field = 'value'` |
+| W06 | syntax | `after WHERE id = '...', further conditions must have the form AND field = 'value'. For a field without a value write: AND field = ''` |
 | W07 | syntax | `one INSERT creates one record. Send one statement per record.` |
 | W08 | syntax | `<n> fields but <m> values` |
 | W09 | syntax | `the parent is given twice with different values` |
@@ -2852,6 +2899,7 @@ ERRORS:
 - The create route and the delete route of every entity that can be changed work as the catalog says. This was observed on one account on 2026-11-24; a comment was created on a feature only. An update was observed for features, epics, requirements and goals.
 - The record of a product names the workflow of each record kind in a member whose name ends in `_workflow`. The list of workflows of the product has that workflow. This was observed on two products of one account on 2026-11-24, where features, epics and requirements named one workflow. The API documentation shows the same members.
 - The Aha! API creates a goal only when the request has a success metric with a name. An update takes the status of a goal as `workflow_status`. Both were observed on one account on 2026-11-24. A new goal takes its status inside `success_metric`, as the documentation shows; this was observed on the same day. An update with a new text in `success_metric.name` is answered without an error and does not change the text. The documentation shows no other form for it.
+- The Aha! API writes a timestamp as text in an ISO 8601 form. The runs of 2026-11-24 did not record which form: with or without a fraction of the second, with `Z` or with an offset. The server reads each of these forms, so no result depends on it. The fixture account uses the form with milliseconds and `Z`.
 
 ## POSTCONDITIONS
 
@@ -3836,6 +3884,25 @@ THEN:
   FakeAha recorded one ApiGet call on /features/DEMO-2
   no write request
 
+### EXAMPLE: update_with_a_guard_for_no_value (of: update-statement)
+GIVEN:
+  the fixture account, in which DEMO-2 has no assignee and DEMO-1 is
+  assigned to test.user@example.com
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE features SET assigned_to = 'me' WHERE id = 'DEMO-2' AND assigned_to = ''`
+  and update-statement checks the guard for no value
+THEN:
+  the tool result is
+  `{"id":"DEMO-2","name":"Offline maps","assigned_to":"test.user@example.com","message":"Feature DEMO-2 updated"}`
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE features SET assigned_to = 'me' WHERE id = 'DEMO-1' AND assigned_to = ''`
+THEN:
+  the tool result is an error with the message
+  `nothing was changed: feature DEMO-1 has assigned_to = 'test.user@example.com', not ''`
+  no write request
+
 ### EXAMPLE: update_of_an_unknown_record (of: update-statement)
 GIVEN:
   the fixture account, which has no feature DEMO-99
@@ -4299,6 +4366,36 @@ WHEN:
 THEN:
   the tool result is an error whose message starts with
   `cannot read the statement at position 12 (*) FROM features WHERE p): expected a field inside SUM( ).`
+
+### EXAMPLE: values_that_do_not_fit_the_type (of: parse-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND created_at > '01.02.2026'`
+  and parse-statement checks the value against the type of the field
+THEN:
+  the tool result is an error with the message
+  `created_at is a timestamp: write the value as 'YYYY-MM-DD' or 'YYYY-MM-DDThh:mm:ssZ'. Got '01.02.2026'.`
+  FakeAha recorded no call
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM releases WHERE product = 'DEMO' AND release_date = '2026-02-30'`
+THEN:
+  the tool result is an error with the message
+  `release_date is a date: write the value as 'YYYY-MM-DD'. Got '2026-02-30'.`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND score > 'abc'`
+THEN:
+  the tool result is an error with the message
+  `score is a number: write the value as 5 or 2.5. Got 'abc'.`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM releases WHERE product = 'DEMO' AND released > 0`
+THEN:
+  the tool result is an error with the message
+  `released is true or false: compare it with = or !=, for example released = TRUE`
 
 ### EXAMPLE: insert_with_a_custom_field_is_refused (of: parse-statement)
 GIVEN:
@@ -5039,6 +5136,66 @@ WHEN:
 THEN:
   the tool result is
   `{"entity":"features","scope":"product DEMO","count":3,"records":[{"id":"DEMO-4"},{"id":"DEMO-5"},{"id":"DEMO-6"}]}`
+
+### EXAMPLE: timestamps_are_points_in_time (of: evaluate-condition)
+GIVEN:
+  the fixture account, in which DEMO-1 has the updated_at
+  `2026-02-02T08:00:00.000Z` and the other five features of DEMO have
+  `2026-02-03T23:30:00.000Z`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND updated_at = '2026-02-02T08:00:00Z'`
+  and evaluate-condition compares two points in time
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":1,"records":[{"id":"DEMO-1"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND updated_at <= '2026-02-02T09:00:00+01:00'`
+THEN:
+  the tool result is the same, because the value is the same point in time
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND updated_at > '2026-02-04T00:15:00+01:00'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":5,"records":[{"id":"DEMO-2"},{"id":"DEMO-3"},{"id":"DEMO-4"},{"id":"DEMO-5"},{"id":"DEMO-6"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND updated_at = '2026-02-02'`
+THEN:
+  the tool result has the one record DEMO-1, because the value is a day
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM releases WHERE product = 'DEMO' AND release_date >= '2026-06-30T00:00:00Z'`
+THEN:
+  the tool result is
+  `{"entity":"releases","scope":"product DEMO","count":2,"records":[{"id":"DEMO-R-3"},{"id":"DEMO-R-4"}]}`
+
+### EXAMPLE: empty_text_and_null_stand_for_no_value (of: evaluate-condition)
+GIVEN:
+  the fixture account, in which DEMO-3 and DEMO-4 have the initiative
+  DEMO-S-1 and the other four features of DEMO have none
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND initiative = ''`
+  and evaluate-condition tests for no value
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":4,"records":[{"id":"DEMO-1"},{"id":"DEMO-2"},{"id":"DEMO-5"},{"id":"DEMO-6"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND initiative != ''`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":2,"records":[{"id":"DEMO-3"},{"id":"DEMO-4"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND initiative IN ('DEMO-S-1', NULL)`
+THEN:
+  `scope` is `product DEMO` and `count` is 6
+  FakeAha recorded no call on /initiatives/DEMO-S-1/features, because a
+  list with NULL is not taken as a route
 
 ### EXAMPLE: grouping_without_group_by (of: build-rows)
 GIVEN:
