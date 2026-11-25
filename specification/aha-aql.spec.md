@@ -3,7 +3,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.18.2
+Version:      0.19.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -961,8 +961,9 @@ text.
 
 The Account of a request is used for that request only. When the request
 is answered, the server keeps neither the credential nor anything that it
-read from Aha! with it. Where a behavior says that a list may be kept
-between statements, this applies to stdio mode only.
+read from Aha! with it. In stdio mode the server keeps nothing that it
+read from Aha! after a statement either. The one value that it keeps is
+the ExampleKey (see choose-example-key).
 
 POSTCONDITIONS:
 - in http mode no request reaches a tool, the tool list or any other MCP method without a credential
@@ -1497,7 +1498,7 @@ exceptions are:
 | name | string | name | no | |
 | product_line | boolean | product_line | no | false when the API record has no value |
 | parent | key | parent_id | no | The key of the product with that NumericId |
-| description | text | description | no | |
+| description | text | description | no | heavy |
 | created_at | datetime | created_at | no | |
 | url | string | url | no | |
 
@@ -1917,18 +1918,17 @@ PRECONDITIONS:
 
 STEPS:
 1. Take the record types that the catalog entry of the entity names for custom fields. If the entry names none, the entity has no custom fields, and no request is sent. Without a key the result is an empty list. With a key: when explicit is true → bad_name, message N06; otherwise the result is none.
-2. Take the custom field definitions of the account. When they were not read before, call ApiList on /custom_field_definitions with per_page = PageSize, page by page to the last page.
+2. Take the custom field definitions of the account. When the statement has not read them yet, call ApiList on /custom_field_definitions with per_page = PageSize, page by page to the last page.
    a. NotAuthorized or NotFound: the credential cannot read the definitions. The server then works as if the account had no custom fields. Without a key the result is an empty list. With a key: when explicit is true → bad_name, message N07; otherwise the result is none.
    b. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Rejected → api_error, message X03.
-   c. In stdio mode the definitions, or the answer of step 2 a, may be kept between statements. In http mode they are read at most once per request and are not kept.
+   c. The definitions, or the answer of step 2 a, are read at most once per statement. They are not kept after the statement, in stdio mode and in http mode.
 3. Choose the definitions of the entity. The record type of a definition is its member `custom_fieldable_type`, and its type name is its member `type`. Of both, only the part after the last `::` counts, and it is compared without regard to case: `Ideas::Idea` is `Idea`, and `CustomFieldDefinitions::Records::UsersField` is `UsersField`. A definition belongs to the entity when its record type is one of the record types of step 1. When two definitions of the entity have the same key, the first one in the order of the API counts.
 4. Give each definition of the entity its kind from the table of kinds below. A definition whose type name is not in that table is not supported: the server does not read it and does not set it.
 5. Without a key: the result has one CustomField for each supported definition of the entity. The list is sorted by name, character by character.
 6. With a key: compare the key with the keys of the definitions of the entity, without regard to case.
    a. A supported definition has the key: the result is its CustomField.
    b. A definition that is not supported has the key → bad_name, message N05.
-   c. No definition has the key, and the definitions were kept from an earlier statement: read them again as step 2 says, and compare once more. A statement reads them again at most once.
-   d. Still no definition has the key. When explicit is false, the result is none. When the entity has a supported definition → bad_name, message N04. In every other case → bad_name, message N06.
+   c. No definition has the key. When explicit is false, the result is none. When the entity has a supported definition → bad_name, message N04. In every other case → bad_name, message N06.
 
 Kinds. The type names are the names of Aha! for its types of custom
 fields. The field type says how evaluate-condition and build-rows treat a
@@ -2000,14 +2000,13 @@ Options. A definition of the kind fixed_choice or fixed_tags has options.
 They are read with ApiGet on /custom_field_definitions/{definition}/options.
 The member `options` of the answer is a list, and the member `text` of
 each of its objects is the text of one option. The order of the list is
-the order of the options. In stdio mode the options of a definition may be
-kept between statements. In http mode they are read at most once per
-request and are not kept.
+the order of the options. The options of a definition are read at most
+once per statement and are not kept after it.
 
 POSTCONDITIONS:
 - every CustomField of a result comes from a definition of the account whose record type the catalog names for the entity
 - a word that the catalog resolves causes no request of this behavior
-- one statement reads the definitions at most twice
+- one statement reads the definitions at most once, and the server does not keep them after the statement
 
 ERRORS:
 - bad_name: an unknown custom field (N04); a custom field of a type that is not supported (N05); an entity without custom fields (N06); definitions that the credential cannot read (N07)
@@ -2089,18 +2088,17 @@ PRECONDITIONS:
 - none
 
 STEPS:
-1. Take the product list. When it was not read before: call ApiList on /products for all pages, with the members that the fields of the entity products need. NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Any other failure → api_error, message X03. In stdio mode the list may be kept between statements. In http mode it is read at most once per request and is not kept.
+1. Take the product list. When the statement has not read it yet: call ApiList on /products for all pages. The parameter `fields` names the API sources of the fields of products that are not heavy. NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Any other failure → api_error, message X03. The list is read at most once for one statement, and at most once for the answer to the tool list. It is not kept after that, in stdio mode and in http mode.
 2. Compare the value with the key and the NumericId of every product, and then with the name of every product. The comparison is the equality of text of evaluate-condition. The first match is the result.
-3. Without a match, when the product list was kept from an earlier statement: read it again as in step 1 and repeat step 2 once.
-4. Without a match, when hints is true, take the first case that applies:
+3. Without a match, when hints is true, take the first case that applies:
    a. the value is a ReferenceNumber whose kind is a parent filter of the entity → wrong_kind, message P02;
    b. the value is a ReferenceNumber of the kind of the entity → wrong_kind, message P03;
    c. the value is a ReferenceNumber with a kind, and the part before its first `-` is the key of a product → wrong_kind, message P04.
-5. In every other case → bad_product, message P01.
+4. In every other case → bad_product, message P01.
 
 POSTCONDITIONS:
 - the key of the result is written as the account writes it, whatever the case of the value
-- a product that was created after the list was read is found
+- a product that exists when the statement runs is found, because the statement reads the list
 
 ERRORS:
 - bad_product: P01
@@ -2137,7 +2135,7 @@ PRECONDITIONS:
 STEPS:
 1. Entities with a fixed source. For them the steps 2 to 7 do not apply.
    a. me: one ApiGet on /me. Scope: "current user".
-   b. products: the product list, as resolve-product reads it. Scope: "all products". When used_fields has a custom field, the list is read for this statement with `custom_fields` in the parameter `fields`, and step 8 e applies. This reading does not replace a product list that is kept.
+   b. products: the product list, as resolve-product reads it. Scope: "all products". When used_fields has the field `description` or a custom field, the parameter `fields` of this reading also names `description` or `custom_fields`, and step 8 e applies to the custom fields. This reading is the product list of the statement: the statement does not read the list a second time.
    c. users: the list /users, read as step 8 says. Scope: "all users".
    d. statuses: the WHERE condition must have a conjunct `product = value`; otherwise → scope, message C01. Run resolve-product with hints for the value; on failure → the error of resolve-product. Call ApiGet on /products/{product} and ApiGet on /products/{product}/workflows, both with the NumericId of the product. The record of the product names the workflow of each record kind, and the entity statuses says which records the two answers give. Scope: "product <KEY>". The conjunct is applied.
 2. Route by an id or a parent. Go through the read routes of the entity in catalog order and leave out the route of the field `product`. Take the first route whose field a conjunct of the WHERE condition compares with `=`. When several conjuncts compare that field, take the first in the order of the statement. Read the route as step 3 says. The conjunct is applied.
@@ -2155,7 +2153,10 @@ STEPS:
    d. the field is `id` → message K04;
    e. the field is release, initiative or epic, and the WHERE condition has a conjunct `product = value` that resolve-product finds → message K05. The records of that kind in the product are read for it with one list request;
    f. in every other case → message K06.
-5. Route by a list of values. This step applies when step 2 took no route. Take the first conjunct of the form `field IN (values)` that has at most MaxInValues values and whose field has a read route. The route of the field `product` counts here. A list with NULL or with empty text is not taken, because no route reads the records without a value. Read every value as step 3 says, each list to its last page; the steps 8 a and 8 b do not apply. Put the records together and leave out a record that was read before. Scope: the scopes of the values, joined by a comma and a space. The conjunct is applied.
+5. Route by a list of values. This step applies when step 2 took no route. Take the first conjunct of the form `field IN (values)` that has at most MaxInValues values and whose field has a read route. The route of the field `product` counts here. A list with NULL or with empty text is not taken, because no route reads the records without a value. The conjunct is applied.
+   a. First check every value of the list, in its order, as step 3 says for the field: the form of the value, and for the field `product` the result of resolve-product. The first value that fails gives its error. No record and no list of the entity is requested before every value has passed.
+   b. A value that means the same as an earlier value of the list is left out: the same text without regard to case, or the same product. It is read once, and the scope names it once.
+   c. Read every value that is left as step 3 says, each list to its last page; the steps 8 a and 8 b do not apply. Put the records together and leave out a record that was read before. Scope: the scopes of these values, joined by a comma and a space. A scope that equals an earlier one is named once.
 6. Route by product. This step applies when no route was taken so far and the entity has a read route for the field `product`. When the WHERE condition has a conjunct `product = value`: read it as step 3 b says, and the conjunct is applied.
 7. Account-wide list. This step applies when no route was taken so far.
    a. When the entity has no account-wide list → scope, message C01.
@@ -2386,14 +2387,14 @@ STEPS:
 7. reference: the value must be a ReferenceNumber of the kind of the field, or a NumericId. It is sent in capital letters. For a value of another form: when resolve-product finds it as a product → wrong_kind, message W24. The records of that kind in the product are read for the message with one list request. Any other value → not_found, message W25.
 8. The field `tags`: the text is split at commas into tags. White space around a tag is removed and an empty tag is left out.
 9. status, unless form_only is true.
-   a. Take the workflow statuses of the entity in the product, in workflow order, as plan-fetch reads them for the entity statuses. The record of the product names the workflow of the entity, and the list of workflows has its statuses. In stdio mode both answers may be kept between statements.
+   a. Take the workflow statuses of the entity in the product, in workflow order, as plan-fetch reads them for the entity statuses. The record of the product names the workflow of the entity, and the list of workflows has its statuses. Both answers are read at most once per statement and are not kept after it.
    b. For a new record the product is the product of the parent. When the parent is a record, read it with ApiGet on its id route to learn its product; NotFound → not_found, message W25.
    c. Compare the value with the names of the statuses. The comparison is the equality of text of evaluate-condition. The name is sent as the workflow writes it.
-   d. Without a match, read both answers again when they were kept from an earlier statement, and compare once more. Still without a match → bad_value, message W21. This is also the error when the product names no workflow for the entity.
+   d. Without a match → bad_value, message W21. This is also the error when the product names no workflow for the entity.
 10. A custom field, by its kind. The table of values to set in custom-fields gives the accepted value and the form that is sent.
    a. text, url, note and choice: the value must be Text; otherwise → bad_value, message W28.
    b. number: as step 3. date: as step 5.
-   c. fixed_choice: the value must be Text; otherwise → bad_value, message W28. Empty text is accepted without a comparison. Any other text is compared with the texts of the options of the definition, which are read as custom-fields says. The comparison is the equality of text of evaluate-condition, and the text is sent as the option writes it. Without a match, read the options again when they were kept from an earlier statement, and compare once more. Still without a match → bad_value, message W32.
+   c. fixed_choice: the value must be Text; otherwise → bad_value, message W28. Empty text is accepted without a comparison. Any other text is compared with the texts of the options of the definition, which are read as custom-fields says. The comparison is the equality of text of evaluate-condition, and the text is sent as the option writes it. Without a match → bad_value, message W32.
    d. tags: the value must be Text; otherwise → bad_value, message W28. The text is split into tags as step 8 says. The checked value is the TextList of the tags.
    e. fixed_tags: as tags. Then each tag is compared with the options as step 10 c says, and it is sent as the option writes it. The first tag without a match → bad_value, message W32.
    f. users: the value must be Text; otherwise → bad_value, message W28. The text is split at commas into parts. White space around a part is removed, and an empty part is left out. `me`, `myself` or `current_user` in any case is replaced by the NumericId of the current user, read with ApiGet on /me. An e-mail address and a NumericId stay as they are. Any other part → bad_value, message W23. The checked value is the TextList of the parts.
@@ -2907,7 +2908,7 @@ PRECONDITIONS:
 - none
 
 STEPS:
-1. Choose the ExampleKey when it is first needed. That is when the tool list is answered, or when a DESCRIBE result, a message or a note shows it. In stdio mode and manual mode it is chosen once for the process. In http mode it is chosen at most once for each request, with the Account of that request.
+1. Choose the ExampleKey when it is first needed. That is when the tool list is answered, or when a DESCRIBE result, a message or a note shows it. In stdio mode and manual mode it is chosen once for the process. It is the one value from Aha! that the process keeps between statements; the product list that was read for it is not kept. In http mode it is chosen at most once for each request, with the Account of that request.
 2. When the setting default_product has a value and resolve-product finds it: the ExampleKey is the key of that product.
 3. In every other case the ExampleKey is PROD. While a product of the account has the ExampleKey as its key, in any case, add the letter X at its end.
 4. When the setting default_product has a value and resolve-product does not find it: write a warning to the diagnostic output and continue with step 3.
@@ -2975,6 +2976,7 @@ ERRORS:
 - [observable] an option takes precedence over its environment variable, and the key file over AHA_API_KEY
 - [observable] in http mode a request without a credential reaches no tool and no tool list, and the server uses no credential of its own
 - [observable] in http mode nothing that was read with the credential of one request is part of the answer to another request
+- [observable] one statement reads the product list, the custom field definitions, the options of one definition, and the record and the workflows of one product at most once each; the server keeps none of them after the statement, in stdio mode and in http mode, and the ExampleKey is the one value that it keeps between statements
 - [observable] a read statement or a write statement whose field words are all catalog names causes no request for custom field definitions, and its list requests do not ask for custom fields; the one exception is a read statement with `*` that selects one record by its id field, which reads the definitions when it has found the record
 - [observable] a result has a custom field only when the statement names it, or when the statement has `*` and selects one record by its id field: then the row also has the custom fields that have a value in that record; in every other statement `*` stands for catalog fields only
 - [observable] a custom field is set with UPDATE only; INSERT with a custom field is an error and creates no record
@@ -4800,6 +4802,8 @@ WHEN:
 THEN:
   the tool result is
   `{"entity":"features","scope":"feature DEMO-1","count":1,"records":[{"id":"DEMO-1","custom.risk":null}]}`
+  FakeAha recorded one ApiList call on /custom_field_definitions for the
+  second statement, because the definitions of the first one are not kept
 
 ### EXAMPLE: definitions_are_not_kept_in_http_mode (of: custom-fields)
 GIVEN:
@@ -4913,6 +4917,19 @@ WHEN:
   `SELECT id FROM releases WHERE product = 'Demo Product'`
 THEN:
   the tool result is the same
+
+### EXAMPLE: the_product_list_is_not_kept (of: resolve-product)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called two times with query =
+  `SELECT id FROM releases WHERE product = 'DEMO'`
+  and resolve-product takes the product list for each statement
+THEN:
+  both tool results are
+  `{"entity":"releases","scope":"product DEMO","count":4,"records":[{"id":"DEMO-R-1"},{"id":"DEMO-R-2"},{"id":"DEMO-R-3"},{"id":"DEMO-R-4"}]}`
+  FakeAha recorded two ApiList calls on /products, one for each statement
+  the parameter `fields` of both calls does not name `description`
 
 ### EXAMPLE: products_are_not_mixed (of: resolve-product)
 GIVEN:
@@ -5116,6 +5133,42 @@ WHEN:
 THEN:
   the tool result is
   `{"entity":"features","scope":"feature DEMO-1","count":1,"records":[{"id":"DEMO-1","custom.priority":"High"}]}`
+
+### EXAMPLE: in_list_is_checked_before_the_first_request (of: plan-fetch)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE id IN ('DEMO-1', 'DEMO-R-2')`
+  and plan-fetch checks both values before it reads one
+THEN:
+  the tool result is an error with the message
+  `'DEMO-R-2' is the id of a release, not of a feature. For the features of that release: SELECT * FROM features WHERE release = 'DEMO-R-2'`
+  FakeAha recorded no call
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE id IN ('DEMO-1', 'demo-1', 'DEMO-2')`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"feature DEMO-1, feature DEMO-2","count":2,"records":[{"id":"DEMO-1"},{"id":"DEMO-2"}]}`
+  FakeAha recorded exactly two calls: ApiGet on /features/DEMO-1 and
+  ApiGet on /features/DEMO-2
+
+### EXAMPLE: description_of_a_product_is_requested_when_it_is_used (of: plan-fetch)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query = `SELECT key, name FROM products`
+  and plan-fetch reads the product list
+THEN:
+  FakeAha recorded exactly one call: ApiList on /products
+  the parameter `fields` of the call does not name `description`
+WHEN:
+  the tool query is called with query = `SELECT key, description FROM products`
+THEN:
+  FakeAha recorded exactly one call: ApiList on /products
+  the parameter `fields` of the call names `description`
+  each of the two rows has the labels key and description
 
 ### EXAMPLE: custom_field_of_a_product (of: plan-fetch)
 GIVEN:
