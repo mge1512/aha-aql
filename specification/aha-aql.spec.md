@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.14.0
+Version:      0.15.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -1304,7 +1304,8 @@ Form of a read statement:
 
 item       = * | field [AS label] | function ( * | [DISTINCT] field ) [AS label]
 function   = COUNT | SUM | AVG | MIN | MAX
-key        = field | label of an aggregate item | function ( * | field )
+label      = word | text
+key        = field | label | function ( * | [DISTINCT] field )
 condition  = condition OR condition | condition AND condition
            | NOT condition | ( condition ) | comparison
 comparison = field operator value
@@ -1324,7 +1325,12 @@ Rules for a read statement:
 - `field BETWEEN a AND b` is read as `field >= a AND field <= b`.
 - NOT before IN, CONTAINS, LIKE or BETWEEN negates that comparison.
 - The label of a field item is the word as the statement writes it, without a qualifier, or the label after AS. The label of an aggregate item is the label after AS, or the function name in capital letters with its argument in parentheses as written: `COUNT(*)`, `COUNT(name)`, `COUNT(DISTINCT status)`.
-- `COUNT(1)` and COUNT with the name of an entity as its argument are read as `COUNT(*)`.
+- `COUNT(1)` and COUNT with the name of an entity as its argument are read as `COUNT(*)`. Their label is `COUNT(*)`.
+- `*` is the argument of COUNT only, and it does not follow DISTINCT. `*` in SUM, AVG, MIN or MAX → syntax, message S03. What was expected is `a field inside <FUNCTION>( )`. `*` after DISTINCT → syntax, message S03. What was expected is `a field after DISTINCT`.
+- A label after AS is a word that is not a keyword, or a text that is not empty. It is used as the statement writes it.
+- A key of ORDER BY is a field, a label of a select item or an aggregate. A label stands for its select item. A word that is a label of the statement and also a field word is the label. An aggregate key does not have to be a select item.
+- In a statement with an aggregate item or GROUP BY, a key that is a field must be a field of GROUP BY or a selected field. Any other field → syntax, message S03. What was expected is `a field of GROUP BY, a selected field or an aggregate after ORDER BY`.
+- In a statement without an aggregate item and without GROUP BY, an aggregate key → syntax, message S03. What was expected is `a field name`.
 - A qualifier before a field (`f.name`, `features.name`) is ignored, and `alias.*` is `*`.
 - The part `custom.` of a custom field word is not a qualifier. It belongs to the word and to its label: the label of `f.custom.priority` is `custom.priority`.
 - A word directly followed by `(` that is not one of the five functions → syntax, message S12.
@@ -2240,7 +2246,7 @@ STEPS:
    A field without a value equals nothing.
 7. `!=` is true when `=` is not true. It is true for a field without a value.
 8. CONTAINS is true when the comparison form of the value is inside the comparison form of the field or of one of its other spellings. LIKE is true when the pattern covers the text from its first to its last character, where `%` stands for any text and `_` for one character. Both are false for a field without a value.
-9. `<`, `<=`, `>` and `>=` are false for a field without a value. A field of the type number is compared as a number. A field of the type date or datetime is compared as text, and against a value of 10 characters only its first 10 characters are compared. Every other field is compared in its comparison form.
+9. `<`, `<=`, `>` and `>=` are false for a field without a value. A field of the type number is compared as a number. A field of the type date or datetime is compared as text, and against a value of 10 characters only its first 10 characters are compared. Every other field is compared in the order of text that build-rows, step 4, gives: a run of digits counts as a number.
 10. Custom fields. A custom field has the field type that the table of kinds in custom-fields gives for its kind. The steps 1 to 9 apply to it as to a catalog field of that type.
 
 POSTCONDITIONS:
@@ -2282,12 +2288,12 @@ STEPS:
 1. Count only: when count_only is true, the result is one row with the label of the item and the value list_total. count is 1, total has no value and truncated is false.
 2. Grouped result: when the statement has an aggregate item or GROUP BY.
    a. The group fields are the fields of GROUP BY, followed by the selected fields that are not among them. `SELECT status, COUNT(*) FROM features` groups by status without GROUP BY.
-   b. Records with equal values in all group fields are one group. Text values are equal when their comparison forms are equal (see evaluate-condition). The groups are in the order of their first record. Without group fields all records are one group, and there is one group also when there is no record.
+   b. Records with equal values in all group fields are one group. Text values are equal when their comparison forms are equal (see evaluate-condition). Records without a value in a group field are one group for that field. The groups are in the order of their first record. Without group fields all records are one group, and there is one group also when there is no record.
    c. One row per group. First the group fields that the statement does not select, under their field names. Then the select items in the order of the statement: a field item has the value of the first record of the group, and an aggregate item has its result.
    d. COUNT(*) is the number of records of the group. COUNT(field) is the number of records with a value in the field. COUNT(DISTINCT field) is the number of different values. SUM and AVG use the values that are numbers. MIN and MAX use the order of step 4. Without a value the result is null, and 0 for COUNT. A result that is a whole number is written without decimals; every other result is rounded to two decimals.
 3. Plain result: when the statement has no aggregate item and no GROUP BY. Sort the records as step 4 says. Make one row per record with the select items in the order of the statement, each under its label. With DISTINCT, leave out a row that equals an earlier row in all values.
    a. Star custom fields. After the select items, the row gets every star custom field that has a value in the record. Each one is under the name of the field, and they are in the order of these names. A star custom field without a value is not in the row.
-4. ORDER BY. Sort by the first key. Rows that are equal in it are sorted by the next key, and so on. Rows that are equal in all keys keep their order. A key is a field, the label of an aggregate item, or an aggregate that the statement selects. Numbers come before text. Numbers are sorted by value and text by its comparison form. A row without a value in the key comes last, with ASC and with DESC. A grouped result is sorted after step 2.
+4. ORDER BY. Sort by the first key. Rows that are equal in it are sorted by the next key, and so on. Rows that are equal in all keys keep their order. A key is a field, the label of a select item, or an aggregate, as parse-statement accepts it. A label stands for its select item. In a grouped result an aggregate key is computed for each group, also when the statement does not select it. Numbers come before text. Numbers are sorted by value. Text is sorted by its comparison form, character by character. Where both texts have a run of digits at the same place, the two runs are compared as numbers of any length: `DEMO-9` comes before `DEMO-10`. Two texts that this order does not separate are sorted character by character. A row without a value in the key comes last, with ASC and with DESC. A grouped result is sorted after step 2.
 5. Limits. The limit is the LIMIT of the statement, and default_limit without a LIMIT. It is never more than max_limit. rows are the first rows up to the limit, and count is their number.
 6. total has a value in two cases. When step 5 cut rows, it is the number of rows before the cut. When plan-fetch did not read the list to its end, it is list_total.
 7. truncated is true when total has a value and the statement did not ask for the cut: it has no LIMIT, or a LIMIT above max_limit.
@@ -2584,7 +2590,10 @@ In S03, `<what>` is one of these texts:
 - `a field, * or COUNT(*)`
 - `a field name`
 - `a field name (<field list>)`
-- `a field or * inside <FUNCTION>( )`
+- `a field or * inside COUNT( )`
+- `a field inside <FUNCTION>( )`, for SUM, AVG, MIN and MAX
+- `a field after DISTINCT`
+- `a field of GROUP BY, a selected field or an aggregate after ORDER BY`
 - `a name after AS`
 - `BY after GROUP`
 - `BY after ORDER`
@@ -4252,6 +4261,45 @@ THEN:
   the tool result is
   `{"entity":"features","scope":"feature DEMO-1","count":1,"records":[{"custom.priority":"High","customer":"Acme"}]}`
 
+### EXAMPLE: labels_of_select_items (of: parse-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query = `SELECT COUNT(1) FROM features WHERE product = 'DEMO'`
+  and parse-statement reads `COUNT(1)` as `COUNT(*)`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":1,"records":[{"COUNT(*)":6}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id AS 'feature id' FROM features WHERE release = 'DEMO-R-2'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"release DEMO-R-2","count":2,"records":[{"feature id":"DEMO-1"},{"feature id":"DEMO-2"}]}`
+
+### EXAMPLE: keys_and_arguments_that_are_refused (of: parse-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query =
+  `SELECT status, COUNT(*) FROM features WHERE product = 'DEMO' GROUP BY status ORDER BY name`
+  and parse-statement checks the key of ORDER BY
+THEN:
+  the tool result is an error whose message starts with
+  `cannot read the statement at position 87 (name): expected a field of GROUP BY, a selected field or an aggregate after ORDER BY.`
+  FakeAha recorded no call
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' ORDER BY COUNT(*)`
+THEN:
+  the tool result is an error whose message starts with
+  `cannot read the statement at position 57 (COUNT(*)): expected a field name.`
+WHEN:
+  the tool query is called with query = `SELECT SUM(*) FROM features WHERE product = 'DEMO'`
+THEN:
+  the tool result is an error whose message starts with
+  `cannot read the statement at position 12 (*) FROM features WHERE p): expected a field inside SUM( ).`
+
 ### EXAMPLE: insert_with_a_custom_field_is_refused (of: parse-statement)
 GIVEN:
   the fixture account
@@ -5042,6 +5090,58 @@ THEN:
   the tool result is
   `{"entity":"features","scope":"product DEMO","count":2,"total":6,"records":[{"id":"DEMO-1"},{"id":"DEMO-2"}]}`
   the result has no member `truncated` and no `note`
+
+### EXAMPLE: ids_are_sorted_by_their_numbers (of: build-rows)
+GIVEN:
+  the fixture account and, in addition, a product BULK with one release
+  BULK-R-1 and 60 features BULK-1 to BULK-60 in it
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE release = 'BULK-R-1' ORDER BY id DESC LIMIT 2`
+  and build-rows compares the numbers in the ids
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"release BULK-R-1","count":2,"total":60,"records":[{"id":"BULK-60"},{"id":"BULK-59"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT MIN(id), MAX(id) FROM features WHERE release = 'BULK-R-1'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"release BULK-R-1","count":1,"records":[{"MIN(id)":"BULK-1","MAX(id)":"BULK-60"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE release = 'BULK-R-1' AND id > 'BULK-58' ORDER BY id`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"release BULK-R-1","count":2,"records":[{"id":"BULK-59"},{"id":"BULK-60"}]}`
+
+### EXAMPLE: order_by_a_label_and_by_an_aggregate (of: build-rows)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query =
+  `SELECT name AS n FROM features WHERE release = 'DEMO-R-2' ORDER BY n DESC`
+  and build-rows sorts by the field of the label
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"release DEMO-R-2","count":2,"records":[{"n":"Offline maps"},{"n":"CSV export"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT status FROM features WHERE product = 'DEMO' GROUP BY status ORDER BY COUNT(*) DESC, status`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":4,"records":[{"status":"Under consideration"},{"status":"In design"},{"status":"In development"},{"status":"Shipped"}]}`
+
+### EXAMPLE: records_without_a_value_are_one_group (of: build-rows)
+GIVEN:
+  the fixture account, in which four features of DEMO have no initiative
+WHEN:
+  the tool query is called with query =
+  `SELECT initiative, COUNT(*) FROM features WHERE product = 'DEMO' GROUP BY initiative`
+  and build-rows groups the records
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":2,"records":[{"initiative":null,"COUNT(*)":4},{"initiative":"DEMO-S-1","COUNT(*)":2}]}`
 
 ### EXAMPLE: tags_are_split_at_commas (of: check-write-values)
 GIVEN:
