@@ -8,11 +8,12 @@
 | Spec version | 0.13.0 |
 | Spec-SHA256 | `9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262` |
 | Code under review | github.com/mge1512/aha-aql, commit `bd457b25d39352c80830b4dcbce8fe7e47062809`, directory `code/` |
+| Paths | As in the commits `bd457b2` and `d2b5174`. Commit `638583a` of 2026-11-25 moved the files without a change of their content: the code is in `implementation/code/`, the specification is `specification/aha-aql.spec.md`, the inputs of the run are in `implementation/spec/`, the template and the hints are also in `pcd-artefacts/`, and the changelog is in `documentation/` |
 | Translator model | claude-opus-5-5 (one run, mode translator, tests by the translator) |
 | Reviewer model | claude-fable-5-2 |
 | Review date | 2026-11-24 |
 | Review procedure | pcd-translate 0.3.1, `modes/review-procedure.md` (reviewer.md 0.1.0, SHA256 `b290f7e2c1f7fdab50363240c1a85354172923760184036c39f5cb099c27185e`) |
-| Updated | 2026-11-24, after the answers of the maintainer: the section "Answers of the maintainer", the column State, F-028, F-029, the new F-030 and the recommendation |
+| Updated | 2026-11-24, after the answers of the maintainer: the section "Answers of the maintainer", the column State, F-028, F-029, the new F-030 and the recommendation. 2026-11-25: F-029 and F-030 after the statement on the vendor tarball, the package build in F-030, and the row Paths. Later that day: the decisions on the name and the label, and pull request 6 of the PCD repository |
 
 ## Summary
 
@@ -40,8 +41,8 @@ Findings by class:
 | SPEC-INCOMPLETENESS | 15 | F-001, F-002, F-003, F-005 to F-010, F-013, F-014, F-021, F-022, F-025, F-026 |
 | SPEC-AMBIGUITY | 10 | F-004, F-011, F-012, F-015, F-016, F-017, F-019, F-020, F-023, F-024 |
 | TRANSLATION-ERROR | 2 | F-018, F-030 |
-| HINTS-GAP | 1 | F-027 |
-| TEMPLATE-GAP | 2 | F-028, F-029 |
+| HINTS-GAP | 2 | F-027, F-029 |
+| TEMPLATE-GAP | 1 | F-028 |
 | REPORT-GAP, LICENSE-DEVIATION, UNCLASSIFIED | 0 | |
 
 Provenance of the review:
@@ -70,6 +71,7 @@ Guard-Override:        none
 | API sources of the catalog against the parameter `fields` of the list requests | Same members in the same order for the 10 entities that have a list |
 | Further statements through the test double (`aha-aql.review-probes.txt`) | 583 statements, 409 for `query` and 174 for `execute`. 379 results and 204 errors. The findings below quote them. Part 9 of the file has 34 more statements, sent after the answers of the maintainer for the cases of unit 5 |
 | Spec hash and license in the artefacts | Every tracked file under `code/` except `go.sum` has the hash. `LICENSE` has the SPDX identifier MIT and a link, and no license text. `debian/copyright` agrees with the license files of the five modules |
+| Package build with rpmbuild 4.18.2, downloads switched off (2026-11-25) | The RPM file as it is fails in `%build`. With a second source for the vendor tarball the package builds, and the tests pass in `%check` (F-030) |
 
 Weights used below:
 
@@ -114,7 +116,7 @@ edit, or it says what is still open.
 | F-026 | low | META has no `Module:` | META | 0.20.0 |
 | F-027 | low | The pattern of Credential and the repeat limit of the Go package regexp | hints | open: hints |
 | F-028 | low | Container image: trust store and listen address | template | 0.20.0; open: template |
-| F-029 | low | No target prepares `vendor/`, and three packaging paths need it | template, hints | open: template and hints |
+| F-029 | low | No target prepares `vendor/`, and no rule keeps it out of the source tarball | hints | open: pull request 6 of the PCD repository |
 | F-030 | low | The RPM file expects `vendor/` inside the source tarball | artefact | open: next translation |
 
 ## Findings
@@ -711,58 +713,81 @@ in the specification. All statements ran on the fixture account.
 - Rationale: both decisions touch the security of the deployment, and the
   translator should not have to make them.
 
-### F-029 TEMPLATE-GAP: no target prepares `vendor/`, and three packaging paths need it
+### F-029 HINTS-GAP: no target prepares `vendor/`, and no rule keeps it out of the source tarball
 
 - Weight: low
-- Location (template): `mcp-server.template.md` 0.3.24, deliverables table, rows `build`, `RPM`, `DEB` and `OCI`
 - Location (hints): `mcp-server.go.mcp-go.hints.md`, the sections on the Makefile and on the RPM spec
+- Location (template): `mcp-server.template.md` 0.3.24, deliverables table, rows `build`, `RPM`, `DEB` and `OCI`
 - Location (artefact): `Makefile`, `Containerfile`, `debian/rules`; the repository has no `.gitignore`
-- Facts from the maintainer (2026-11-24): `vendor/` is never a part of
+- Facts from the maintainer. 2026-11-24: `vendor/` is never a part of
   the deliverable, and the Makefile has to prepare it. The RPM file
-  `aha-aql.spec` was removed from the first commit by accident. Commit
-  `d2b5174` has it again (see F-030).
-- Evidence: `Makefile` builds with `GOFLAGS ?= -mod=vendor`. Of its
-  targets, `vendor-tarball` alone runs `go mod vendor`. `build` and
-  `test` do not depend on it, so `make build` fails in a fresh clone.
+  `aha-aql.spec` was removed from the first commit by accident, and
+  commit `d2b5174` has it again (see F-030). 2026-11-25: the vendor
+  directory is packaged in a separate tar file with the name
+  `%{name}-%{version}-vendor.tar.gz`, and the place for the rule is the
+  hints file of the PCD repository.
+- Evidence in the run: `Makefile` builds with `GOFLAGS ?= -mod=vendor`.
+  Of its targets, `vendor-tarball` alone runs `go mod vendor`, and it
+  writes `mcp-server-aha-aql-0.13.0-vendor.tar.xz`. `build` and `test`
+  do not depend on it, so `make build` fails in a fresh clone.
   `Containerfile` has `COPY vendor/ vendor/`, and `debian/rules` exports
-  `GOFLAGS=-mod=vendor`. The run had the instruction "Use 'go mod vendor'
-  for dependencies" in its system prompt. The template names the targets
-  `build`, `test`, `install`, `clean` and `man`, and it says nothing about
-  the dependencies. The Makefile of the hints has the same gap: its
-  `build` uses `-mod=vendor` and depends on no target that makes
-  `vendor/`. The hints list `vendor/` for `.gitignore`. The template does
-  not name that file as a deliverable, and the run wrote none.
-- Proposed edit, as the maintainer chose it on 2026-11-24. Template, row
-  `build`: "Targets: `build`, `test`, `install`, `clean`, `man`, `vendor`.
-  `build` and `test` depend on `vendor`. `vendor` runs `go mod vendor`
-  when the directory `vendor/` is missing or older than `go.mod` or
-  `go.sum`, and it does nothing in every other case. `vendor/` is no
-  deliverable, and `.gitignore` names it." The same row or a new row
-  names `.gitignore` as a deliverable. Rows `RPM` and `DEB`: "The package
-  build extracts the vendor tarball of `make vendor-tarball` before it
-  builds, and it needs no network." Row `OCI`: one rule for where the
-  image build takes the dependencies from. The Containerfile of the
-  template downloads them (`RUN go mod download`), and the Containerfile
-  of the run copies `vendor/` from the build context. Hints: the same
-  dependency in the Makefile sketch:
-
-  ```
-  vendor: go.mod go.sum
-  	go mod vendor
-  	touch vendor
-
-  build: vendor
-  ```
-
-- Open point for the template: a rule that compares times can start a
-  download in a package build. That happens when the extracted `vendor/`
-  is older than `go.mod`, and such a build has no network. Two ways out:
-  the package build calls `go build -mod=vendor` itself, as the RPM file
-  of the run does, or it runs `touch vendor` after it extracted the
-  tarball.
+  `GOFLAGS=-mod=vendor`. The run had the instruction "Use 'go mod
+  vendor' for dependencies" in its system prompt. The Makefile of the
+  hints has the same gap: its `build` uses `-mod=vendor` and depends on
+  no target that makes `vendor/`. The hints list `vendor/` for
+  `.gitignore`. The template does not name that file as a deliverable,
+  and the run wrote none.
+- Evidence in the PCD repository (github.com/mge1512/pcd, master at
+  `89315cc`): the cli-tool template has the rule in a form without a
+  language. The vendored tree is not part of the source tarball, and a
+  second tarball `<n>-X.Y.Z-vendor.tar.<extension>` is `Source1`. This
+  is ruling T-03 of the maintainer of 2026-06-10. The mcp-server
+  template has no such paragraph. Ruling T-06 of the same list says
+  that Go-specific advice is in hints files and not in the templates.
+  The hints file writes the tarball with `.tar.xz`. Of the tools of the
+  repository, pcd-slice writes `-vendor.tar.gz`, and mcp-server-pcd has
+  `-vendor.tar.xz` in its specification and in its generated files.
+- Proposed edit: pull request 6 of github.com/mge1512/pcd, opened on
+  2026-11-25. The file `mcp-server.go.mcp-go.hints.diff` has its change
+  of the hints file. It adds a section with the rule and two wrong
+  patterns. The Makefile of the hints gets a target `vendor`, which
+  runs `go mod vendor` when `vendor/` is missing or older than `go.mod`
+  or `go.sum`, and `build` depends on it. A paragraph says that `%build`
+  and `%check` call the `go` commands themselves. `.gitignore` gets
+  `*-vendor.tar.xz`. The same diff applies to the copy in
+  `pcd-artefacts/` of the repository of this server:
+  `patch -p2 -d pcd-artefacts < mcp-server.go.mcp-go.hints.diff`.
+- Decisions of the maintainer, later on 2026-11-25: the tarball keeps
+  the ending `.tar.xz`, as the hints and the first implementation have
+  it. The label of the hints file stays the library version, and the
+  library version is raised with the change. The pull request therefore
+  moves the hints from mcp-go v0.46.0 to v1.6.0.
+- What v1.6.0 changes for this server: it needs Go 1.25.5 or later. A
+  tool filter runs for every `tools/call` as well as for `tools/list`.
+  The code of the run fills the example key in a tool filter, so one of
+  its 187 tests fails with v1.6.0: an http request reads the product
+  list once more. With a hook after `tools/list` in place of the
+  filter, all 187 tests pass. The hints name both facts.
+- Checked: the Makefile rule, on a fresh copy of the code of the run.
+  `make build` runs `go mod vendor` once and builds. A second run does
+  nothing for `vendor`. After `touch go.mod` the rule runs again. F-030
+  has the package build with the two tarballs.
+- Correction: the first form of this finding proposed text with
+  `go mod vendor` for a row of the template. Ruling T-06 excludes that.
+  For the template, the paragraph of the cli-tool template on the two
+  tarballs fits as it is. That is a template change of its own.
+- Open points for the maintainer:
+  - The specification of mcp-server-pcd pins mcp-go v0.46.0 and points
+    to the hints file. It needs a unit of its own.
+  - The Debian package and the image need `vendor/` in the build tree
+    too. The rule names the tarball for the RPM package. For the image,
+    the Containerfile of the template does not use `vendor/`: its
+    builder stage runs `go mod download`.
+  - The checksum of mcp-go v1.6.0 was not compared with the public
+    checksum database, which this session could not reach.
 - Rationale: three packaging paths rest on a directory that no rule
   creates. A build without network is the goal, and one rule in the
-  template gives it to every translation.
+  hints gives it to every translation of an MCP server in Go.
 
 ### F-030 TRANSLATION-ERROR: the RPM file expects `vendor/` inside the source tarball
 
@@ -775,11 +800,24 @@ in the specification. All statements ran on the fixture account.
   Makefile of the same run says that its vendor tarball is "for OBS builds
   that keep vendor/ out of the source tarball". The RPM sketch of the
   hints has `Source1` for that tarball and `%autosetup -a 1`. A source
-  tarball that is made from the repository has no `vendor/`, so
-  `go build -mod=vendor` fails in `%build`. I did not build the package in
-  this session.
+  tarball that is made from the repository has no `vendor/`.
+- Evidence from a package build (2026-11-25): rpmbuild 4.18.2, with
+  `GOPROXY=off` and an empty module cache. With the file as it is and a
+  source tarball from the files of the repository, `%build` stops with
+  "go: inconsistent vendoring". With two more lines,
+  `Source1: %{name}-%{version}-vendor.tar.gz` and `%autosetup -a 1`,
+  the steps `%prep`, `%build`, `%install` and `%check` pass, and
+  rpmbuild writes the package. The vendor tarball came from
+  `make vendor-tarball`, with the Makefile rule of F-029. Limits of this
+  build: the rpm of Ubuntu 24.04 and not the rpm of a SUSE system, the
+  option `--nodeps`, and `_unitdir` set by hand. The macros for systemd
+  were not installed, so the scriptlets of this package are not usable.
+  It was no build on a build service.
+  The run used the ending `.tar.gz` of the first statement. The decided
+  name ends in `.tar.xz`.
 - Proposed action: none on the file. The next translation writes it from
-  the template rule of F-029. Everything else in the file is as the
+  the hints rule of F-029, with `Source1: %{name}-%{version}-vendor.tar.xz`
+  and `%autosetup -a 1`. Everything else in the file is as the
   template asks: the spec hash, `pandoc` in `BuildRequires` and in
   `%build`, the man page and the unit in `%files`, and the unit as a file
   that the package installs.
@@ -794,6 +832,9 @@ Two facts, before the questions:
   finding against the run (F-030 reviews the file).
 - `vendor/` is never a part of the deliverable. The Makefile has to
   prepare it (F-029).
+- Added on 2026-11-25: the vendor directory is packaged in a separate
+  tar file with the name `%{name}-%{version}-vendor.tar.xz` (first statement: `.tar.gz`). The place
+  for the rule is the hints file of the PCD repository (F-029).
 
 Eight questions and the answers:
 
@@ -802,7 +843,7 @@ Eight questions and the answers:
 | Which units now | The units 1 to 8, in the proposed order. Unit 9 after two new checks | Versions 0.14.0 to 0.20.0; checks 25 and 26 of `aha-checks.sh` |
 | F-005: `=` on a field with several values | A new rule: `=` and IN are true when the field has the value among its values. A value with commas means that the field has each of them. CONTAINS stays a search in the text | 0.17.0 |
 | F-004: NULL in an IN list | It stands for a field without a value, as `= NULL` already means IS NULL. Such a list is no route | 0.16.0 |
-| F-029: `vendor/` | `build` and `test` depend on a target that runs `go mod vendor` when `vendor/` is missing or older than `go.mod` and `go.sum`. A package build extracts the vendor tarball first. `vendor/` is in `.gitignore` | Open: template and hints |
+| F-029: `vendor/` | `build` and `test` depend on a target that runs `go mod vendor` when `vendor/` is missing or older than `go.mod` and `go.sum`. A package build extracts the vendor tarball first. `vendor/` is in `.gitignore` | Open: hints, `mcp-server.go.mcp-go.hints.diff` |
 | F-012: kept lists | Nothing is kept between statements | 0.19.0 |
 | F-006: a write result that differs from what was sent | A note in the result | Open: unit 9 |
 | F-013: examples that a test cannot check | FakeAha is an HTTPS server outside the process. The examples on time say what a test sees from outside. The example for a direct connection is removed, and its rule stays | 0.20.0 |
@@ -856,6 +897,11 @@ Where a version differs from the proposed edit of its finding:
   repository and is not delivered.
 - The modules were compared with `go.sum`. The public checksum database
   was not reachable from this session.
+- The package build of F-030 ran outside a build service, with the rpm
+  of another distribution and without the build dependencies. Downloads
+  of modules were switched off, so it shows that the two tarballs are
+  enough for the build. It does not show that the package builds on a
+  SUSE system.
 - The versions 0.14.0 to 0.20.0 are not translated. The lint and the
   slice check accept them, with builds of this session and not with the
   packaged tools. No program has run their rules, and no test has run
