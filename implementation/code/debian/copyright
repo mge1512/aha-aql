@@ -2,38 +2,28 @@ Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: mcp-server-aha-aql
 Upstream-Contact: Matthias G. Eckermann <mge@mailbox.org>
 Source: https://github.com/mge1512/aha-aql
-Comment: generated from spec aha-aql.spec.md sha256:9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262
+Comment: generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
 
 Files: *
 Copyright: 2026 Matthias G. Eckermann <mge@mailbox.org>
 License: MIT
 
-Files: vendor/github.com/mark3labs/mcp-go/*
-Copyright: 2024 Anthropic, PBC
-License: MIT
-
-Files: vendor/github.com/google/jsonschema-go/*
-Copyright: 2025 JSON Schema Go Project Authors
-License: MIT
-
-Files: vendor/github.com/spf13/cast/*
-Copyright: 2014 Steve Francia
-License: MIT
-
-Files: vendor/github.com/google/uuid/*
-Copyright: 2009, 2014 Google Inc.
-License: BSD-3-Clause
-
-Files: vendor/github.com/yosida95/uritemplate/*
-Copyright: 2016 Kohei YOSHIDA <https://yosida95.com/>
-License: BSD-3-Clause
+Files: vendor/*
+Copyright: The authors of the vendored Go modules, see vendor/modules.txt
+License: MIT and BSD-3-Clause and Apache-2.0
+Comment: The vendored modules carry their own license files.
 
 License: MIT
- The MIT License. The authoritative text is at
- https://opensource.org/license/mit and in the file LICENSE of each
- component in the source package.
+ The MIT License. The full text is at https://opensource.org/license/mit
+ and https://spdx.org/licenses/MIT.html. On Debian systems the text is
+ also in /usr/share/common-licenses/ when the package base-files has it.
 
 License: BSD-3-Clause
- The 3-Clause BSD License. The authoritative text is at
- https://opensource.org/license/bsd-3-clause and in the file LICENSE of
- each component in the source package.
+ The 3-clause BSD license. The full text is at
+ https://spdx.org/licenses/BSD-3-Clause.html. On Debian systems the text
+ is in /usr/share/common-licenses/BSD.
+
+License: Apache-2.0
+ The Apache License, Version 2.0. The full text is at
+ https://www.apache.org/licenses/LICENSE-2.0. On Debian systems the text
+ is in /usr/share/common-licenses/Apache-2.0.

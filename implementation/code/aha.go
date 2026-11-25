@@ -1,207 +1,119 @@
-// generated from spec: aha-aql.spec.md sha256:9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262
+// generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
 
 package main
 
-// aha-request: sends one operation of the AhaAPI as an HTTPS request and
-// reads the answer. Every request of the server to Aha! goes through here.
-
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
-// Clock is the clock of the waiting after status 429 and of the log line of
-// execute. Tests of the package may replace it.
-type Clock interface {
-	Now() time.Time
-	Sleep(d time.Duration)
+// Account is what one tool call runs with (TYPES: Account).
+type Account struct {
+	Subdomain  string
+	Credential string
 }
 
-type realClock struct{}
+type failKind int
 
-func (realClock) Now() time.Time        { return time.Now() }
-func (realClock) Sleep(d time.Duration) { time.Sleep(d) }
+const (
+	fNotFound failKind = iota
+	fNotAuthorized
+	fRateLimited
+	fUnreachable
+	fRejected
+)
 
-var clock Clock = realClock{}
+// apiFailure is an ApiFailure of the AhaAPI interface.
+type apiFailure struct {
+	kind   failKind
+	status int
+	text   string
+	cause  string // no_answer | certificate | proxy | connection
+	method string
+	route  string
+	write  bool
+}
 
 const requestTimeout = 60 * time.Second
 
-// ApiFailure kinds.
-const (
-	failNotFound      = "not_found"
-	failNotAuthorized = "not_authorized"
-	failRateLimited   = "rate_limited"
-	failUnreachable   = "unreachable"
-	failRejected      = "rejected"
-)
-
-type ApiFailure struct {
-	Kind   string
-	Status int
-	Cause  string // no_answer, certificate, proxy, connection
-	Text   string
+// ahaClient sends the operations of the AhaAPI (aha-request).
+type ahaClient struct {
+	hc *http.Client
 }
 
-type connError struct {
-	cause string
-	err   error
-}
-
-func (e *connError) Error() string { return e.cause + ": " + e.err.Error() }
-func (e *connError) Unwrap() error { return e.err }
-
-// proxyFor is the choice of the proxy for an address: a function of the
-// environment and the address. The standard library reads HTTPS_PROXY,
-// https_proxy, NO_PROXY and no_proxy.
-var proxyFor = func(addr string) (*url.URL, error) {
-	return http.ProxyFromEnvironment(&http.Request{URL: &url.URL{Scheme: "https", Host: addr}})
-}
-
-// dialTLS opens the connection to Aha!: directly, or through a CONNECT
-// tunnel of the proxy of the environment, and always with TLS that checks
-// the certificate against the trust store of the platform.
-func dialTLS(ctx context.Context, network, addr string) (net.Conn, error) {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return nil, &connError{"connection", err}
-	}
-	proxy, err := proxyFor(addr)
-	if err != nil {
-		return nil, &connError{"proxy", err}
-	}
-	d := &net.Dialer{Timeout: requestTimeout}
-	var conn net.Conn
-	if proxy != nil {
-		conn, err = dialProxy(ctx, d, proxy, addr)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		conn, err = d.DialContext(ctx, network, addr)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, &connError{"no_answer", err}
-			}
-			return nil, &connError{"connection", err}
-		}
-	}
-	tc := tls.Client(conn, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
-	if err := tc.HandshakeContext(ctx); err != nil {
-		conn.Close()
-		var cv *tls.CertificateVerificationError
-		var ua x509.UnknownAuthorityError
-		var he x509.HostnameError
-		var ci x509.CertificateInvalidError
-		switch {
-		case errors.As(err, &cv), errors.As(err, &ua), errors.As(err, &he), errors.As(err, &ci):
-			return nil, &connError{"certificate", err}
-		case ctx.Err() != nil:
-			return nil, &connError{"no_answer", err}
-		}
-		return nil, &connError{"connection", err}
-	}
-	return tc, nil
-}
-
-func dialProxy(ctx context.Context, d *net.Dialer, proxy *url.URL, addr string) (net.Conn, error) {
-	phost := proxy.Host
-	if proxy.Port() == "" {
-		if proxy.Scheme == "https" {
-			phost = net.JoinHostPort(proxy.Hostname(), "443")
-		} else {
-			phost = net.JoinHostPort(proxy.Hostname(), "80")
-		}
-	}
-	conn, err := d.DialContext(ctx, "tcp", phost)
-	if err != nil {
-		return nil, &connError{"proxy", err}
-	}
-	if proxy.Scheme == "https" {
-		tc := tls.Client(conn, &tls.Config{ServerName: proxy.Hostname(), MinVersion: tls.VersionTLS12})
-		if err := tc.HandshakeContext(ctx); err != nil {
-			conn.Close()
-			return nil, &connError{"proxy", err}
-		}
-		conn = tc
-	}
-	if dl, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(dl)
-	}
-	var req bytes.Buffer
-	fmt.Fprintf(&req, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n", addr, addr)
-	if proxy.User != nil {
-		pw, _ := proxy.User.Password()
-		auth := base64.StdEncoding.EncodeToString([]byte(proxy.User.Username() + ":" + pw))
-		fmt.Fprintf(&req, "Proxy-Authorization: Basic %s\r\n", auth)
-	}
-	req.WriteString("\r\n")
-	if _, err := conn.Write(req.Bytes()); err != nil {
-		conn.Close()
-		return nil, &connError{"proxy", err}
-	}
-	br := bufio.NewReader(conn)
-	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
-	if err != nil {
-		conn.Close()
-		return nil, &connError{"proxy", err}
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		conn.Close()
-		return nil, &connError{"proxy", fmt.Errorf("status %d", resp.StatusCode)}
-	}
-	_ = conn.SetDeadline(time.Time{})
-	if br.Buffered() > 0 {
-		conn.Close()
-		return nil, &connError{"proxy", errors.New("data after the answer to CONNECT")}
-	}
-	return conn, nil
-}
-
-var httpClient = &http.Client{
-	Timeout: requestTimeout,
-	Transport: &http.Transport{
-		Proxy:               nil,
-		DialTLSContext:      dialTLS,
+func newAhaClient() *ahaClient {
+	tr := &http.Transport{
+		// MECHANISM: the standard library reads HTTPS_PROXY, https_proxy,
+		// NO_PROXY and no_proxy for an https address.
+		Proxy:               http.ProxyFromEnvironment,
+		DisableKeepAlives:   true,
 		TLSHandshakeTimeout: requestTimeout,
-		MaxIdleConnsPerHost: 4,
-		IdleConnTimeout:     30 * time.Second,
-	},
-	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		DialContext:         (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
+		// The trust store of the platform; on Linux SSL_CERT_FILE and
+		// SSL_CERT_DIR can name it. No setting turns the check off.
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+	return &ahaClient{hc: &http.Client{
+		Transport: tr,
+		Timeout:   requestTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}}
 }
 
-// ApiAnswer is a JSON object as Aha! returns it, decoded with json.Number.
-type ApiAnswer = map[string]any
+func isCertError(err error) bool {
+	var a *tls.CertificateVerificationError
+	var b x509.UnknownAuthorityError
+	var c x509.HostnameError
+	var d x509.CertificateInvalidError
+	var e *x509.UnknownAuthorityError
+	var g *x509.HostnameError
+	var h *x509.CertificateInvalidError
+	return errors.As(err, &a) || errors.As(err, &b) || errors.As(err, &c) || errors.As(err, &d) ||
+		errors.As(err, &e) || errors.As(err, &g) || errors.As(err, &h)
+}
 
-// apiCall sends one request. expect is the member that the answer must
-// have; list says that its value is a list. A delete needs no answer.
-func apiCall(acct Account, method, route string, params url.Values, body []byte, expect string, list bool) (ApiAnswer, *ApiFailure) {
-	addr := "https://" + acct.Subdomain + ".aha.io/api/v1" + route
+func isTimeout(err error) bool {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded)
+}
+
+// do sends one request and reads the answer (aha-request, steps 1 to 10).
+// The answer is the JSON value of the body, or nil for a DELETE.
+func (c *ahaClient) do(ctx context.Context, acct Account, method, route string, params url.Values, body []byte) (any, *apiFailure) {
+	u := "https://" + acct.Subdomain + ".aha.io/api/v1" + route
 	if len(params) > 0 {
-		addr += "?" + params.Encode()
+		u += "?" + params.Encode()
+	}
+	write := method != http.MethodGet
+	fail := func(k failKind, status int, text, cause string) *apiFailure {
+		return &apiFailure{kind: k, status: status, text: text, cause: cause, method: method, route: route, write: write}
 	}
 	for attempt := 0; ; attempt++ {
 		var rd io.Reader
 		if body != nil {
 			rd = bytes.NewReader(body)
 		}
-		req, err := http.NewRequest(method, addr, rd)
+		req, err := http.NewRequestWithContext(ctx, method, u, rd)
 		if err != nil {
-			return nil, &ApiFailure{Kind: failUnreachable, Cause: "connection"}
+			return nil, fail(fUnreachable, 0, "", "connection")
 		}
 		req.Header.Set("Authorization", "Bearer "+acct.Credential)
 		req.Header.Set("Accept", "application/json")
@@ -209,157 +121,223 @@ func apiCall(acct Account, method, route string, params url.Values, body []byte,
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}
-		resp, err := httpClient.Do(req)
+		var connected atomic.Bool
+		trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { connected.Store(true) }}
+		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+		proxyURL, _ := http.ProxyFromEnvironment(req)
+		resp, err := c.hc.Do(req)
 		if err != nil {
-			return nil, &ApiFailure{Kind: failUnreachable, Cause: causeOf(err)}
+			return nil, fail(fUnreachable, 0, "", classify(err, proxyURL != nil, connected.Load()))
 		}
-		data, rerr := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 		resp.Body.Close()
-		if rerr != nil {
-			return nil, &ApiFailure{Kind: failUnreachable, Cause: causeOf(rerr)}
+		if err != nil {
+			cause := "connection"
+			if isTimeout(err) {
+				cause = "no_answer"
+			}
+			return nil, fail(fUnreachable, 0, "", cause)
 		}
 		st := resp.StatusCode
 		switch {
-		case st == 429:
+		case st == http.StatusTooManyRequests:
 			if attempt >= 2 {
-				return nil, &ApiFailure{Kind: failRateLimited, Status: 429}
+				return nil, fail(fRateLimited, st, "", "")
 			}
-			clock.Sleep(rateLimitWait(resp.Header.Get("X-Ratelimit-Reset")))
+			wait := 5 * time.Second
+			if h := resp.Header.Get("X-Ratelimit-Reset"); h != "" {
+				if reset, err := strconv.ParseFloat(strings.TrimSpace(h), 64); err == nil {
+					wait = time.Duration((reset - float64(time.Now().UnixNano())/1e9) * float64(time.Second))
+					if wait < time.Second {
+						wait = time.Second
+					}
+					if wait > 30*time.Second {
+						wait = 30 * time.Second
+					}
+				}
+			}
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return nil, fail(fUnreachable, 0, "", "no_answer")
+			}
 			continue
 		case st >= 300 && st <= 399:
-			return nil, &ApiFailure{Kind: failRejected, Status: st, Text: string(data)}
+			return nil, fail(fRejected, st, string(data), "")
 		case st == 401 || st == 403:
-			return nil, &ApiFailure{Kind: failNotAuthorized, Status: st}
+			return nil, fail(fNotAuthorized, st, "", "")
 		case st == 404:
-			return nil, &ApiFailure{Kind: failNotFound, Status: 404, Text: string(data)}
+			return nil, fail(fNotFound, st, string(data), "")
 		case st < 200 || st > 299:
-			return nil, &ApiFailure{Kind: failRejected, Status: st, Text: string(data)}
+			return nil, fail(fRejected, st, string(data), "")
 		}
 		if method == http.MethodDelete {
-			return ApiAnswer{}, nil
+			return nil, nil
 		}
 		dec := json.NewDecoder(bytes.NewReader(data))
 		dec.UseNumber()
 		var v any
 		if err := dec.Decode(&v); err != nil {
-			return nil, &ApiFailure{Kind: failRejected, Status: st, Text: "the answer is not JSON"}
+			return nil, fail(fRejected, st, "the answer is not JSON", "")
 		}
-		obj, ok := v.(map[string]any)
+		if dec.More() {
+			return nil, fail(fRejected, st, "the answer is not JSON", "")
+		}
+		m, ok := v.(map[string]any)
 		if !ok {
-			return nil, &ApiFailure{Kind: failRejected, Status: st, Text: "the answer has an unknown form"}
+			return nil, fail(fRejected, st, "the answer has an unknown form", "")
 		}
-		m, has := obj[expect]
-		if !has {
-			return nil, &ApiFailure{Kind: failRejected, Status: st, Text: "the answer has an unknown form"}
-		}
-		if list {
-			if _, ok := m.([]any); !ok {
-				return nil, &ApiFailure{Kind: failRejected, Status: st, Text: "the answer has an unknown form"}
-			}
-			if p, has := obj["pagination"]; has {
-				if _, ok := p.(map[string]any); !ok {
-					return nil, &ApiFailure{Kind: failRejected, Status: st, Text: "the answer has an unknown form"}
-				}
-			}
-		} else if _, ok := m.(map[string]any); !ok {
-			return nil, &ApiFailure{Kind: failRejected, Status: st, Text: "the answer has an unknown form"}
-		}
-		return obj, nil
+		return m, nil
 	}
 }
 
-func causeOf(err error) string {
-	var ce *connError
-	if errors.As(err, &ce) {
-		return ce.cause
+func classify(err error, proxied, connected bool) string {
+	if isCertError(err) {
+		return "certificate"
 	}
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return "no_answer"
+	if !connected {
+		if proxied {
+			return "proxy"
+		}
+		if isTimeout(err) {
+			return "no_answer"
+		}
+		return "connection"
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
+	if isTimeout(err) {
 		return "no_answer"
 	}
 	return "connection"
 }
 
-func rateLimitWait(reset string) time.Duration {
-	if reset == "" {
-		return 5 * time.Second
-	}
-	r, err := strconv.ParseInt(strings.TrimSpace(reset), 10, 64)
-	if err != nil {
-		return 5 * time.Second
-	}
-	secs := r - clock.Now().Unix()
-	if secs < 1 {
-		secs = 1
-	}
-	if secs > 30 {
-		secs = 30
-	}
-	return time.Duration(secs) * time.Second
+func unknownForm(f *apiFailure, st int) *apiFailure {
+	return &apiFailure{kind: fRejected, status: st, text: "the answer has an unknown form", method: f.method, route: f.route, write: f.write}
 }
 
-// ListPage is one page of a list.
-type ListPage struct {
-	Records      []map[string]any
-	TotalRecords int
-	TotalPages   int
+// listPage is a ListPage of the AhaAPI.
+type listPage struct {
+	records      []apiRec
+	totalRecords int
+	totalPages   int
 }
 
-func lastPart(route string) string {
-	return route[strings.LastIndex(route, "/")+1:]
-}
-
-func apiList(acct Account, route string, params url.Values) (*ListPage, *ApiFailure) {
-	ans, f := apiCall(acct, http.MethodGet, route, params, nil, lastPart(route), true)
-	if f != nil {
-		return nil, f
+func lastSegment(route string) string {
+	if i := strings.LastIndex(route, "/"); i >= 0 {
+		return route[i+1:]
 	}
-	lp := &ListPage{}
-	for _, x := range ans[lastPart(route)].([]any) {
-		if m, ok := x.(map[string]any); ok {
-			lp.Records = append(lp.Records, m)
+	return route
+}
+
+func intOf(v any) (int, bool) {
+	switch x := v.(type) {
+	case json.Number:
+		i, err := strconv.Atoi(x.String())
+		if err != nil {
+			f, err2 := x.Float64()
+			if err2 != nil {
+				return 0, false
+			}
+			return int(f), true
 		}
+		return i, true
+	case float64:
+		return int(x), true
 	}
-	if p, ok := ans["pagination"].(map[string]any); ok {
-		lp.TotalRecords = toInt(p["total_records"])
-		lp.TotalPages = toInt(p["total_pages"])
+	return 0, false
+}
+
+// apiList is ApiList(route, parameters).
+func (c *ahaClient) apiList(ctx context.Context, acct Account, route string, params url.Values) (listPage, *apiFailure) {
+	v, f := c.do(ctx, acct, http.MethodGet, route, params, nil)
+	if f != nil {
+		return listPage{}, f
+	}
+	m := v.(map[string]any)
+	base := &apiFailure{method: http.MethodGet, route: route}
+	list, ok := m[lastSegment(route)].([]any)
+	if !ok {
+		return listPage{}, unknownForm(base, 200)
+	}
+	var lp listPage
+	for _, r := range list {
+		rec, ok := r.(map[string]any)
+		if !ok {
+			return listPage{}, unknownForm(base, 200)
+		}
+		lp.records = append(lp.records, rec)
+	}
+	if p, present := m["pagination"]; present {
+		pm, ok := p.(map[string]any)
+		if !ok {
+			return listPage{}, unknownForm(base, 200)
+		}
+		tr, ok1 := intOf(pm["total_records"])
+		tp, ok2 := intOf(pm["total_pages"])
+		if !ok1 || !ok2 {
+			return listPage{}, unknownForm(base, 200)
+		}
+		lp.totalRecords, lp.totalPages = tr, tp
 	} else {
-		lp.TotalRecords = len(lp.Records)
-		lp.TotalPages = 1
+		lp.totalRecords, lp.totalPages = len(lp.records), 1
 	}
 	return lp, nil
 }
 
-func apiGet(acct Account, route, member string, list bool) (ApiAnswer, *ApiFailure) {
-	return apiCall(acct, http.MethodGet, route, nil, nil, member, list)
+// apiGet is ApiGet(route): the record in the member of its singular.
+func (c *ahaClient) apiGet(ctx context.Context, acct Account, route, member string) (apiRec, *apiFailure) {
+	v, f := c.do(ctx, acct, http.MethodGet, route, nil, nil)
+	if f != nil {
+		return nil, f
+	}
+	m := v.(map[string]any)
+	rec, ok := m[member].(map[string]any)
+	if !ok {
+		return nil, unknownForm(&apiFailure{method: http.MethodGet, route: route}, 200)
+	}
+	return rec, nil
 }
 
-func toInt(v any) int {
-	switch x := v.(type) {
-	case json.Number:
-		n, err := x.Int64()
-		if err != nil {
-			f, _ := x.Float64()
-			return int(f)
+// apiGetList is ApiGet on a route whose answer has a list in member.
+func (c *ahaClient) apiGetList(ctx context.Context, acct Account, route, member string) ([]apiRec, *apiFailure) {
+	v, f := c.do(ctx, acct, http.MethodGet, route, nil, nil)
+	if f != nil {
+		return nil, f
+	}
+	m := v.(map[string]any)
+	list, ok := m[member].([]any)
+	if !ok {
+		return nil, unknownForm(&apiFailure{method: http.MethodGet, route: route}, 200)
+	}
+	var out []apiRec
+	for _, r := range list {
+		rec, ok := r.(map[string]any)
+		if !ok {
+			return nil, unknownForm(&apiFailure{method: http.MethodGet, route: route}, 200)
 		}
-		return int(n)
-	case float64:
-		return int(x)
-	case string:
-		n, _ := strconv.Atoi(x)
-		return n
+		out = append(out, rec)
 	}
-	return 0
+	return out, nil
 }
 
-// routeWith replaces {v}, {id} and {product} by percent-encoded values.
-func routeWith(tmpl string, pairs ...string) string {
-	out := tmpl
-	for i := 0; i+1 < len(pairs); i += 2 {
-		out = strings.ReplaceAll(out, "{"+pairs[i]+"}", url.PathEscape(pairs[i+1]))
+// apiWrite is ApiCreate (POST) or ApiUpdate (PUT).
+func (c *ahaClient) apiWrite(ctx context.Context, acct Account, method, route, member string, body []byte) (apiRec, *apiFailure) {
+	v, f := c.do(ctx, acct, method, route, nil, body)
+	if f != nil {
+		return nil, f
 	}
-	return out
+	m := v.(map[string]any)
+	rec, ok := m[member].(map[string]any)
+	if !ok {
+		return nil, unknownForm(&apiFailure{method: method, route: route, write: true}, 200)
+	}
+	return rec, nil
 }
+
+// apiDelete is ApiDelete(route).
+func (c *ahaClient) apiDelete(ctx context.Context, acct Account, route string) *apiFailure {
+	_, f := c.do(ctx, acct, http.MethodDelete, route, nil, nil)
+	return f
+}
+
+// esc percent-encodes a value that replaces a route parameter.
+func esc(s string) string { return url.PathEscape(s) }

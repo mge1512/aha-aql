@@ -1,8 +1,6 @@
-// generated from spec: aha-aql.spec.md sha256:9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262
+// generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
 
 package main
-
-// tokenize: splits the text of a statement into tokens.
 
 import (
 	"fmt"
@@ -10,10 +8,10 @@ import (
 	"unicode"
 )
 
-type TokKind int
+type tokKind int
 
 const (
-	tkWord TokKind = iota
+	tkWord tokKind = iota
 	tkText
 	tkNumber
 	tkOp
@@ -21,26 +19,27 @@ const (
 	tkEOF
 )
 
-type Token struct {
-	Kind  TokKind
-	Value string
-	Pos   int // 1-based position of the first character
-	Quote rune
+// token is one token of a statement (tokenize).
+type token struct {
+	kind tokKind
+	val  string
+	pos  int // 1-based position of the first character
 }
 
-func (t Token) isWord(w string) bool  { return t.Kind == tkWord && strings.EqualFold(t.Value, w) }
-func (t Token) isPunct(p string) bool { return t.Kind == tkPunct && t.Value == p }
+func (t token) is(word string) bool {
+	return t.kind == tkWord && strings.EqualFold(t.val, word)
+}
 
-func isLetter(r rune) bool { return unicode.IsLetter(r) }
-func isDigit(r rune) bool  { return r >= '0' && r <= '9' }
+func (t token) punct(p string) bool { return t.kind == tkPunct && t.val == p }
 
-func tokenize(text string, lenient bool) ([]Token, *AqlError) {
-	rs := []rune(text)
-	n := len(rs)
-	var toks []Token
+// tokenize splits the text of a statement into tokens.
+func tokenize(src []rune, lenient bool) ([]token, *AqlError) {
+	var out []token
+	n := len(src)
 	i := 0
+	isWordChar := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '.' }
 	for i < n {
-		r := rs[i]
+		r := src[i]
 		if unicode.IsSpace(r) {
 			i++
 			continue
@@ -53,14 +52,14 @@ func tokenize(text string, lenient bool) ([]Token, *AqlError) {
 			i++
 			closed := false
 			for i < n {
-				c := rs[i]
+				c := src[i]
 				if c == q {
-					if i+1 < n && rs[i+1] == q {
+					if i+1 < n && src[i+1] == q {
 						b.WriteRune(q)
 						i += 2
 						continue
 					}
-					if lenient && q == '\'' && i > start+1 && (isLetter(rs[i-1]) || isDigit(rs[i-1])) && i+1 < n && isLetter(rs[i+1]) {
+					if lenient && q == '\'' && i > start+1 && isLetterDigit(src[i-1]) && i+1 < n && isLetter(src[i+1]) {
 						b.WriteRune(c)
 						i++
 						continue
@@ -70,13 +69,13 @@ func tokenize(text string, lenient bool) ([]Token, *AqlError) {
 					break
 				}
 				if c == '\\' && i+1 < n {
-					switch rs[i+1] {
+					switch src[i+1] {
 					case 'n':
 						b.WriteRune('\n')
 					case 't':
 						b.WriteRune('\t')
 					default:
-						b.WriteRune(rs[i+1])
+						b.WriteRune(src[i+1])
 					}
 					i += 2
 					continue
@@ -85,142 +84,114 @@ func tokenize(text string, lenient bool) ([]Token, *AqlError) {
 				i++
 			}
 			if !closed {
-				return nil, errS01(text, q, start+1)
-			}
-			toks = append(toks, Token{Kind: tkText, Value: b.String(), Pos: start + 1, Quote: q})
-		case r == '=' || r == '<' || r == '>' || r == '!':
-			op := string(r)
-			if i+1 < n {
-				two := string(rs[i : i+2])
-				if two == "!=" || two == "<>" || two == "<=" || two == ">=" {
-					op = two
+				name := "apostrophe"
+				hint := apostropheHint(src)
+				if hint == "" {
+					if q == '\'' {
+						hint = " Text goes in single quotes: 'like this'."
+					} else {
+						hint = " Use single quotes for text: 'like this'."
+					}
 				}
+				if q == '"' {
+					name = "double quote"
+				}
+				return nil, aqlErr("syntax", "the text that starts with the %s at position %d is not closed.%s", name, start+1, hint)
 			}
-			if op == "!" {
-				return nil, errS02(text, r, start+1)
-			}
-			i += len(op)
-			if op == "<>" {
-				op = "!="
-			}
-			toks = append(toks, Token{Kind: tkOp, Value: op, Pos: start + 1})
-		case r == '(' || r == ')' || r == ',' || r == ';' || r == '*':
-			toks = append(toks, Token{Kind: tkPunct, Value: string(r), Pos: start + 1})
+			out = append(out, token{kind: tkText, val: b.String(), pos: start + 1})
+		case r == '=':
+			out = append(out, token{kind: tkOp, val: "=", pos: start + 1})
 			i++
-		case isDigit(r) || (r == '-' && i+1 < n && isDigit(rs[i+1])):
-			// date without quotes
-			if isDateAt(rs, i) {
-				toks = append(toks, Token{Kind: tkText, Value: string(rs[i : i+10]), Pos: start + 1})
+		case r == '!' && i+1 < n && src[i+1] == '=':
+			out = append(out, token{kind: tkOp, val: "!=", pos: start + 1})
+			i += 2
+		case r == '<':
+			if i+1 < n && src[i+1] == '>' {
+				out = append(out, token{kind: tkOp, val: "!=", pos: start + 1})
+				i += 2
+			} else if i+1 < n && src[i+1] == '=' {
+				out = append(out, token{kind: tkOp, val: "<=", pos: start + 1})
+				i += 2
+			} else {
+				out = append(out, token{kind: tkOp, val: "<", pos: start + 1})
+				i++
+			}
+		case r == '>':
+			if i+1 < n && src[i+1] == '=' {
+				out = append(out, token{kind: tkOp, val: ">=", pos: start + 1})
+				i += 2
+			} else {
+				out = append(out, token{kind: tkOp, val: ">", pos: start + 1})
+				i++
+			}
+		case strings.ContainsRune("(),;*", r):
+			out = append(out, token{kind: tkPunct, val: string(r), pos: start + 1})
+			i++
+		case unicode.IsDigit(r) || (r == '-' && i+1 < n && unicode.IsDigit(src[i+1])):
+			if d, ok := dateAt(src, i); ok {
+				out = append(out, token{kind: tkText, val: d, pos: start + 1})
 				i += 10
 				continue
 			}
 			j := i
-			if rs[j] == '-' {
+			if src[j] == '-' {
 				j++
 			}
-			for j < n && isDigit(rs[j]) {
+			for j < n && unicode.IsDigit(src[j]) {
 				j++
 			}
-			if j+1 < n && rs[j] == '.' && isDigit(rs[j+1]) {
+			if j+1 < n && src[j] == '.' && unicode.IsDigit(src[j+1]) {
 				j++
-				for j < n && isDigit(rs[j]) {
+				for j < n && unicode.IsDigit(src[j]) {
 					j++
 				}
 			}
-			if j < n && (isLetter(rs[j]) || isDigit(rs[j]) || rs[j] == '_' || rs[j] == '.') {
-				return nil, errS02(text, r, start+1)
+			if j < n && (unicode.IsLetter(src[j]) || unicode.IsDigit(src[j]) || src[j] == '_' || src[j] == '.') {
+				return nil, errS02(src, i)
 			}
-			toks = append(toks, Token{Kind: tkNumber, Value: string(rs[i:j]), Pos: start + 1})
+			out = append(out, token{kind: tkNumber, val: string(src[i:j]), pos: start + 1})
 			i = j
-		case isLetter(r) || r == '_':
-			j := i + 1
-			for j < n && (isLetter(rs[j]) || isDigit(rs[j]) || rs[j] == '_' || rs[j] == '.') {
+		case unicode.IsLetter(r) || r == '_':
+			j := i
+			for j < n && isWordChar(src[j]) {
 				j++
 			}
-			toks = append(toks, Token{Kind: tkWord, Value: string(rs[i:j]), Pos: start + 1})
+			out = append(out, token{kind: tkWord, val: string(src[i:j]), pos: start + 1})
 			i = j
 		default:
-			return nil, errS02(text, r, start+1)
+			return nil, errS02(src, i)
 		}
 	}
-	toks = append(toks, Token{Kind: tkEOF, Pos: n + 1})
-	return toks, nil
+	out = append(out, token{kind: tkEOF, pos: 0})
+	return out, nil
 }
 
-func isDateAt(rs []rune, i int) bool {
-	if i+10 > len(rs) {
-		return false
+func errS02(src []rune, i int) *AqlError {
+	return aqlErr("syntax", "unexpected character %s at position %d.%s", string(src[i]), i+1, apostropheHint(src))
+}
+
+// dateAt reads a date without quotes at i (tokenize, step 5).
+func dateAt(src []rune, i int) (string, bool) {
+	if i+10 > len(src) {
+		return "", false
 	}
 	for k := 0; k < 10; k++ {
-		c := rs[i+k]
+		c := src[i+k]
 		if k == 4 || k == 7 {
 			if c != '-' {
-				return false
+				return "", false
 			}
-		} else if !isDigit(c) {
-			return false
+		} else if !unicode.IsDigit(c) {
+			return "", false
 		}
 	}
-	if i+10 < len(rs) {
-		c := rs[i+10]
-		if isLetter(c) || isDigit(c) || c == '_' || c == '-' {
-			return false
+	if i+10 < len(src) {
+		c := src[i+10]
+		if unicode.IsLetter(c) || unicode.IsDigit(c) || c == '_' || c == '-' {
+			return "", false
 		}
 	}
-	return true
+	return string(src[i : i+10]), true
 }
 
-// hasInnerApostrophe: an apostrophe directly between a letter or digit and
-// a letter.
-func hasInnerApostrophe(text string) bool {
-	_, ok := innerApostropheWord(text)
-	return ok
-}
-
-// innerApostropheWord gives the word of the apostrophe hint.
-func innerApostropheWord(text string) (string, bool) {
-	rs := []rune(text)
-	for i := 1; i+1 < len(rs); i++ {
-		if rs[i] == '\'' && (isLetter(rs[i-1]) || isDigit(rs[i-1])) && isLetter(rs[i+1]) {
-			a := i
-			for a > 0 && !unicode.IsSpace(rs[a-1]) {
-				a--
-			}
-			b := i + 1
-			for b < len(rs) && !unicode.IsSpace(rs[b]) {
-				b++
-			}
-			w := strings.Trim(string(rs[a:b]), `'"%(),;`)
-			return w, true
-		}
-	}
-	return "", false
-}
-
-func apostropheHint(text string) string {
-	w, ok := innerApostropheWord(text)
-	if !ok {
-		return ""
-	}
-	return fmt.Sprintf(" The text contains an apostrophe (%s). Inside text, write an apostrophe twice: %s", w, strings.ReplaceAll(w, "'", "''"))
-}
-
-func errS01(text string, q rune, pos int) *AqlError {
-	name := "apostrophe"
-	hint := apostropheHint(text)
-	if q == '"' {
-		name = "double quote"
-	}
-	if hint == "" {
-		if q == '\'' {
-			hint = " Text goes in single quotes: 'like this'."
-		} else {
-			hint = " Use single quotes for text: 'like this'."
-		}
-	}
-	return &AqlError{Kind: "syntax", Message: fmt.Sprintf("the text that starts with the %s at position %d is not closed.%s", name, pos, hint)}
-}
-
-func errS02(text string, c rune, pos int) *AqlError {
-	return &AqlError{Kind: "syntax", Message: fmt.Sprintf("unexpected character %c at position %d.%s", c, pos, apostropheHint(text))}
-}
+var _ = fmt.Sprintf

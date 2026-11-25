@@ -1,13 +1,16 @@
-// generated from spec: aha-aql.spec.md sha256:9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262
-module aha-aql
+// generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
 
-go 1.24
+module github.com/mge1512/aha-aql
 
-require github.com/mark3labs/mcp-go v0.46.0
+go 1.25.5
+
+require github.com/mark3labs/mcp-go v1.6.0
 
 require (
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
 	github.com/spf13/cast v1.7.1 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+	golang.org/x/text v0.14.0 // indirect
 )

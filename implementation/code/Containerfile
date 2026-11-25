@@ -1,21 +1,21 @@
-# generated from spec: aha-aql.spec.md sha256:9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262
+# generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
 FROM registry.suse.com/bci/golang:latest AS builder
 WORKDIR /build
 COPY go.mod go.sum ./
-COPY vendor/ vendor/
+RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -mod=vendor -trimpath -ldflags="-X main.serverVersion=0.13.0" -o mcp-server-aha-aql .
+RUN CGO_ENABLED=0 go build -mod=mod -trimpath -ldflags="-X main.serverVersion=0.20.1" -o mcp-server-aha-aql .
 
 FROM scratch
-LABEL pcd.spec.sha256="9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262"
-LABEL org.opencontainers.image.title="mcp-server-aha-aql"
-LABEL org.opencontainers.image.version="0.13.0"
-LABEL org.opencontainers.image.licenses="MIT"
-# The trust store for the TLS connection to Aha!.
+LABEL pcd.spec.sha256="b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30"
+LABEL org.opencontainers.image.title="mcp-server-aha-aql" \
+      org.opencontainers.image.version="0.20.1" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.source="https://github.com/mge1512/aha-aql"
+# The trust store of the image: the certificate authorities of its build.
+# The server checks the certificate of Aha!. An operator can give a trust
+# store of their own with SSL_CERT_FILE.
 COPY --from=builder /var/lib/ca-certificates/ca-bundle.pem /etc/ssl/ca-bundle.pem
 COPY --from=builder /build/mcp-server-aha-aql /usr/bin/mcp-server-aha-aql
 EXPOSE 8080
 ENTRYPOINT ["/usr/bin/mcp-server-aha-aql", "http"]
-# Inside a container the server must listen on all interfaces. Every request
-# has a credential: put a TLS endpoint in front of the container.
-CMD ["listen=0.0.0.0:8080"]

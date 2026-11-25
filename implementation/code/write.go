@@ -1,26 +1,17 @@
-// generated from spec: aha-aql.spec.md sha256:9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262
+// generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
 
 package main
 
-// insert-statement, update-statement, delete-statement,
-// check-write-values and write-request.
-
 import (
-	"fmt"
 	"net/http"
 	"strings"
-	"time"
 )
 
+// checked is one field of a write statement after check-write-values.
 type checked struct {
-	Field  string
-	Value  any // string, float64, bool or []string (a TextList)
-	Custom *CustomField
-}
-
-// writeOutcome is what the log line of execute needs.
-type writeOutcome struct {
-	op, entity, id string
+	field  string
+	val    any // string, float64, bool or []string (TextList)
+	custom *CustomField
 }
 
 func display(v any) any {
@@ -30,7 +21,455 @@ func display(v any) any {
 	return v
 }
 
-func splitList(s string) []string {
+func parentText(e *EntityDef) string {
+	switch e.ParentKind {
+	case "release":
+		return "a release"
+	case "product":
+		return "a product"
+	case "feature":
+		return "a feature"
+	}
+	return "the record to comment on"
+}
+
+// writeInfo is what the log line of execute needs.
+type writeInfo struct {
+	op, entity, id string
+}
+
+func (sc *stmtCtx) w24(value, kind string, p *Product) *AqlError {
+	fe := entityOfKind(kind)
+	list, err := sc.recordsOf(fe, p)
+	if err != nil {
+		return err
+	}
+	return aqlErr("wrong_kind", "%s is a product, not %s %s. Use the id of one of its %s: %s", quote(value), article(kind), kind, fe.Name, list)
+}
+
+func (sc *stmtCtx) w30(f *apiFailure) *AqlError {
+	switch f.kind {
+	case fNotAuthorized, fRateLimited, fUnreachable:
+		return sc.failErr(f)
+	}
+	return aqlErr("api_error", "aha: API error (status %d) on %s %s: %s", f.status, f.method, f.route, answerText(f.text))
+}
+
+// productKeyByID gives the key of the product with a NumericId.
+func (sc *stmtCtx) productKeyByID(id string) (string, *AqlError) {
+	if _, err := sc.productList(false, false); err != nil {
+		return "", err
+	}
+	if p := sc.productByID(id); p != nil {
+		return p.Key, nil
+	}
+	return "", nil
+}
+
+func (sc *stmtCtx) runWrite(st *WriteStmt, dryRun bool) (omap, *writeInfo, *AqlError) {
+	switch st.Kind {
+	case "insert":
+		return sc.runInsert(st, dryRun)
+	}
+	return sc.runChange(st, dryRun)
+}
+
+func (sc *stmtCtx) runInsert(st *WriteStmt, dryRun bool) (omap, *writeInfo, *AqlError) {
+	e := st.E
+	info := &writeInfo{op: "insert", entity: e.Name, id: "none"}
+	if st.Parent == nil {
+		return nil, info, aqlErr("bad_value", "parent is required: INSERT needs the column parent with the id of %s. Form: INSERT INTO entity (parent, field, ...) VALUES ('parent id', 'value', ...)", parentText(e))
+	}
+	pv := st.Parent.written()
+	up := strings.ToUpper(pv)
+	var product *Product
+	parentShown := up
+	parentKind := e.ParentKind
+	switch e.ParentKind {
+	case "product":
+		p, err := sc.resolveProduct(pv, e, false)
+		if err != nil {
+			return nil, info, err
+		}
+		product, parentShown = p, p.Key
+	case "any":
+		k := refKind(pv)
+		if !commentParentKinds[k] {
+			return nil, info, sc.errK08(pv)
+		}
+		parentKind = k
+	default:
+		if !(refKind(pv) == e.ParentKind || isNumericID(pv)) {
+			p, err := sc.findProductQuiet(pv)
+			if err != nil {
+				return nil, info, err
+			}
+			if p != nil {
+				return nil, info, sc.w24(pv, e.ParentKind, p)
+			}
+			return nil, info, sc.errW25(e.ParentKind, pv, "")
+		}
+	}
+	has := func(f string) bool {
+		for _, a := range st.Fields {
+			if a.Field == f && !(a.Val.kind == vText && strings.TrimSpace(a.Val.s) == "") {
+				return true
+			}
+		}
+		return false
+	}
+	req := "name"
+	if e.Name == "comments" {
+		req = "body"
+	}
+	if !has(req) {
+		return nil, info, aqlErr("bad_value", "%s is required to create %s %s", req, article(e.Singular), e.Singular)
+	}
+	if e.Name == "goals" && !has("success_metric") {
+		return nil, info, aqlErr("bad_value", "success_metric is required to create a goal")
+	}
+	productID := ""
+	if product != nil {
+		productID = product.ID
+	}
+	parentProduct := func() (string, *AqlError) {
+		if productID != "" {
+			return productID, nil
+		}
+		pe := entityOfKind(parentKind)
+		r, _ := pe.route("id")
+		rec, f := sc.c.apiGet(sc.ctx, sc.acct, strings.ReplaceAll(r.Path, "{v}", esc(up)), pe.Singular)
+		if f != nil {
+			if f.kind == fNotFound {
+				return "", sc.errW25(parentKind, up, "")
+			}
+			return "", sc.failErr(f)
+		}
+		productID = strOf(rec["product_id"])
+		return productID, nil
+	}
+	vals, err := sc.checkWriteValues(e, st.Fields, parentProduct, "")
+	if err != nil {
+		return nil, info, err
+	}
+	if dryRun {
+		out := omap{}
+		for _, c := range vals {
+			out = append(out, kv{c.field, display(c.val)})
+		}
+		out = append(out, kv{"message", "would create " + e.Singular + " under " + parentShown})
+		return out, info, nil
+	}
+	body := writeBody(e, vals, true)
+	var route string
+	switch {
+	case e.Name == "comments":
+		route = "/" + entityOfKind(parentKind).Name + "/" + esc(up) + "/comments"
+	case strings.Contains(e.CreateRoute, "{product}"):
+		route = strings.ReplaceAll(e.CreateRoute, "{product}", esc(product.ID))
+	default:
+		route = strings.ReplaceAll(e.CreateRoute, "{parent}", esc(up))
+	}
+	rec, f := sc.c.apiWrite(sc.ctx, sc.acct, http.MethodPost, route, e.Singular, []byte(body))
+	if f != nil {
+		if f.kind == fNotFound {
+			return nil, info, sc.errW25(parentKind, up, "")
+		}
+		return nil, info, sc.w30(f)
+	}
+	r, cerr := sc.convert(e, rec, "", parentShown, map[string]bool{}, nil)
+	if cerr != nil {
+		return nil, info, cerr
+	}
+	id := strOf(r.vals[e.idField()])
+	info.id = strings.ToUpper(id)
+	out := omap{{"id", id}}
+	if e.Name == "comments" {
+		out = append(out, kv{"parent", parentShown}, kv{"body", r.vals["body"]}, kv{"created_at", r.vals["created_at"]},
+			kv{"message", "Comment added to " + parentShown})
+		return out, info, nil
+	}
+	name := r.vals["name"]
+	if noValue(name) {
+		for _, c := range vals {
+			if c.field == "name" {
+				name = display(c.val)
+			}
+		}
+	}
+	out = append(out, kv{"name", name}, kv{"parent", parentShown}, kv{"message", capitalize(e.Singular) + " " + id + " created"})
+	return out, info, nil
+}
+
+// checkID is step 1 of update-statement.
+func (sc *stmtCtx) checkID(e *EntityDef, v string) *AqlError {
+	if isNumericID(v) {
+		return nil
+	}
+	k := refKind(v)
+	if e.Name != "comments" && k == e.Kind {
+		return nil
+	}
+	if k != "" {
+		ke := entityOfKind(k)
+		return aqlErr("wrong_kind", "%s is the id of %s %s, not of %s %s. To read it: SELECT * FROM %s WHERE id = '%s'",
+			quote(v), article(k), k, article(e.Singular), e.Singular, ke.Name, strings.ToUpper(v))
+	}
+	return sc.errK04(v, e)
+}
+
+func guardCond(g Assign) Cond {
+	if g.Val.kind == vNull || (g.Val.kind == vText && g.Val.s == "") {
+		return &NullTest{Field: g.Field}
+	}
+	return &Cmp{Field: g.Field, Op: "=", Val: g.Val}
+}
+
+// runChange runs update-statement and delete-statement.
+func (sc *stmtCtx) runChange(st *WriteStmt, dryRun bool) (omap, *writeInfo, *AqlError) {
+	e := st.E
+	info := &writeInfo{op: st.Kind, entity: e.Name, id: "none"}
+	if isRecordID(st.ID) {
+		info.id = strings.ToUpper(st.ID)
+	}
+	if err := sc.checkID(e, st.ID); err != nil {
+		return nil, info, err
+	}
+	id := strings.ToUpper(st.ID)
+	r0, _ := e.route("id")
+	rec, f := sc.c.apiGet(sc.ctx, sc.acct, strings.ReplaceAll(r0.Path, "{v}", esc(id)), e.Singular)
+	if f != nil {
+		if f.kind == fNotFound {
+			return nil, info, aqlErr("not_found", "there is no %s with the id %s", e.Singular, quote(id))
+		}
+		return nil, info, sc.failErr(f)
+	}
+	used := map[string]bool{}
+	for _, a := range st.Fields {
+		used[a.Field] = true
+	}
+	for _, g := range st.Guards {
+		used[g.Field] = true
+	}
+	customs := sc.usedCustoms(used)
+	r, err := sc.convert(e, rec, "", "", used, customs)
+	if err != nil {
+		return nil, info, err
+	}
+	recID := strOf(r.vals[e.idField()])
+	if recID == "" {
+		recID = id
+	}
+	var gc []Cond
+	for _, g := range st.Guards {
+		gc = append(gc, guardCond(g))
+	}
+	if err := sc.prepareLookups(e, &AllOf{M: gc}, map[Cond]bool{}); err != nil {
+		return nil, info, err
+	}
+	for i, g := range st.Guards {
+		if !sc.eval(e, r, gc[i]) {
+			cur := r.vals[g.Field]
+			if noValue(cur) {
+				return nil, info, aqlErr("guard_failed", "nothing was changed: %s %s has no %s, not %s", e.Singular, recID, g.Field, quote(g.Val.written()))
+			}
+			return nil, info, aqlErr("guard_failed", "nothing was changed: %s %s has %s = %s, not %s", e.Singular, recID, g.Field, quote(textOf(cur)), quote(g.Val.written()))
+		}
+	}
+	productID := strOf(rec["product_id"])
+	if st.Kind == "delete" {
+		if dryRun {
+			return omap{{"id", recID}, {"message", "would delete " + e.Singular + " " + recID}}, info, nil
+		}
+		route := strings.ReplaceAll(strings.ReplaceAll(e.DeleteRoute, "{product}", esc(productID)), "{id}", esc(id))
+		if f := sc.c.apiDelete(sc.ctx, sc.acct, route); f != nil {
+			return nil, info, sc.w30(f)
+		}
+		return omap{{"id", recID}, {"message", capitalize(e.Singular) + " " + recID + " deleted"}}, info, nil
+	}
+	productKey := func() string {
+		k, _ := sc.productKeyByID(productID)
+		return k
+	}
+	vals, err := sc.checkWriteValues(e, st.Fields, func() (string, *AqlError) { return productID, nil }, "record")
+	if err != nil {
+		return nil, info, err
+	}
+	if dryRun {
+		out := omap{{"id", recID}}
+		for _, c := range vals {
+			out = append(out, kv{c.field, display(c.val)})
+		}
+		out = append(out, kv{"message", "would update " + e.Singular + " " + recID})
+		return out, info, nil
+	}
+	body := writeBody(e, vals, false)
+	route := strings.ReplaceAll(e.UpdateRoute, "{id}", esc(id))
+	ans, f := sc.c.apiWrite(sc.ctx, sc.acct, http.MethodPut, route, e.Singular, []byte(body))
+	if f != nil {
+		if f.kind == fNotFound {
+			var refs []checked
+			for _, c := range vals {
+				if fd := e.field(c.field); fd != nil && fd.Type == tReference {
+					refs = append(refs, c)
+				}
+			}
+			if len(refs) == 1 {
+				return nil, info, sc.errW25(e.field(refs[0].field).RefKind, textOf(refs[0].val), productKey())
+			}
+		}
+		return nil, info, sc.w30(f)
+	}
+	after, err := sc.convert(e, ans, "", "", used, customs)
+	if err != nil {
+		return nil, info, err
+	}
+	out := omap{{"id", recID}}
+	first := "name"
+	if e.Name == "comments" {
+		first = "parent"
+	}
+	out = append(out, kv{first, after.vals[first]})
+	for _, c := range vals {
+		if !out.has(c.field) {
+			out = append(out, kv{c.field, after.vals[c.field]})
+		}
+	}
+	msg := capitalize(e.Singular) + " " + recID + " updated"
+	if len(vals) == 1 && vals[0].field == "status" {
+		msg = capitalize(e.Singular) + " " + recID + " status changed to '" + textOf(after.vals["status"]) + "'"
+	}
+	out = append(out, kv{"message", msg})
+	return out, info, nil
+}
+
+// checkWriteValues is check-write-values. productID gives the NumericId
+// of the product for statuses; changed is "record" for an UPDATE.
+func (sc *stmtCtx) checkWriteValues(e *EntityDef, fields []Assign, productID func() (string, *AqlError), changed string) ([]checked, *AqlError) {
+	var out []checked
+	recordProduct := func() string {
+		if changed == "" {
+			return ""
+		}
+		id, _ := productID()
+		k, _ := sc.productKeyByID(id)
+		return k
+	}
+	for _, a := range fields {
+		v := a.Val
+		if strings.HasPrefix(a.Field, "custom.") {
+			cf := sc.custom[a.Field]
+			c, err := sc.checkCustom(cf, a.Field, v)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, c)
+			continue
+		}
+		fd := e.field(a.Field)
+		name := a.Field
+		var val any
+		switch fd.Type {
+		case tString, tText:
+			if v.kind != vText {
+				return nil, aqlErr("bad_value", "%s must be text in single quotes", name)
+			}
+			val = v.s
+			if e.Name == "features" && name == "tags" {
+				val = splitTags(v.s)
+			}
+		case tNumber:
+			n, ok := toNumber(v.raw())
+			if !ok || v.kind == vBool {
+				return nil, aqlErr("bad_value", "%s must be a number", name)
+			}
+			val = n
+		case tBoolean:
+			b, ok := v.raw().(bool)
+			if v.kind == vText {
+				switch strings.ToLower(v.s) {
+				case "true":
+					b, ok = true, true
+				case "false":
+					b, ok = false, true
+				}
+			}
+			if !ok {
+				return nil, aqlErr("bad_value", "%s must be true or false", name)
+			}
+			val = b
+		case tDate:
+			d, ok := checkDate(v)
+			if !ok {
+				return nil, aqlErr("bad_value", "%s: invalid date %s, use YYYY-MM-DD", name, quote(v.written()))
+			}
+			val = d
+		case tUser:
+			s := v.written()
+			switch {
+			case v.kind == vText && isMeWord(s):
+				me, err := sc.currentUser()
+				if err != nil {
+					return nil, err
+				}
+				val = strOf(me["email"])
+			case v.kind == vText && reEmail.MatchString(strings.TrimSpace(s)):
+				val = strings.TrimSpace(s)
+			case isNumericID(strings.TrimSpace(s)):
+				val = strings.TrimSpace(s)
+			default:
+				return nil, aqlErr("bad_value", "%s: there is no user %s. Use an e-mail address, or 'me' for yourself", name, quote(s))
+			}
+		case tReference:
+			s := v.written()
+			if refKind(s) == fd.RefKind || isNumericID(s) {
+				val = strings.ToUpper(s)
+				break
+			}
+			p, err := sc.findProductQuiet(s)
+			if err != nil {
+				return nil, err
+			}
+			if p != nil {
+				return nil, sc.w24(s, fd.RefKind, p)
+			}
+			return nil, sc.errW25(fd.RefKind, s, recordProduct())
+		case tStatus:
+			if v.kind != vText {
+				return nil, aqlErr("bad_value", "%s must be text in single quotes", name)
+			}
+			pid, err := productID()
+			if err != nil {
+				return nil, err
+			}
+			names, err := sc.statusNames(e, pid)
+			if err != nil {
+				return nil, err
+			}
+			found := ""
+			for _, n := range names {
+				if textEq(n, v.s) {
+					found = n
+					break
+				}
+			}
+			if found == "" {
+				list := "(none)"
+				if len(names) > 0 {
+					list = strings.Join(names, ", ")
+				}
+				return nil, aqlErr("bad_value", "workflow status %s not found for %s; valid statuses: %s", quote(v.s), e.Singular, list)
+			}
+			val = found
+		default:
+			val = v.raw()
+		}
+		out = append(out, checked{field: a.Field, val: val})
+	}
+	return out, nil
+}
+
+func splitTags(s string) []string {
 	out := []string{}
 	for _, p := range strings.Split(s, ",") {
 		if p = strings.TrimSpace(p); p != "" {
@@ -40,618 +479,202 @@ func splitList(s string) []string {
 	return out
 }
 
-func isDay(s string) bool {
-	if !reDate.MatchString(s) {
-		return false
+func checkDate(v Value) (string, bool) {
+	if v.kind != vText {
+		return "", false
 	}
-	_, err := time.Parse("2006-01-02", s)
-	return err == nil
+	s := strings.TrimSpace(v.s)
+	if validDay(s) {
+		return s, true
+	}
+	if len(s) > 10 && validDay(s[:10]) && isTimestamp(s) {
+		return s[:10], true
+	}
+	return "", false
 }
 
-// productKeyOf gives the key of a product by its NumericId, for messages.
-func (r *run) productKeyOf(id string) string {
-	if p := r.productByID(id); p != nil {
-		return p.Key
+// statusNames gives the workflow statuses of the entity in the product.
+func (sc *stmtCtx) statusNames(e *EntityDef, productID string) ([]string, *AqlError) {
+	if productID == "" {
+		return nil, nil
 	}
-	return ""
-}
-
-func (r *run) w25Product(recordProduct, value string) string {
-	if recordProduct != "" {
-		if k := r.productKeyOf(recordProduct); k != "" {
-			return k
-		}
-	}
-	if i := strings.Index(value, "-"); i > 0 {
-		if p := r.productWithKey(value[:i]); p != nil {
-			return p.Key
-		}
-	}
-	return keyMark
-}
-
-func (r *run) errW25(kind, value, recordProduct string) *AqlError {
-	ke := entityOfKind(kind)
-	name := kind + "s"
-	if ke != nil {
-		name = ke.Name
-	}
-	return aqlErr("not_found", "there is no %s with the id %s. To find the id, use the query tool: SELECT id, name FROM %s WHERE product = '%s'",
-		kind, quoteVal(value), name, r.w25Product(recordProduct, value))
-}
-
-// checkValues is check-write-values.
-func (r *run) checkValues(e *EntityDef, fields []Assign, productID string, parentKind, parent string, formOnly bool) ([]checked, *AqlError) {
-	var out []checked
-	for _, a := range fields {
-		if cf := r.custom[a.Field]; cf != nil && strings.HasPrefix(a.Field, "custom.") {
-			v, err := r.checkCustom(cf, a.Value)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, checked{Field: a.Field, Value: v, Custom: cf})
-			continue
-		}
-		f := e.Field(a.Field)
-		var v any
-		var err *AqlError
-		switch {
-		case f.Name == "tags" && e.Name == "features":
-			s, ok := a.Value.(string)
-			if !ok {
-				return nil, aqlErr("bad_value", "%s must be text in single quotes", f.Name)
-			}
-			v = splitList(s)
-		case f.Type == ftStatus:
-			if s, ok := a.Value.(string); !ok {
-				return nil, aqlErr("bad_value", "%s must be text in single quotes", f.Name)
-			} else if formOnly {
-				v = s
-			} else {
-				v, err = r.checkStatus(e, s, productID, parentKind, parent)
-			}
-		default:
-			v, err = r.checkByType(f.Name, f.Type, f.RefKind, a.Value, productID)
-		}
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, checked{Field: f.Name, Value: v})
-	}
-	return out, nil
-}
-
-func (r *run) checkByType(name string, t FieldType, refKind_ string, val any, productID string) (any, *AqlError) {
-	switch t {
-	case ftString, ftText:
-		s, ok := val.(string)
-		if !ok {
-			return nil, aqlErr("bad_value", "%s must be text in single quotes", name)
-		}
-		return s, nil
-	case ftNumber:
-		f, ok := numberOf(val)
-		if _, isBool := val.(bool); !ok || isBool {
-			return nil, aqlErr("bad_value", "%s must be a number", name)
-		}
-		return f, nil
-	case ftBoolean:
-		switch x := val.(type) {
-		case bool:
-			return x, nil
-		case string:
-			switch strings.ToLower(strings.TrimSpace(x)) {
-			case "true":
-				return true, nil
-			case "false":
-				return false, nil
-			}
-		}
-		return nil, aqlErr("bad_value", "%s must be true or false", name)
-	case ftDate:
-		s, _ := val.(string)
-		if len(s) > 10 && isDay(s[:10]) && (s[10] == 'T' || s[10] == ' ') {
-			return s[:10], nil
-		}
-		if isDay(s) {
-			return s, nil
-		}
-		return nil, aqlErr("bad_value", "%s: invalid date %s, use YYYY-MM-DD", name, quoteVal(val))
-	case ftUser:
-		s, ok := val.(string)
-		if ok && isMe(s) {
-			me, err := r.currentUser()
-			if err != nil {
-				return nil, err
-			}
-			return str(me["email"]), nil
-		}
-		if ok && (reEmail.MatchString(strings.TrimSpace(s)) || isNumericID(strings.TrimSpace(s))) {
-			return strings.TrimSpace(s), nil
-		}
-		return nil, aqlErr("bad_value", "%s: there is no user %s. Use an e-mail address, or 'me' for yourself", name, quoteVal(val))
-	case ftReference:
-		s := textOf(val)
-		if refKind(s) == refKind_ || isNumericID(s) {
-			return strings.ToUpper(s), nil
-		}
-		p, err := r.findProduct(val)
-		if err != nil {
-			return nil, err
-		}
-		if p != nil {
-			recs, err := r.recordsOfKind(refKind_, p)
-			if err != nil {
-				return nil, err
-			}
-			return nil, aqlErr("wrong_kind", "%s is a product, not a %s. Use the id of one of its %s: %s", quoteVal(s), refKind_, entityOfKind(refKind_).Name, recs)
-		}
-		return nil, r.errW25(refKind_, s, productID)
-	}
-	return val, nil
-}
-
-func (r *run) statusNames(e *EntityDef, productID string) ([]string, *AqlError) {
-	srs, err := r.statusRecords(productID)
+	groups, err := sc.productStatuses(productID)
 	if err != nil {
 		return nil, err
 	}
-	var names []string
-	for _, sr := range srs {
-		if sr.Entity == e.Name {
-			names = append(names, sr.Name)
-		}
-	}
-	return names, nil
-}
-
-func (r *run) checkStatus(e *EntityDef, value, productID, parentKind, parent string) (any, *AqlError) {
-	if productID == "" && parentKind != "" && parentKind != "product" {
-		pe := entityOfKind(parentKind)
-		route := routeWith(pe.RouteFor("id"), "v", parent)
-		rec, f := r.get(route, pe.Singular)
-		if f != nil {
-			if f.Kind == failNotFound {
-				return nil, r.errW25(parentKind, parent, "")
+	for _, g := range groups {
+		if g.entity == e.Name {
+			var out []string
+			for _, s := range g.names {
+				out = append(out, strOf(s["name"]))
 			}
-			return nil, r.failErr(f, "GET", route)
-		}
-		productID = str(rec["product_id"])
-	}
-	names, err := r.statusNames(e, productID)
-	if err != nil {
-		return nil, err
-	}
-	for _, n := range names {
-		if textEq(n, value) {
-			return n, nil
+			return out, nil
 		}
 	}
-	l := "(none)"
-	if len(names) > 0 {
-		l = strings.Join(names, ", ")
-	}
-	return nil, aqlErr("bad_value", "workflow status %s not found for %s; valid statuses: %s", quoteVal(value), e.Singular, l)
+	return nil, nil
 }
 
-func (r *run) matchOption(cf *CustomField, v string) (string, bool, *AqlError) {
-	opts, err := r.optionsOf(cf)
-	if err != nil {
-		return "", false, err
-	}
-	for _, o := range opts {
-		if textEq(o, v) {
-			return o, true, nil
+// checkCustom checks a custom value by its kind (check-write-values, step 10).
+func (sc *stmtCtx) checkCustom(cf *CustomField, name string, v Value) (checked, *AqlError) {
+	c := checked{field: name, custom: cf}
+	mustText := func() *AqlError {
+		if v.kind != vText {
+			return aqlErr("bad_value", "%s must be text in single quotes", name)
 		}
+		return nil
 	}
-	return "", false, nil
-}
-
-func (r *run) errW32(cf *CustomField, v string) *AqlError {
-	opts, _ := r.optionsOf(cf)
-	return aqlErr("bad_value", "%s: there is no option %s. Options: %s", cf.Name, quoteVal(v), listMax(opts))
-}
-
-func (r *run) checkCustom(cf *CustomField, val any) (any, *AqlError) {
-	text := func() (string, *AqlError) {
-		s, ok := val.(string)
-		if !ok {
-			return "", aqlErr("bad_value", "%s must be text in single quotes", cf.Name)
+	matchOption := func(s string) (string, bool, *AqlError) {
+		opts, err := sc.optionsOf(cf)
+		if err != nil {
+			return "", false, err
 		}
-		return s, nil
+		for _, o := range opts {
+			if textEq(o, s) {
+				return o, true, nil
+			}
+		}
+		return "", false, nil
 	}
-	switch cf.Kind {
+	optionsErr := func(s string) *AqlError {
+		opts, _ := sc.optionsOf(cf)
+		return aqlErr("bad_value", "%s: there is no option %s. Options: %s", name, quote(s), listMax(opts))
+	}
+	switch cf.kind() {
 	case "text", "url", "note", "choice":
-		return text()
-	case "number":
-		return r.checkByType(cf.Name, ftNumber, "", val, "")
-	case "date":
-		return r.checkByType(cf.Name, ftDate, "", val, "")
-	case "fixed_choice":
-		s, err := text()
-		if err != nil || s == "" {
-			return s, err
+		if err := mustText(); err != nil {
+			return c, err
 		}
-		o, ok, err := r.matchOption(cf, s)
+		c.val = v.s
+	case "number":
+		n, ok := toNumber(v.raw())
+		if !ok || v.kind == vBool {
+			return c, aqlErr("bad_value", "%s must be a number", name)
+		}
+		c.val = n
+	case "date":
+		d, ok := checkDate(v)
+		if !ok {
+			return c, aqlErr("bad_value", "%s: invalid date %s, use YYYY-MM-DD", name, quote(v.written()))
+		}
+		c.val = d
+	case "fixed_choice":
+		if err := mustText(); err != nil {
+			return c, err
+		}
+		if v.s == "" {
+			c.val = ""
+			break
+		}
+		o, ok, err := matchOption(v.s)
 		if err != nil {
-			return nil, err
+			return c, err
 		}
 		if !ok {
-			return nil, r.errW32(cf, s)
+			return c, optionsErr(v.s)
 		}
-		return o, nil
-	case "tags", "fixed_tags":
-		s, err := text()
-		if err != nil {
-			return nil, err
+		c.val = o
+	case "tags":
+		if err := mustText(); err != nil {
+			return c, err
 		}
-		tags := splitList(s)
-		if cf.Kind == "fixed_tags" {
-			for i, t := range tags {
-				o, ok, err := r.matchOption(cf, t)
-				if err != nil {
-					return nil, err
-				}
-				if !ok {
-					return nil, r.errW32(cf, t)
-				}
-				tags[i] = o
+		c.val = splitTags(v.s)
+	case "fixed_tags":
+		if err := mustText(); err != nil {
+			return c, err
+		}
+		tags := splitTags(v.s)
+		out := []string{}
+		for _, t := range tags {
+			o, ok, err := matchOption(t)
+			if err != nil {
+				return c, err
 			}
+			if !ok {
+				return c, optionsErr(t)
+			}
+			out = append(out, o)
 		}
-		return tags, nil
+		c.val = out
 	case "users":
-		s, err := text()
-		if err != nil {
-			return nil, err
+		if err := mustText(); err != nil {
+			return c, err
 		}
-		parts := splitList(s)
-		for i, p := range parts {
+		out := []string{}
+		for _, p := range splitParts(v.s) {
 			switch {
-			case isMe(p):
-				me, err := r.currentUser()
+			case isMeWord(p):
+				me, err := sc.currentUser()
 				if err != nil {
-					return nil, err
+					return c, err
 				}
-				parts[i] = str(me["id"])
+				out = append(out, strOf(me["id"]))
 			case reEmail.MatchString(p) || isNumericID(p):
+				out = append(out, p)
 			default:
-				return nil, aqlErr("bad_value", "%s: there is no user %s. Use an e-mail address, or 'me' for yourself", cf.Name, quoteVal(p))
+				return c, aqlErr("bad_value", "%s: there is no user %s. Use an e-mail address, or 'me' for yourself", name, quote(p))
 			}
 		}
-		return parts, nil
+		c.val = out
+	default:
+		return c, aqlErr("bad_name", "the field %s cannot be set.", name)
 	}
-	return nil, aqlErr("bad_name", "the field %s cannot be set", cf.Name)
+	return c, nil
 }
 
 // writeBody is write-request.
-func writeBody(e *EntityDef, fields []checked, insert bool) []byte {
-	var inner Obj
-	var custom Obj
-	customAt := -1
+func writeBody(e *EntityDef, vals []checked, insert bool) string {
+	inner := omap{}
+	cfIndex := -1
+	var cfObj omap
+	smIndex := -1
+	var smName any
 	var goalStatus any
-	for _, c := range fields {
-		if c.Custom != nil {
-			if customAt < 0 {
-				customAt = len(inner)
-				inner = append(inner, KV{"custom_fields", nil})
+	hasGoalStatus := false
+	for _, c := range vals {
+		if c.custom != nil {
+			if cfIndex < 0 {
+				cfIndex = len(inner)
+				inner = append(inner, kv{"custom_fields", nil})
 			}
-			v := c.Value
-			if l, ok := v.([]string); ok {
-				v = l
-			}
-			custom = append(custom, KV{c.Custom.Key, v})
+			cfObj = append(cfObj, kv{c.custom.Key, c.val})
 			continue
 		}
-		f := e.Field(c.Field)
-		if e.Name == "goals" && insert {
-			if f.Name == "success_metric" {
-				inner = append(inner, KV{"success_metric", Obj{{"name", c.Value}}})
-				continue
+		if e.Name == "goals" && c.field == "success_metric" {
+			if insert {
+				smIndex = len(inner)
+				smName = c.val
+				inner = append(inner, kv{"success_metric", nil})
 			}
-			if f.Name == "status" {
-				goalStatus = c.Value
-				continue
-			}
+			continue
 		}
-		name := f.Name
-		if f.RequestMember != "" {
-			name = f.RequestMember
+		if e.Name == "goals" && c.field == "status" && insert {
+			goalStatus, hasGoalStatus = c.val, true
+			continue
 		}
-		v := c.Value
-		if l, ok := v.([]string); ok {
-			v = strings.Join(l, ",")
+		member := c.field
+		switch {
+		case c.field == "status":
+			member = "workflow_status"
+		case c.field == "assigned_to":
+			member = "assigned_to_user"
+		case e.Name == "releases" && c.field == "description":
+			member = "theme"
 		}
-		inner = append(inner, KV{name, v})
-	}
-	if customAt >= 0 {
-		inner[customAt].V = custom
-	}
-	if goalStatus != nil {
-		for i := range inner {
-			if inner[i].K == "success_metric" {
-				o := inner[i].V.(Obj)
-				inner[i].V = append(o, KV{"workflow_status", goalStatus})
-			}
+		val := c.val
+		if l, ok := val.([]string); ok {
+			val = strings.Join(l, ",")
 		}
+		inner = append(inner, kv{member, val})
 	}
-	if inner == nil {
-		inner = Obj{}
+	if cfIndex >= 0 {
+		inner[cfIndex].v = cfObj
 	}
-	return []byte(toJSON(Obj{{e.Singular, inner}}))
-}
-
-func capital(s string) string {
-	if s == "" {
-		return s
-	}
-	return strings.ToUpper(s[:1]) + s[1:]
-}
-
-func (r *run) writeFail(f *ApiFailure, method, route string) *AqlError {
-	switch f.Kind {
-	case failNotAuthorized, failRateLimited, failUnreachable:
-		return r.failErr(f, method, route)
-	}
-	return aqlErr("api_error", "aha: API error (status %d) on %s %s: %s", f.Status, method, route, answerText(f.Text))
-}
-
-// ---- insert-statement ----
-
-func (r *run) insert(st *InsertStmt, dryRun bool, out *writeOutcome) (Obj, *AqlError) {
-	e := st.Entity
-	if st.Parent == nil {
-		pt := map[string]string{"product": "a product", "release": "a release", "feature": "a feature", "any": "the record to comment on"}[e.ParentKind]
-		return nil, aqlErr("bad_value", "parent is required: INSERT needs the column parent with the id of %s. Form: INSERT INTO entity (parent, field, ...) VALUES ('parent id', 'value', ...)", pt)
-	}
-	s := textOf(st.Parent)
-	up := strings.ToUpper(s)
-	var route, parentShown, parentKind, productID string
-	switch e.ParentKind {
-	case "product":
-		p, err := r.resolveProduct(st.Parent, e, false)
-		if err != nil {
-			return nil, err
+	if smIndex >= 0 {
+		sm := omap{{"name", smName}}
+		if hasGoalStatus {
+			sm = append(sm, kv{"workflow_status", goalStatus})
 		}
-		route = routeWith(e.CreateRoute, "v", p.ID)
-		parentShown, parentKind, productID = p.Key, "product", p.ID
-	case "any":
-		k := refKind(s)
-		if !commentableKinds[k] {
-			return nil, aqlErr("wrong_kind", "parent = needs the id of the commented record, for example '%s-23'. Got %s.", keyMark, quoteVal(s))
-		}
-		route = routeWith(commentRoute(k), "v", up)
-		parentShown, parentKind = up, k
-	default:
-		if !(refKind(s) == e.ParentKind || isNumericID(s)) {
-			p, err := r.findProduct(st.Parent)
-			if err != nil {
-				return nil, err
-			}
-			if p != nil {
-				recs, err := r.recordsOfKind(e.ParentKind, p)
-				if err != nil {
-					return nil, err
-				}
-				return nil, aqlErr("wrong_kind", "%s is a product, not a %s. Use the id of one of its %s: %s", quoteVal(s), e.ParentKind, entityOfKind(e.ParentKind).Name, recs)
-			}
-			return nil, r.errW25(e.ParentKind, s, "")
-		}
-		route = routeWith(e.CreateRoute, "v", up)
-		parentShown, parentKind = up, e.ParentKind
+		inner[smIndex].v = sm
 	}
-	required := "name"
-	if e.Name == "comments" {
-		required = "body"
-	}
-	missing := func(f string) bool {
-		for _, a := range st.Fields {
-			if a.Field == f {
-				s, ok := a.Value.(string)
-				return ok && strings.TrimSpace(s) == ""
-			}
-		}
-		return true
-	}
-	if missing(required) {
-		return nil, aqlErr("bad_value", "%s is required to create a %s", required, e.Singular)
-	}
-	if e.Name == "goals" && missing("success_metric") {
-		return nil, aqlErr("bad_value", "success_metric is required to create a goal")
-	}
-	fields, err := r.checkValues(e, st.Fields, productID, parentKind, up, false)
-	if err != nil {
-		return nil, err
-	}
-	if dryRun {
-		res := Obj{}
-		for _, c := range fields {
-			res = append(res, KV{c.Field, display(c.Value)})
-		}
-		res = append(res, KV{"message", fmt.Sprintf("would create %s under %s", e.Singular, parentShown)})
-		return res, nil
-	}
-	body := writeBody(e, fields, true)
-	ans, f := apiCall(r.s.acct, http.MethodPost, route, nil, body, e.Singular, false)
-	if f != nil {
-		if f.Kind == failNotFound {
-			return nil, r.errW25(parentKind, s, productID)
-		}
-		return nil, r.writeFail(f, "POST", route)
-	}
-	rec := r.convert(e, fetched{api: ans[e.Singular].(map[string]any), knownParent: parentShown}, nil, map[string]bool{})
-	id := textOf(rec.vals[e.IDField()])
-	out.id = strings.ToUpper(id)
-	res := Obj{{"id", id}}
-	if e.Name == "comments" {
-		res = append(res, KV{"parent", parentShown}, KV{"body", rec.vals["body"]}, KV{"created_at", rec.vals["created_at"]})
-		res = append(res, KV{"message", "Comment added to " + parentShown})
-		return res, nil
-	}
-	name := rec.vals["name"]
-	if name == nil {
-		for _, c := range fields {
-			if c.Field == "name" {
-				name = c.Value
-			}
-		}
-	}
-	res = append(res, KV{"name", name}, KV{"parent", parentShown}, KV{"message", fmt.Sprintf("%s %s created", capital(e.Singular), id)})
-	return res, nil
-}
-
-// ---- update-statement and delete-statement ----
-
-func (r *run) checkID(e *EntityDef, id any) (string, *AqlError) {
-	s := textOf(id)
-	k := refKind(s)
-	if e.Name == "comments" {
-		if isNumericID(s) {
-			return s, nil
-		}
-	} else if isNumericID(s) || (k != "" && k == e.Kind) {
-		return strings.ToUpper(s), nil
-	}
-	if k != "" {
-		return "", aqlErr("wrong_kind", "%s is the id of a %s, not of a %s. To read it: SELECT * FROM %s WHERE id = '%s'", quoteVal(s), k, e.Kind, entityOfKind(k).Name, strings.ToUpper(s))
-	}
-	if e.Name == "comments" {
-		return "", aqlErr("wrong_kind", "%s is not the id of a comment. To find the id: SELECT id, body FROM comments WHERE parent = '%s-23'", quoteVal(s), keyMark)
-	}
-	return "", aqlErr("wrong_kind", "%s is not an id. An id looks like '%s'. To search by name: SELECT * FROM %s WHERE name CONTAINS %s", quoteVal(s), exampleID(e.Kind), e.Name, quoteVal(s))
-}
-
-// readForWrite reads the record by its id and checks the guards.
-func (r *run) readForWrite(e *EntityDef, id string, assigned, guards []Assign) (*Record, *AqlError) {
-	route := routeWith(e.UpdateRoute, "id", id)
-	if e.RouteFor("id") != "" {
-		route = routeWith(e.RouteFor("id"), "v", id)
-	}
-	api, f := r.get(route, e.Singular)
-	if f != nil {
-		if f.Kind == failNotFound {
-			return nil, aqlErr("not_found", "there is no %s with the id %s", e.Singular, quoteVal(id))
-		}
-		return nil, r.failErr(f, "GET", route)
-	}
-	used := map[string]bool{}
-	var custom []*CustomField
-	for _, a := range append(append([]Assign{}, assigned...), guards...) {
-		used[a.Field] = true
-		if cf := r.custom[a.Field]; cf != nil && strings.HasPrefix(a.Field, "custom.") {
-			custom = append(custom, cf)
-		}
-	}
-	gc := &AllOf{}
-	for _, g := range guards {
-		gc.Members = append(gc.Members, &Cmp{Field: g.Field, Op: "=", Value: g.Value})
-	}
-	if err := r.condLookups(e, gc, map[Cond]bool{}); err != nil {
-		return nil, err
-	}
-	rec := r.convert(e, fetched{api: api}, custom, used)
-	recID := textOf(rec.vals[e.IDField()])
-	if recID == "" {
-		recID = id
-	}
-	for i, g := range guards {
-		if !r.eval(rec, gc.Members[i], e, map[Cond]bool{}) {
-			cur := rec.vals[g.Field]
-			if noValue(cur) {
-				return nil, aqlErr("guard_failed", "nothing was changed: %s %s has no %s, not %s", e.Singular, recID, g.Field, quoteVal(g.Value))
-			}
-			return nil, aqlErr("guard_failed", "nothing was changed: %s %s has %s = %s, not %s", e.Singular, recID, g.Field, quoteVal(cur), quoteVal(g.Value))
-		}
-	}
-	return rec, nil
-}
-
-func (r *run) update(st *UpdateStmt, dryRun bool, out *writeOutcome) (Obj, *AqlError) {
-	e := st.Entity
-	id, err := r.checkID(e, st.ID)
-	if err != nil {
-		return nil, err
-	}
-	rec, err := r.readForWrite(e, id, st.Fields, st.Guards)
-	if err != nil {
-		return nil, err
-	}
-	if v := textOf(rec.vals[e.IDField()]); v != "" {
-		id = v
-	}
-	productID := str(rec.api["product_id"])
-	fields, err := r.checkValues(e, st.Fields, productID, "", "", false)
-	if err != nil {
-		return nil, err
-	}
-	if dryRun {
-		res := Obj{{"id", id}}
-		for _, c := range fields {
-			res = append(res, KV{c.Field, display(c.Value)})
-		}
-		res = append(res, KV{"message", fmt.Sprintf("would update %s %s", e.Singular, id)})
-		return res, nil
-	}
-	route := routeWith(e.UpdateRoute, "id", id)
-	ans, f := apiCall(r.s.acct, http.MethodPut, route, nil, writeBody(e, fields, false), e.Singular, false)
-	if f != nil {
-		if f.Kind == failNotFound {
-			var refs []checked
-			for _, c := range fields {
-				if c.Custom == nil && e.Field(c.Field).Type == ftReference {
-					refs = append(refs, c)
-				}
-			}
-			if len(refs) == 1 {
-				return nil, r.errW25(e.Field(refs[0].Field).RefKind, textOf(refs[0].Value), productID)
-			}
-		}
-		return nil, r.writeFail(f, "PUT", route)
-	}
-	var custom []*CustomField
-	used := map[string]bool{}
-	for _, c := range fields {
-		used[c.Field] = true
-		if c.Custom != nil {
-			custom = append(custom, c.Custom)
-		}
-	}
-	after := r.convert(e, fetched{api: ans[e.Singular].(map[string]any)}, custom, used)
-	res := Obj{{"id", id}}
-	if e.Name == "comments" {
-		res = append(res, KV{"parent", after.vals["parent"]})
-	} else {
-		res = append(res, KV{"name", after.vals["name"]})
-	}
-	for _, c := range fields {
-		res = append(res, KV{c.Field, after.vals[c.Field]})
-	}
-	msg := fmt.Sprintf("%s %s updated", capital(e.Singular), id)
-	if len(fields) == 1 && fields[0].Field == "status" {
-		msg = fmt.Sprintf("%s %s status changed to %s", capital(e.Singular), id, quoteVal(after.vals["status"]))
-	}
-	res = append(res, KV{"message", msg})
-	return res, nil
-}
-
-func (r *run) delete(st *DeleteStmt, dryRun bool, out *writeOutcome) (Obj, *AqlError) {
-	e := st.Entity
-	id, err := r.checkID(e, st.ID)
-	if err != nil {
-		return nil, err
-	}
-	rec, err := r.readForWrite(e, id, nil, st.Guards)
-	if err != nil {
-		return nil, err
-	}
-	if v := textOf(rec.vals[e.IDField()]); v != "" {
-		id = v
-	}
-	if dryRun {
-		return Obj{{"id", id}, {"message", fmt.Sprintf("would delete %s %s", e.Singular, id)}}, nil
-	}
-	route := routeWith(e.DeleteRoute, "id", id, "product", str(rec.api["product_id"]))
-	if _, f := apiCall(r.s.acct, http.MethodDelete, route, nil, nil, "", false); f != nil {
-		return nil, r.writeFail(f, "DELETE", route)
-	}
-	return Obj{{"id", id}, {"message", fmt.Sprintf("%s %s deleted", capital(e.Singular), id)}}, nil
+	return encodeJSON(omap{{e.Singular, inner}})
 }

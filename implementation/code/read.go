@@ -1,9 +1,6 @@
-// generated from spec: aha-aql.spec.md sha256:9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262
+// generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
 
 package main
-
-// read-statement, plan-fetch, convert-record, evaluate-condition,
-// build-rows and describe-statement.
 
 import (
 	"encoding/json"
@@ -15,1147 +12,648 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
-// ---- helpers on conditions ----
-
-func conjuncts(c Cond) []Cond {
-	switch x := c.(type) {
-	case nil:
-		return nil
-	case *AllOf:
-		return x.Members
-	}
-	return []Cond{c}
-}
-
-func eqConj(c Cond, field string) (*Cmp, bool) {
-	if cmp, ok := c.(*Cmp); ok && cmp.Field == field && cmp.Op == "=" {
-		return cmp, true
-	}
-	return nil, false
-}
-
-func walkCond(c Cond, fn func(Cond)) {
-	if c == nil {
-		return
-	}
-	fn(c)
-	switch x := c.(type) {
-	case *AllOf:
-		for _, m := range x.Members {
-			walkCond(m, fn)
-		}
-	case *AnyOf:
-		for _, m := range x.Members {
-			walkCond(m, fn)
-		}
-	case *Negation:
-		walkCond(x.Member, fn)
-	}
-}
-
-func condFields(c Cond, out map[string]bool) {
-	walkCond(c, func(x Cond) {
-		switch y := x.(type) {
-		case *Cmp:
-			out[y.Field] = true
-		case *NullTest:
-			out[y.Field] = true
-		case *InList:
-			out[y.Field] = true
-		}
-	})
-}
-
-var exampleIDs = map[string]string{"feature": "{KEY}-23", "release": "{KEY}-R-3", "initiative": "{KEY}-S-1", "epic": "{KEY}-E-1",
-	"goal": "{KEY}-G-1", "idea": "{KEY}-I-1", "requirement": "{KEY}-23-1", "product": "{KEY}", "comment": "{KEY}-23"}
-
-func exampleID(kind string) string { return withKey(exampleIDs[kind]) }
-
-func article(word string) string {
-	if word != "" && strings.ContainsRune("aeiouAEIOU", rune(word[0])) {
-		return "an " + word
-	}
-	return "a " + word
-}
-
-// ---- fetched records ----
-
-type fetched struct {
-	api          map[string]any
-	knownProduct *Product
-	knownParent  string
-}
-
-type fetchResult struct {
-	recs      []fetched
-	scope     string
-	total     *int
-	applied   map[Cond]bool
-	countOnly bool
-}
-
-type listOpts struct {
-	short     bool // count only and early end may apply
-	allApply  bool
-	custom    bool
-	used      map[string]bool
-	q         string
-	accountWd bool
-}
-
-func (r *run) readList(st *ReadStmt, route string, o listOpts) ([]map[string]any, *int, bool, *AqlError) {
-	e := st.Entity
-	countOnly := o.short && o.allApply && len(st.Items) == 1 && st.Items[0].Fn == "COUNT" && st.Items[0].Field == "" && !st.Items[0].Distinct && len(st.GroupBy) == 0
-	early := o.short && o.allApply && len(st.OrderBy) == 0 && len(st.GroupBy) == 0 && !st.Distinct && !hasAggregate(st)
-	limit := effectiveLimit(st)
-	fields := listFields(e, o.used, o.custom)
-	var acc []map[string]any
-	for page := 1; ; page++ {
-		p := url.Values{}
-		p.Set("page", strconv.Itoa(page))
-		p.Set("per_page", strconv.Itoa(pageSize))
-		p.Set("fields", strings.Join(fields, ","))
-		if o.q != "" {
-			p.Set("q", o.q)
-		}
-		lp, f := r.list(route, p)
-		if f != nil {
-			if f.Kind == failNotFound {
-				return nil, nil, false, errNotFoundList
-			}
-			return nil, nil, false, r.failErr(f, "GET", route)
-		}
-		if page == 1 {
-			if countOnly {
-				t := lp.TotalRecords
-				return nil, &t, true, nil
-			}
-			if o.custom && len(lp.Records) > 0 {
-				has := false
-				for _, rec := range lp.Records {
-					if _, ok := rec["custom_fields"]; ok {
-						has = true
-					}
-				}
-				if !has {
-					return nil, nil, false, aqlErr("api_error", "Aha! returned this list of %s without custom fields. A record that is read by its id has them: add %s = '...' to WHERE.", e.Name, e.IDField())
-				}
-			}
-			if lp.TotalPages > maxPages && !(early && len(lp.Records) >= limit) {
-				return nil, nil, false, r.errC02(st, lp.TotalRecords, o.accountWd)
-			}
-		}
-		acc = append(acc, lp.Records...)
-		if early && len(acc) >= limit {
-			if page < lp.TotalPages {
-				t := lp.TotalRecords
-				return acc, &t, false, nil
-			}
-			return acc, nil, false, nil
-		}
-		if page >= lp.TotalPages || len(lp.Records) == 0 {
-			return acc, nil, false, nil
-		}
-	}
-}
-
-// errNotFoundList marks a list route that answered NotFound (K07).
-var errNotFoundList = &AqlError{Kind: "not_found", Message: "\x00list"}
-
-func (r *run) errC02(st *ReadStmt, total int, accountWide bool) *AqlError {
-	var hint string
-	if accountWide {
-		hint = "Narrow it down, for example with product = '" + keyMark + "'"
-	} else {
-		usedF := map[string]bool{}
-		condFields(st.Where, usedF)
-		for _, pf := range st.Entity.ParentFilters {
-			if pf == "product" || usedF[pf] {
-				continue
-			}
-			kind := pf
-			if f := st.Entity.Field(pf); f != nil && f.RefKind != "" {
-				kind = f.RefKind
-			}
-			if pf == "parent" {
-				kind = "feature"
-			}
-			hint = fmt.Sprintf("Narrow it down, for example with %s = '%s'", pf, exampleID(kind))
-			break
-		}
-		if hint == "" {
-			hint = "Use LIMIT without ORDER BY, GROUP BY and DISTINCT to read the first records, or COUNT(*) alone to count them."
-		}
-	}
-	return aqlErr("scope", "this would read %d records. %s", total, hint)
-}
-
-func hasAggregate(st *ReadStmt) bool {
-	for _, it := range st.Items {
-		if it.Fn != "" {
-			return true
-		}
-	}
-	return false
-}
-
-func effectiveLimit(st *ReadStmt) int {
-	l := defaultLimit
-	if st.Limit != nil {
-		l = *st.Limit
-	}
-	if l > maxLimit {
-		l = maxLimit
-	}
-	return l
-}
-
-func errC01(e *EntityDef) *AqlError {
-	switch e.Name {
-	case "comments":
-		return aqlErr("scope", "comments are listed per record: add parent = '...' to WHERE. Example: %s", exampleOf(e))
-	case "statuses":
-		return aqlErr("scope", "statuses are listed per product: add product = '...' to WHERE. Example: %s", exampleOf(e))
-	}
-	var parents, conds []string
-	for _, rt := range e.ReadRoutes {
-		if rt.Field == "id" {
-			continue
-		}
-		parents = append(parents, rt.Field)
-		conds = append(conds, rt.Field+" = '...'")
-	}
-	return aqlErr("scope", "%s are listed per %s: add %s to WHERE. Example: %s", e.Name, strings.Join(parents, " or "), strings.Join(conds, " or "), exampleOf(e))
-}
-
-// wrongKind gives the message of plan-fetch step 4.
-func (r *run) wrongKind(st *ReadStmt, field string, value any) *AqlError {
-	e := st.Entity
-	s := textOf(value)
-	k := refKind(s)
-	up := strings.ToUpper(s)
-	expected := e.Kind
-	if field != "id" {
-		if f := e.Field(field); f != nil && f.RefKind != "" {
-			expected = f.RefKind
-		}
-	}
-	if k != "" && field == "id" {
-		for _, rt := range e.ReadRoutes {
-			if rt.Field == k || (rt.Field == "parent" && commentableKinds[k]) {
-				return aqlErr("wrong_kind", "%s is the id of a %s, not of a %s. For the %s of that %s: SELECT * FROM %s WHERE %s = '%s'", quoteVal(s), k, e.Singular, e.Name, k, e.Name, k, up)
-			}
-		}
-	}
-	if k != "" {
-		return aqlErr("wrong_kind", "%s is the id of a %s, not of a %s. To read it: SELECT * FROM %s WHERE id = '%s'", quoteVal(s), k, expected, entityOfKind(k).Name, up)
-	}
-	if e.HasParentFilter("product") {
-		p, err := r.findProduct(value)
-		if err != nil {
-			return err
-		}
-		if p != nil {
-			return aqlErr("wrong_kind", "%s is a product, not a %s. Use: WHERE product = '%s'", quoteVal(s), expected, p.Key)
-		}
-	}
-	if field == "id" {
-		if e.Name == "comments" {
-			return aqlErr("wrong_kind", "%s is not the id of a comment. To find the id: SELECT id, body FROM comments WHERE parent = '%s-23'", quoteVal(s), keyMark)
-		}
-		return aqlErr("wrong_kind", "%s is not an id. An id looks like '%s'. To search by name: SELECT * FROM %s WHERE name CONTAINS %s", quoteVal(s), exampleID(e.Kind), e.Name, quoteVal(s))
-	}
-	fe := entityOfKind(expected)
-	if field == "release" || field == "initiative" || field == "epic" {
-		for _, c := range conjuncts(st.Where) {
-			if cmp, ok := eqConj(c, "product"); ok {
-				p, err := r.findProduct(cmp.Value)
-				if err != nil {
-					return err
-				}
-				if p != nil {
-					recs, err := r.recordsOfKind(expected, p)
-					if err != nil {
-						return err
-					}
-					return aqlErr("wrong_kind", "%s = needs the id of the %s, not its name. The %s of %s: %s", field, field, fe.Name, p.Key, recs)
-				}
-			}
-		}
-	}
-	return aqlErr("wrong_kind", "%s = needs the id of the %s, for example '%s', not its name. To find the id: SELECT id, name FROM %s WHERE product = '%s'", field, field, exampleID(expected), fe.Name, keyMark)
-}
-
-// recordsOfKind lists the records of a kind in a product with one list request.
-func (r *run) recordsOfKind(kind string, p *Product) (string, *AqlError) {
-	e := entityOfKind(kind)
-	route := routeWith(e.RouteFor("product"), "v", p.ID)
-	params := url.Values{}
-	params.Set("page", "1")
-	params.Set("per_page", strconv.Itoa(pageSize))
-	params.Set("fields", "reference_num,name")
-	lp, f := r.list(route, params)
-	if f != nil {
-		return "", r.failErr(f, "GET", route)
-	}
-	var items []string
-	for _, rec := range lp.Records {
-		items = append(items, fmt.Sprintf("%s (%s)", str(rec["reference_num"]), str(rec["name"])))
-	}
-	if len(items) == 0 {
-		return "none", nil
-	}
-	if lp.TotalRecords > len(items) && len(items) >= maxListed {
-		return strings.Join(items[:maxListed], ", ") + fmt.Sprintf(", and %d more", lp.TotalRecords-maxListed), nil
-	}
-	return listMax(items), nil
-}
-
-// readOne is plan-fetch step 3: reading one route for one value.
-func (r *run) readOne(st *ReadStmt, field string, value any, o listOpts) ([]fetched, string, *int, bool, *AqlError) {
-	e := st.Entity
-	s := textOf(value)
-	up := strings.ToUpper(s)
-	k := refKind(s)
-	switch {
-	case field == "id":
-		ok := isNumericID(s) || (e.Name != "comments" && k != "" && k == e.Kind)
-		if !ok {
-			return nil, "", nil, false, r.wrongKind(st, field, value)
-		}
-		route := routeWith(e.RouteFor("id"), "v", up)
-		rec, f := r.get(route, e.Singular)
-		if f != nil {
-			if f.Kind == failNotFound {
-				return nil, e.Singular + " " + up, nil, false, nil
-			}
-			return nil, "", nil, false, r.failErr(f, "GET", route)
-		}
-		idv := str(source(rec, e.Field("id").Source))
-		if idv == "" {
-			idv = up
-		}
-		return []fetched{{api: rec}}, e.Singular + " " + idv, nil, false, nil
-	case field == "product":
-		p, err := r.resolveProduct(value, e, true)
-		if err != nil {
-			return nil, "", nil, false, err
-		}
-		route := routeWith(e.RouteFor("product"), "v", p.ID)
-		recs, total, co, err := r.readList(st, route, o)
-		if err != nil {
-			return nil, "", nil, false, r.k07(err, "product", s)
-		}
-		return wrap(recs, p, ""), "product " + p.Key, total, co, nil
-	case field == "parent" && e.Name == "comments":
-		var route, scope string
-		var kp *Product
-		if commentableKinds[k] {
-			route = routeWith(commentRoute(k), "v", up)
-			scope = k + " " + up
-		} else {
-			p, err := r.findProduct(value)
-			if err != nil {
-				return nil, "", nil, false, err
-			}
-			if p == nil {
-				return nil, "", nil, false, aqlErr("wrong_kind", "parent = needs the id of the commented record, for example '%s-23'. Got %s.", keyMark, quoteVal(s))
-			}
-			route = routeWith(commentRoute("product"), "v", p.ID)
-			scope = "product " + p.Key
-			kp = p
-		}
-		recs, total, co, err := r.readList(st, route, o)
-		if err != nil {
-			return nil, "", nil, false, r.k07(err, k, s)
-		}
-		parent := up
-		if kp != nil {
-			parent = kp.Key
-		}
-		return wrap(recs, kp, parent), scope, total, co, nil
-	}
-	fdef := e.Field(field)
-	kind := field
-	if fdef != nil && fdef.RefKind != "" {
-		kind = fdef.RefKind
-	}
-	if !(isNumericID(s) || k == kind) {
-		return nil, "", nil, false, r.wrongKind(st, field, value)
-	}
-	route := routeWith(e.RouteFor(field), "v", up)
-	recs, total, co, err := r.readList(st, route, o)
-	if err != nil {
-		return nil, "", nil, false, r.k07(err, kind, s)
-	}
-	return wrap(recs, nil, up), field + " " + up, total, co, nil
-}
-
-func (r *run) k07(err *AqlError, kind, value string) *AqlError {
-	if err != errNotFoundList {
-		return err
-	}
-	ex := ""
-	if ke := entityOfKind(kind); ke != nil {
-		ex = exampleOf(ke)
-	}
-	return aqlErr("not_found", "there is no %s with the id %s. To find it: %s", kind, quoteVal(value), ex)
-}
-
-func wrap(recs []map[string]any, p *Product, parent string) []fetched {
-	out := make([]fetched, 0, len(recs))
-	for _, rec := range recs {
-		out = append(out, fetched{api: rec, knownProduct: p, knownParent: parent})
-	}
-	return out
-}
-
-func (r *run) planFetch(st *ReadStmt, used map[string]bool, hasCustom bool) (*fetchResult, *AqlError) {
-	e := st.Entity
-	res := &fetchResult{applied: map[Cond]bool{}}
-	conj := conjuncts(st.Where)
-	switch e.Fixed {
-	case "me":
-		m, err := r.currentUser()
-		if err != nil {
-			return nil, err
-		}
-		res.recs, res.scope = []fetched{{api: m}}, "current user"
-		return res, r.lookups(st, res)
-	case "products":
-		res.scope = "all products"
-		if hasCustom {
-			recs, _, _, err := r.readList(st, "/products", listOpts{custom: true, used: used})
-			if err != nil {
-				return nil, err
-			}
-			res.recs = wrap(recs, nil, "")
-		} else {
-			if _, err := r.productList(); err != nil {
-				return nil, err
-			}
-			res.recs = wrap(r.productRecs, nil, "")
-		}
-		return res, r.lookups(st, res)
-	case "users":
-		res.scope = "all users"
-		recs, total, co, err := r.readList(st, "/users", listOpts{short: true, allApply: len(conj) == 0, used: used, accountWd: true})
-		if err != nil {
-			return nil, err
-		}
-		res.recs, res.total, res.countOnly = wrap(recs, nil, ""), total, co
-		return res, r.lookups(st, res)
-	case "statuses":
-		var pc *Cmp
-		for _, c := range conj {
-			if cmp, ok := eqConj(c, "product"); ok {
-				pc = cmp
-				break
-			}
-		}
-		if pc == nil {
-			return nil, errC01(e)
-		}
-		p, err := r.resolveProduct(pc.Value, e, true)
-		if err != nil {
-			return nil, err
-		}
-		srs, err := r.statusRecords(p.ID)
-		if err != nil {
-			return nil, err
-		}
-		for _, sr := range srs {
-			res.recs = append(res.recs, fetched{api: map[string]any{"name": sr.Name, "entity": sr.Entity, "_prefix": sr.Prefix,
-				"position": sr.Position, "complete": sr.Complete}, knownProduct: p})
-		}
-		res.scope = "product " + p.Key
-		res.applied[pc] = true
-		return res, r.lookups(st, res)
-	}
-	allApplied := func(extra Cond) bool {
-		for _, c := range conj {
-			if c != extra && !res.applied[c] {
-				return false
-			}
-		}
-		return true
-	}
-	// step 2: a route by an id or a parent
-	for _, rt := range e.ReadRoutes {
-		if rt.Field == "product" {
-			continue
-		}
-		for _, c := range conj {
-			cmp, ok := eqConj(c, rt.Field)
-			if !ok {
-				continue
-			}
-			if _, isBool := cmp.Value.(bool); isBool {
-				continue
-			}
-			recs, scope, total, co, err := r.readOne(st, rt.Field, cmp.Value, listOpts{short: true, allApply: allApplied(c), custom: hasCustom, used: used})
-			if err != nil {
-				return nil, err
-			}
-			res.recs, res.scope, res.total, res.countOnly = recs, scope, total, co
-			res.applied[c] = true
-			return res, r.lookups(st, res)
-		}
-	}
-	// step 5: a list of values
-	for _, c := range conj {
-		in, ok := c.(*InList)
-		if !ok || len(in.Values) > maxInValues || e.RouteFor(in.Field) == "" && !(e.Name == "comments" && in.Field == "parent") {
-			continue
-		}
-		var scopes []string
-		seen := map[string]bool{}
-		for _, v := range in.Values {
-			if v == nil {
-				continue
-			}
-			recs, scope, _, _, err := r.readOne(st, in.Field, v, listOpts{custom: hasCustom, used: used})
-			if err != nil {
-				return nil, err
-			}
-			scopes = append(scopes, scope)
-			for _, fr := range recs {
-				key := str(fr.api["id"]) + "|" + str(fr.api["reference_num"])
-				if seen[key] {
-					continue
-				}
-				seen[key] = true
-				res.recs = append(res.recs, fr)
-			}
-		}
-		res.scope = strings.Join(scopes, ", ")
-		res.applied[c] = true
-		return res, r.lookups(st, res)
-	}
-	// step 6: route by product
-	if e.RouteFor("product") != "" {
-		for _, c := range conj {
-			cmp, ok := eqConj(c, "product")
-			if !ok {
-				continue
-			}
-			recs, scope, total, co, err := r.readOne(st, "product", cmp.Value, listOpts{short: true, allApply: allApplied(c), custom: hasCustom, used: used})
-			if err != nil {
-				return nil, err
-			}
-			res.recs, res.scope, res.total, res.countOnly = recs, scope, total, co
-			res.applied[c] = true
-			return res, r.lookups(st, res)
-		}
-	}
-	// step 7: the account-wide list
-	if e.AccountList == "" {
-		return nil, errC01(e)
-	}
-	q := ""
-	if e.NameSearch {
-		for _, c := range conj {
-			if cmp, ok := c.(*Cmp); ok && cmp.Field == "name" && (cmp.Op == "=" || cmp.Op == "contains") {
-				if s, ok := cmp.Value.(string); ok && s != "" {
-					q = s
-					break
-				}
-			}
-		}
-	}
-	recs, total, co, err := r.readList(st, e.AccountList, listOpts{short: true, allApply: allApplied(nil), custom: hasCustom, used: used, q: q, accountWd: true})
-	if err != nil {
-		return nil, err
-	}
-	res.recs, res.scope, res.total, res.countOnly = wrap(recs, nil, ""), "all products", total, co
-	return res, r.lookups(st, res)
-}
-
-// lookups is plan-fetch step 9.
-func (r *run) lookups(st *ReadStmt, res *fetchResult) *AqlError {
-	return r.condLookups(st.Entity, st.Where, res.applied)
-}
-
-func isMe(v any) bool {
-	s, ok := v.(string)
-	if !ok {
-		return false
-	}
-	s = strings.ToLower(strings.TrimSpace(s))
-	return s == "me" || s == "myself" || s == "current_user"
-}
-
-func (r *run) fieldType(e *EntityDef, field string) (FieldType, bool) {
-	if cf := r.custom[field]; cf != nil && strings.HasPrefix(field, "custom.") {
-		return customKindType[cf.Kind], false
-	}
-	if f := e.Field(field); f != nil {
-		return f.Type, f.UserAsName
-	}
-	return ftString, false
-}
-
-func (r *run) condLookups(e *EntityDef, where Cond, applied map[Cond]bool) *AqlError {
-	var needMe, needProducts bool
-	walkCond(where, func(c Cond) {
-		if applied[c] {
-			return
-		}
-		var field string
-		var vals []any
-		switch x := c.(type) {
-		case *Cmp:
-			field, vals = x.Field, []any{x.Value}
-		case *InList:
-			field, vals = x.Field, x.Values
-		default:
-			return
-		}
-		t, _ := r.fieldType(e, field)
-		if t == ftUser {
-			for _, v := range vals {
-				if isMe(v) {
-					needMe = true
-				}
-			}
-		}
-		if t == ftKey {
-			needProducts = true
-		}
-	})
-	if needMe {
-		if _, err := r.currentUser(); err != nil {
-			return err
-		}
-	}
-	if needProducts {
-		if _, err := r.productList(); err != nil {
-			return err
-		}
-	}
-	return nil
+// record is the output of convert-record.
+type record struct {
+	vals  map[string]any        // every field: nil, string, float64 or bool
+	alts  map[string][]string   // other spellings, accepted by conditions
+	multi map[string][][]string // the single values of a field with several values
+	api   apiRec
 }
 
 // ---- convert-record ----
 
-type Record struct {
-	vals  map[string]any
-	spell map[string][]any
-	api   map[string]any
-}
-
 var (
-	reBlockEnd = regexp.MustCompile(`(?i)</\s*(p|li|h[1-6]|div|blockquote|pre|tr|section|article|header|footer|ul|ol|table|dd|dt)\s*>|<\s*br\s*/?\s*>`)
-	reTag      = regexp.MustCompile(`<[^>]*>`)
-	reSpaces   = regexp.MustCompile(`[ \t\f\v\r]+`)
+	reBlockEnd = regexp.MustCompile(`(?i)</\s*(p|li|h[1-6]|div|tr|blockquote|pre|ul|ol|table|section|article|header|footer|dd|dt)\s*>|<\s*(br|hr)\s*/?\s*>`)
+	reTag      = regexp.MustCompile(`(?s)<[^>]*>`)
+	reSpaces   = regexp.MustCompile(`[ \t\f\v\x{00a0}]+`)
 )
 
-func htmlToText(s string) any {
-	s = strings.NewReplacer("\r\n", " ", "\n", " ").Replace(s)
+// htmlText turns HTML into plain text (convert-record, step 2 a).
+func htmlText(s string) any {
 	s = reBlockEnd.ReplaceAllString(s, "\n")
 	s = reTag.ReplaceAllString(s, "")
 	s = html.UnescapeString(s)
-	s = strings.ReplaceAll(s, "\u00a0", " ")
-	var lines []string
-	for _, l := range strings.Split(s, "\n") {
+	var out []string
+	for _, l := range strings.Split(strings.ReplaceAll(s, "\r", ""), "\n") {
 		l = strings.TrimSpace(reSpaces.ReplaceAllString(l, " "))
 		if l != "" {
-			lines = append(lines, l)
+			out = append(out, l)
 		}
 	}
-	if len(lines) == 0 {
+	if len(out) == 0 {
 		return nil
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(out, "\n")
 }
 
-func plainValue(v any) any {
-	switch x := v.(type) {
-	case json.Number:
-		f, err := x.Float64()
-		if err != nil {
-			return x.String()
-		}
+func numberOf(v any) any {
+	if f, ok := toNumber(v); ok {
 		return f
-	case map[string]any, []any:
-		return toJSON(x)
 	}
-	return v
+	return nil
 }
 
-func (r *run) convert(e *EntityDef, fr fetched, custom []*CustomField, used map[string]bool) *Record {
-	api := fr.api
-	rec := &Record{vals: map[string]any{}, spell: map[string][]any{}, api: api}
-	for _, f := range e.Fields {
-		var v any
-		if f.NoSource {
-			if fr.knownProduct != nil {
-				v = fr.knownProduct.Key
-			}
-			rec.vals[f.Name] = v
-			continue
+func plain(v any) any {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case string:
+		return x
+	case bool:
+		return x
+	case json.Number:
+		if f, err := x.Float64(); err == nil {
+			return f
 		}
-		v = source(api, f.Source)
-		switch f.Type {
-		case ftText:
-			if m, ok := v.(map[string]any); ok {
-				v = m["body"]
+		return x.String()
+	case float64:
+		return x
+	}
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+func listOf(v any) ([]any, bool) {
+	l, ok := v.([]any)
+	return l, ok
+}
+
+func (sc *stmtCtx) convert(e *EntityDef, api apiRec, knownProduct, knownParent string, used map[string]bool, customs []*CustomField) (*record, *AqlError) {
+	r := &record{vals: map[string]any{}, alts: map[string][]string{}, multi: map[string][][]string{}, api: api}
+	for _, fd := range e.Fields {
+		raw := lookup(api, fd.Source)
+		var v any
+		switch fd.Type {
+		case tText:
+			if m, ok := raw.(map[string]any); ok {
+				raw = m["body"]
 			}
-			if s, ok := v.(string); ok {
-				v = htmlToText(s)
-			} else if v != nil {
-				v = plainValue(v)
+			if raw != nil {
+				v = htmlText(strOf(raw))
 			}
-		case ftDate:
-			if s, ok := v.(string); ok {
-				if len(s) >= 10 {
-					v = s[:10]
-				} else if s == "" {
-					v = nil
-				}
-			} else {
-				v = plainValue(v)
+		case tDate:
+			s := strOf(raw)
+			if len(s) >= 10 {
+				s = s[:10]
 			}
-		case ftBoolean:
-			switch x := v.(type) {
-			case bool:
-			case nil:
-				if f.FalseWhenAbsent {
-					v = false
-				}
-			case string:
-				v = strings.EqualFold(x, "true")
-			default:
-				v = plainValue(v)
+			if s != "" {
+				v = s
 			}
-		case ftKey:
+		case tBoolean:
+			if b, ok := truth(raw); ok && raw != nil {
+				v = b
+			} else if fd.FalseDefault {
+				v = false
+			}
+		case tNumber:
+			v = numberOf(raw)
+		case tKey:
 			switch {
-			case e.Name == "products" && f.Name == "key":
-				v = plainValue(v)
-			case f.Name == "product" && fr.knownProduct != nil:
-				v = fr.knownProduct.Key
-			case v == nil:
-			default:
-				id := str(v)
-				v = nil
-				if used[f.Name] {
-					if p := r.productByID(id); p != nil {
-						v = p.Key
-					}
+			case e.Name == "products" && fd.Name == "key":
+				if raw != nil {
+					v = strOf(raw)
+				}
+			case fd.Name == "product" && knownProduct != "":
+				v = knownProduct
+			case used[fd.Name] && raw != nil:
+				if _, err := sc.productList(false, false); err != nil {
+					return nil, err
+				}
+				if p := sc.productByID(strOf(raw)); p != nil {
+					v = p.Key
 				}
 			}
 		default:
-			v = plainValue(v)
-		}
-		rec.vals[f.Name] = v
-	}
-	// notes of the catalog entries
-	switch e.Name {
-	case "features":
-		if l, ok := source(api, "tags").([]any); ok {
-			var tags []string
-			for _, t := range l {
-				if s := str(t); s != "" {
-					tags = append(tags, s)
+			if l, ok := listOf(raw); ok && fd.Name == "tags" {
+				var tags []string
+				var items [][]string
+				for _, t := range l {
+					tags = append(tags, strOf(t))
+					items = append(items, []string{strOf(t)})
+				}
+				if len(tags) > 0 {
+					v = strings.Join(tags, ", ")
+				}
+				r.multi[fd.Name] = items
+			} else if raw != nil {
+				v = plain(raw)
+				if _, isStr := v.(string); !isStr && fd.Type != tString {
+					v = strOf(raw)
 				}
 			}
-			if len(tags) == 0 {
-				rec.vals["tags"] = nil
+		}
+		if e.Name == "comments" && fd.Name == "parent" {
+			if s, ok := v.(string); ok && s != "" {
+				v = s[strings.LastIndex(s, "/")+1:]
+			} else if knownParent != "" {
+				v = knownParent
+			}
+		}
+		if e.Name == "requirements" && fd.Name == "feature" && noValue(v) && knownParent != "" {
+			v = knownParent
+		}
+		r.vals[fd.Name] = v
+	}
+	// other spellings (step 5)
+	addAlt := func(f string, vs ...any) {
+		for _, x := range vs {
+			if s := strOf(x); s != "" {
+				r.alts[f] = append(r.alts[f], s)
+			}
+		}
+	}
+	if id := e.idField(); id != "" {
+		addAlt(id, api["id"])
+	}
+	if e.field("product") != nil {
+		addAlt("product", api["product_id"])
+	}
+	for _, fd := range e.Fields {
+		switch {
+		case fd.Name == "assigned_to":
+			addAlt(fd.Name, lookup(api, "assigned_to_user.name"), lookup(api, "assigned_to_user.id"))
+		case fd.Type == tReference:
+			if i := strings.Index(fd.Source, "."); i >= 0 {
+				obj := fd.Source[:i]
+				addAlt(fd.Name, lookup(api, obj+".id"), lookup(api, obj+".name"))
 			} else {
-				rec.vals["tags"] = strings.Join(tags, ", ")
+				obj := strings.TrimSuffix(fd.Source, "_reference_num")
+				addAlt(fd.Name, lookup(api, obj+".id"), lookup(api, obj+".name"), api[obj+"_id"])
 			}
-		} else if s, ok := rec.vals["tags"].(string); ok && s == "" {
-			rec.vals["tags"] = nil
-		}
-	case "requirements":
-		if rec.vals["feature"] == nil && fr.knownParent != "" {
-			rec.vals["feature"] = fr.knownParent
-		}
-	case "comments":
-		if u, ok := rec.vals["parent"].(string); ok && u != "" {
-			rec.vals["parent"] = u[strings.LastIndex(u, "/")+1:]
-		} else if fr.knownParent != "" {
-			rec.vals["parent"] = fr.knownParent
+		case e.Name == "comments" && fd.Name == "user":
+			addAlt(fd.Name, lookup(api, "user.email"), lookup(api, "user.id"))
+		case e.Name == "comments" && fd.Name == "parent":
+			addAlt(fd.Name, lookup(api, "commentable.id"))
 		}
 	}
-	for _, cf := range custom {
-		rec.vals[cf.Name] = nil
-		entry := customEntry(api, cf.Key)
-		if entry != nil {
-			v, sp := customValue(cf, entry)
-			rec.vals[cf.Name] = v
-			if len(sp) > 0 {
-				rec.spell[cf.Name] = sp
-			}
-		}
+	for _, cf := range customs {
+		sc.convertCustom(r, cf, api)
 	}
-	// other spellings
-	add := func(f string, v any) {
-		if s := str(v); s != "" {
-			rec.spell[f] = append(rec.spell[f], s)
-		}
-	}
-	switch idf := e.IDField(); {
-	case e.Name == "products":
-		add("key", api["id"])
-	case idf == "id" && e.Field("id").Source != "id":
-		add("id", api["id"])
-	}
-	if e.HasField("product") && e.Field("product").Source == "product_id" {
-		add("product", api["product_id"])
-	}
-	if e.HasField("assigned_to") {
-		add("assigned_to", source(api, "assigned_to_user.name"))
-		add("assigned_to", source(api, "assigned_to_user.id"))
-	}
-	for _, f := range e.Fields {
-		if f.Type == ftReference && strings.Contains(f.Source, ".") {
-			obj := f.Source[:strings.Index(f.Source, ".")]
-			add(f.Name, source(api, obj+".id"))
-			add(f.Name, source(api, obj+".name"))
-		}
-	}
-	if e.Name == "comments" {
-		add("user", source(api, "user.email"))
-		add("user", source(api, "user.id"))
-		add("parent", source(api, "commentable.id"))
-	}
-	if e.Name == "statuses" {
-		if ent := entityByName(str(api["entity"])); ent != nil {
-			add("entity", ent.Singular)
-		}
-		add("entity", api["_prefix"])
-	}
-	return rec
+	return r, nil
 }
 
-func customEntry(api map[string]any, key string) map[string]any {
-	l, _ := api["custom_fields"].([]any)
-	for _, x := range l {
-		if m, ok := x.(map[string]any); ok && str(m["key"]) == key {
+// customEntry is the entry of a custom field in an API record.
+func customEntry(api apiRec, key string) map[string]any {
+	list, ok := api["custom_fields"].([]any)
+	if !ok {
+		return nil
+	}
+	for _, e := range list {
+		m, ok := e.(map[string]any)
+		if ok && strings.EqualFold(strOf(m["key"]), key) {
 			return m
 		}
 	}
 	return nil
 }
 
-func stringsOf(v any) []string {
-	l, ok := v.([]any)
-	if !ok {
-		return nil
+func emptyValue(v any) bool {
+	if v == nil {
+		return true
 	}
+	if s, ok := v.(string); ok && s == "" {
+		return true
+	}
+	if l, ok := v.([]any); ok && len(l) == 0 {
+		return true
+	}
+	return false
+}
+
+// convertCustom takes the value of a custom field (convert-record, step 4).
+func (sc *stmtCtx) convertCustom(r *record, cf *CustomField, api apiRec) {
+	r.vals[cf.Name] = nil
+	entry := customEntry(api, cf.Key)
+	if entry == nil || emptyValue(entry["value"]) {
+		return
+	}
+	val := entry["value"]
+	texts := func(v any) ([]string, bool) {
+		l, ok := v.([]any)
+		if !ok {
+			return nil, false
+		}
+		var out []string
+		for _, x := range l {
+			out = append(out, strOf(x))
+		}
+		return out, true
+	}
+	switch cf.kind() {
+	case "text", "url", "choice", "fixed_choice":
+		r.vals[cf.Name] = textOrJSON(val)
+	case "note":
+		if s, ok := val.(string); ok {
+			r.vals[cf.Name] = htmlText(s)
+		} else {
+			r.vals[cf.Name] = textOrJSON(val)
+		}
+	case "number", "scorecard":
+		if f, ok := toNumber(val); ok {
+			r.vals[cf.Name] = f
+		} else {
+			r.vals[cf.Name] = textOrJSON(val)
+		}
+	case "date":
+		if s, ok := val.(string); ok {
+			if len(s) >= 10 {
+				s = s[:10]
+			}
+			r.vals[cf.Name] = s
+		} else {
+			r.vals[cf.Name] = textOrJSON(val)
+		}
+	case "tags", "fixed_tags":
+		if l, ok := texts(val); ok {
+			r.vals[cf.Name] = strings.Join(l, ", ")
+			for _, t := range l {
+				r.multi[cf.Name] = append(r.multi[cf.Name], []string{t})
+			}
+		} else {
+			r.vals[cf.Name] = textOrJSON(val)
+		}
+	case "users":
+		ids, _ := texts(val)
+		emails, hasEmails := texts(entry["email_value"])
+		var full []map[string]any
+		if l, ok := entry["full_value"].([]any); ok {
+			for _, x := range l {
+				if m, ok := x.(map[string]any); ok {
+					full = append(full, m)
+				}
+			}
+		}
+		if !hasEmails {
+			if full != nil {
+				emails = nil
+				for _, m := range full {
+					emails = append(emails, strOf(m["email"]))
+				}
+			} else if ids != nil {
+				emails = ids
+			} else {
+				r.vals[cf.Name] = textOrJSON(val)
+				return
+			}
+		}
+		if len(emails) == 0 {
+			return
+		}
+		r.vals[cf.Name] = strings.Join(emails, ", ")
+		var namesL, idsL []string
+		for i, em := range emails {
+			item := []string{em}
+			var m map[string]any
+			if i < len(full) {
+				m = full[i]
+			}
+			for _, fm := range full {
+				if strings.EqualFold(strOf(fm["email"]), em) {
+					m = fm
+				}
+			}
+			if m != nil {
+				item = append(item, strOf(m["name"]), strOf(m["id"]))
+				namesL = append(namesL, strOf(m["name"]))
+				idsL = append(idsL, strOf(m["id"]))
+			} else if i < len(ids) {
+				item = append(item, ids[i])
+				idsL = append(idsL, ids[i])
+			}
+			r.multi[cf.Name] = append(r.multi[cf.Name], item)
+		}
+		if len(namesL) > 0 {
+			r.alts[cf.Name] = append(r.alts[cf.Name], strings.Join(namesL, ", "))
+		}
+		if len(idsL) > 0 {
+			r.alts[cf.Name] = append(r.alts[cf.Name], strings.Join(idsL, ", "))
+		}
+	}
+}
+
+func textOrJSON(v any) any {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+// ---- evaluate-condition ----
+
+func isMeWord(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "me", "myself", "current_user":
+		return true
+	}
+	return false
+}
+
+// splitParts splits a text at commas; empty parts are left out.
+func splitParts(s string) []string {
 	var out []string
-	for _, x := range l {
-		if s := str(x); s != "" {
-			out = append(out, s)
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
 		}
 	}
 	return out
 }
 
-// customValue converts the value of an entry by the kind of the field.
-func customValue(cf *CustomField, entry map[string]any) (any, []any) {
-	v := entry["value"]
-	if v == nil {
-		return nil, nil
+func conjuncts(c Cond) []Cond {
+	if c == nil {
+		return nil
 	}
-	if s, ok := v.(string); ok && s == "" {
-		return nil, nil
+	if a, ok := c.(*AllOf); ok {
+		return a.M
 	}
-	if l, ok := v.([]any); ok && len(l) == 0 {
-		return nil, nil
-	}
-	switch cf.Kind {
-	case "text", "url", "choice", "fixed_choice":
-		if s, ok := v.(string); ok {
-			return s, nil
+	return []Cond{c}
+}
+
+// prepareLookups reads the current user and the product list where the
+// condition needs them (plan-fetch, step 9).
+func (sc *stmtCtx) prepareLookups(e *EntityDef, c Cond, applied map[Cond]bool) *AqlError {
+	var err *AqlError
+	var walk func(c Cond, top bool)
+	check := func(field string, v Value, isApplied bool) {
+		if err != nil || v.kind != vText {
+			return
 		}
-	case "note":
-		if s, ok := v.(string); ok {
-			return htmlToText(s), nil
-		}
-	case "number", "scorecard":
-		if f, ok := numberOf(v); ok {
-			return f, nil
-		}
-	case "date":
-		if s, ok := v.(string); ok {
-			if len(s) >= 10 {
-				return s[:10], nil
-			}
-			return s, nil
-		}
-	case "tags", "fixed_tags":
-		if l := stringsOf(v); l != nil {
-			return strings.Join(l, ", "), nil
-		}
-	case "users":
-		var emails, names, ids []string
-		if l := stringsOf(entry["email_value"]); l != nil {
-			emails = l
-		}
-		if full, ok := entry["full_value"].([]any); ok {
-			var fe []string
-			for _, x := range full {
-				if m, ok := x.(map[string]any); ok {
-					if s := str(m["email"]); s != "" {
-						fe = append(fe, s)
-					}
-					if s := str(m["name"]); s != "" {
-						names = append(names, s)
-					}
-					if s := str(m["id"]); s != "" {
-						ids = append(ids, s)
+		ft := sc.fieldType(e, field)
+		if ft == tUser {
+			need := isMeWord(v.s)
+			if sc.multiValued(e, field) {
+				for _, p := range splitParts(v.s) {
+					if isMeWord(p) {
+						need = true
 					}
 				}
 			}
-			if emails == nil {
-				emails = fe
+			if need {
+				_, err = sc.currentUser()
 			}
 		}
-		if emails == nil {
-			emails = stringsOf(v)
+		if ft == tKey && !isApplied {
+			_, err = sc.productList(false, false)
 		}
-		if ids == nil {
-			ids = stringsOf(v)
-		}
-		var sp []any
-		if len(names) > 0 {
-			sp = append(sp, strings.Join(names, ", "))
-		}
-		if len(ids) > 0 {
-			sp = append(sp, strings.Join(ids, ", "))
-		}
-		if len(emails) == 0 {
-			return nil, sp
-		}
-		return strings.Join(emails, ", "), sp
 	}
-	if s, ok := v.(string); ok {
-		return s, nil
-	}
-	return toJSON(v), nil
-}
-
-// ---- evaluate-condition ----
-
-func noValue(v any) bool {
-	if v == nil {
-		return true
-	}
-	if s, ok := v.(string); ok && s == "" {
-		return true
-	}
-	return false
-}
-
-func truth(v any) (bool, bool) {
-	switch x := v.(type) {
-	case bool:
-		return x, true
-	case string:
-		switch strings.ToLower(strings.TrimSpace(x)) {
-		case "true":
-			return true, true
-		case "false":
-			return false, true
-		}
-	default:
-		if f, ok := numberOf(v); ok {
-			if f == 1 {
-				return true, true
+	walk = func(c Cond, top bool) {
+		switch x := c.(type) {
+		case *AllOf:
+			for _, m := range x.M {
+				walk(m, top)
 			}
-			if f == 0 {
-				return false, true
+		case *AnyOf:
+			for _, m := range x.M {
+				walk(m, false)
+			}
+		case *Negation:
+			walk(x.M, false)
+		case *Cmp:
+			check(x.Field, x.Val, applied[c])
+		case *InList:
+			for _, v := range x.Vals {
+				check(x.Field, v, applied[c])
 			}
 		}
 	}
-	return false, false
+	walk(c, true)
+	return err
 }
 
-func valueEq(fv, v any, t FieldType) bool {
-	if noValue(fv) {
-		return false
+func (sc *stmtCtx) meValue(e *EntityDef, field string) string {
+	if sc.me == nil {
+		return ""
 	}
-	_, fb := fv.(bool)
-	_, vb := v.(bool)
-	if fb || vb {
-		a, ok1 := truth(fv)
-		b, ok2 := truth(v)
-		return ok1 && ok2 && a == b
+	if e.Name == "comments" && field == "user" {
+		return strOf(sc.me["name"])
 	}
-	if t == ftNumber {
-		a, ok1 := numberOf(fv)
-		b, ok2 := numberOf(v)
-		if ok1 && ok2 {
-			return a == b
-		}
-		return false
+	if fd := e.field(field); fd != nil && fd.AsName {
+		return strOf(sc.me["name"])
 	}
-	vs := textOf(v)
-	if (t == ftDate || t == ftDatetime) && len([]rune(strings.TrimSpace(vs))) == 10 {
-		fs := textOf(fv)
-		if len(fs) >= 10 {
-			return cform(fs[:10]) == cform(vs)
-		}
-	}
-	return cform(textOf(fv)) == cform(vs)
+	return strOf(sc.me["email"])
 }
 
-func likeMatch(pattern, text string) bool {
-	var b strings.Builder
-	b.WriteString("^")
-	for _, r := range pattern {
-		switch r {
-		case '%':
-			b.WriteString(".*")
-		case '_':
-			b.WriteString(".")
-		default:
-			b.WriteString(regexp.QuoteMeta(string(r)))
+// replaceValue applies step 4 of evaluate-condition.
+func (sc *stmtCtx) replaceValue(e *EntityDef, field string, v any) any {
+	s, isText := v.(string)
+	if !isText {
+		if f, ok := v.(float64); ok {
+			s, isText = fmtNum(f), sc.fieldType(e, field) == tKey
+			if !isText {
+				return v
+			}
+		} else {
+			return v
 		}
 	}
-	b.WriteString("$")
-	re, err := regexp.Compile("(?s)" + b.String())
-	return err == nil && re.MatchString(text)
-}
-
-func (r *run) substitute(e *EntityDef, field string, v any) any {
-	t, asName := r.fieldType(e, field)
-	if t == ftUser && isMe(v) && r.me != nil {
-		if asName {
-			return str(r.me["name"])
-		}
-		return str(r.me["email"])
-	}
-	if t == ftKey && r.productsRead {
-		if p, _ := r.findProduct(v); p != nil {
+	ft := sc.fieldType(e, field)
+	switch {
+	case ft == tUser && isMeWord(s) && sc.me != nil:
+		return sc.meValue(e, field)
+	case ft == tKey:
+		if p := matchProduct(sc.products, s); p != nil {
 			return p.Key
 		}
-	}
-	if e.Name == "statuses" && field == "entity" {
-		if s, ok := v.(string); ok {
-			if ent := entityWord(strings.TrimSpace(s)); ent != nil {
-				return ent.Name
-			}
+	case e.Name == "statuses" && field == "entity":
+		if en := resolveEntity(s); en != nil {
+			return en.Name
 		}
 	}
 	return v
 }
 
-func (r *run) eval(rec *Record, c Cond, e *EntityDef, applied map[Cond]bool) bool {
-	if applied[c] {
-		return true
+func utcDay(v any) string {
+	s := textOf(v)
+	if t, ok := parseTimestamp(s); ok {
+		return t.UTC().Format("2006-01-02")
 	}
-	switch x := c.(type) {
-	case nil:
-		return true
-	case *AllOf:
-		for _, m := range x.Members {
-			if !r.eval(rec, m, e, applied) {
+	if len(s) >= 10 {
+		return s[:10]
+	}
+	return s
+}
+
+func day(s string) string {
+	if len(s) >= 10 {
+		return s[:10]
+	}
+	return s
+}
+
+// eq is the operator = (evaluate-condition, steps 6 and 11).
+func (sc *stmtCtx) eq(e *EntityDef, r *record, field string, v Value) bool {
+	val := r.vals[field]
+	if noValue(val) {
+		return false
+	}
+	ft := sc.fieldType(e, field)
+	if sc.multiValued(e, field) && v.kind == vText {
+		items := r.multi[field]
+		isUsers := ft == tUser
+		match := func(part string) bool {
+			if isUsers && isMeWord(part) && sc.me != nil {
+				part = strOf(sc.me["email"])
+			}
+			for _, it := range items {
+				for _, sp := range it {
+					if textEq(sp, part) {
+						return true
+					}
+				}
+			}
+			return false
+		}
+		if match(v.s) {
+			return true
+		}
+		if strings.Contains(v.s, ",") {
+			parts := splitParts(v.s)
+			if len(parts) == 0 {
 				return false
 			}
+			for _, p := range parts {
+				if !match(p) {
+					return false
+				}
+			}
+			return true
 		}
+		return false
+	}
+	sv := sc.replaceValue(e, field, v.raw())
+	if ft == tBoolean || v.kind == vBool {
+		a, ok1 := truth(val)
+		b, ok2 := truth(sv)
+		return ok1 && ok2 && a == b
+	}
+	switch ft {
+	case tNumber:
+		a, ok1 := toNumber(val)
+		b, ok2 := toNumber(sv)
+		if ok1 && ok2 {
+			return a == b
+		}
+	case tDate:
+		return day(textOf(val)) == day(textOf(sv))
+	case tDatetime:
+		s := textOf(sv)
+		if validDay(s) {
+			return utcDay(val) == s
+		}
+		if t2, ok := parseTimestamp(s); ok {
+			if t1, ok := parseTimestamp(textOf(val)); ok {
+				return t1.Equal(t2)
+			}
+		}
+	}
+	if textEq(textOf(val), textOf(sv)) {
 		return true
-	case *AnyOf:
-		for _, m := range x.Members {
-			if r.eval(rec, m, e, applied) {
-				return true
-			}
+	}
+	for _, a := range r.alts[field] {
+		if textEq(a, textOf(sv)) {
+			return true
 		}
-		return false
-	case *Negation:
-		return !r.eval(rec, x.Member, e, applied)
-	case *NullTest:
-		nv := noValue(rec.vals[x.Field])
-		if x.Negated {
-			return !nv
-		}
-		return nv
-	case *InList:
-		for _, v := range x.Values {
-			if v != nil && r.compare(rec, e, x.Field, "=", v) {
-				return true
-			}
-		}
-		return false
-	case *Cmp:
-		return r.compare(rec, e, x.Field, x.Op, x.Value)
 	}
 	return false
 }
 
-func (r *run) compare(rec *Record, e *EntityDef, field, op string, value any) bool {
-	v := r.substitute(e, field, value)
-	t, _ := r.fieldType(e, field)
-	fv := rec.vals[field]
-	spells := rec.spell[field]
-	switch op {
+func likeMatch(pattern, text string) bool {
+	p, t := []rune(pattern), []rune(text)
+	var m func(i, j int) bool
+	memo := map[[2]int]bool{}
+	seen := map[[2]int]bool{}
+	m = func(i, j int) bool {
+		k := [2]int{i, j}
+		if seen[k] {
+			return memo[k]
+		}
+		seen[k] = true
+		var res bool
+		switch {
+		case i == len(p):
+			res = j == len(t)
+		case p[i] == '%':
+			res = m(i+1, j) || (j < len(t) && m(i, j+1))
+		case j < len(t) && (p[i] == '_' || p[i] == t[j]):
+			res = m(i+1, j+1)
+		}
+		memo[k] = res
+		return res
+	}
+	return m(0, 0)
+}
+
+func (sc *stmtCtx) evalCmp(e *EntityDef, r *record, c *Cmp) bool {
+	val := r.vals[c.Field]
+	switch c.Op {
 	case "=":
-		return r.equals(fv, spells, v, t)
+		return sc.eq(e, r, c.Field, c.Val)
 	case "!=":
-		return !r.equals(fv, spells, v, t)
-	case "contains":
-		if noValue(fv) {
+		return !sc.eq(e, r, c.Field, c.Val)
+	case "contains", "like":
+		if noValue(val) || c.Val.kind == vNull {
 			return false
 		}
-		needle := cform(textOf(v))
-		if strings.Contains(cform(textOf(fv)), needle) {
-			return true
+		sv := textOf(sc.replaceValue(e, c.Field, c.Val.raw()))
+		texts := append([]string{textOf(val)}, r.alts[c.Field]...)
+		if c.Op == "contains" {
+			for _, t := range texts {
+				if strings.Contains(compForm(t), compForm(sv)) {
+					return true
+				}
+			}
+			return false
 		}
-		for _, s := range spells {
-			if strings.Contains(cform(textOf(s)), needle) {
-				return true
+		return likeMatch(compForm(sv), compForm(textOf(val)))
+	}
+	if noValue(val) || c.Val.kind == vNull {
+		return false
+	}
+	sv := sc.replaceValue(e, c.Field, c.Val.raw())
+	cmp := 0
+	ft := sc.fieldType(e, c.Field)
+	done := false
+	switch ft {
+	case tNumber:
+		a, ok1 := toNumber(val)
+		b, ok2 := toNumber(sv)
+		if ok1 && ok2 {
+			cmp, done = cmpFloat(a, b), true
+		}
+	case tDate:
+		cmp, done = strings.Compare(day(textOf(val)), day(textOf(sv))), true
+	case tDatetime:
+		s := textOf(sv)
+		if validDay(s) {
+			if _, ok := parseTimestamp(textOf(val)); ok {
+				cmp, done = strings.Compare(utcDay(val), s), true
+			}
+		} else if t2, ok := parseTimestamp(s); ok {
+			if t1, ok := parseTimestamp(textOf(val)); ok {
+				cmp, done = t1.Compare(t2), true
 			}
 		}
-		return false
-	case "like":
-		if noValue(fv) {
-			return false
+		if !done {
+			cmp, done = strings.Compare(textOf(val), s), true
 		}
-		pat := cform(textOf(v))
-		if likeMatch(pat, cform(textOf(fv))) {
-			return true
-		}
-		for _, s := range spells {
-			if likeMatch(pat, cform(textOf(s))) {
-				return true
-			}
-		}
-		return false
 	}
-	if noValue(fv) {
-		return false
+	if !done {
+		cmp = orderTexts(textOf(val), textOf(sv))
 	}
-	var cmpv int
-	switch {
-	case t == ftNumber:
-		a, ok1 := numberOf(fv)
-		b, ok2 := numberOf(v)
-		if !ok1 || !ok2 {
-			return false
-		}
-		cmpv = cmpFloat(a, b)
-	case t == ftDate || t == ftDatetime:
-		fs, vs := textOf(fv), strings.TrimSpace(textOf(v))
-		if len(vs) == 10 && len(fs) >= 10 {
-			fs = fs[:10]
-		}
-		cmpv = strings.Compare(fs, vs)
-	default:
-		cmpv = strings.Compare(cform(textOf(fv)), cform(textOf(v)))
-	}
-	switch op {
+	switch c.Op {
 	case "<":
-		return cmpv < 0
+		return cmp < 0
 	case "<=":
-		return cmpv <= 0
+		return cmp <= 0
 	case ">":
-		return cmpv > 0
+		return cmp > 0
 	case ">=":
-		return cmpv >= 0
+		return cmp >= 0
 	}
 	return false
 }
@@ -1170,73 +668,980 @@ func cmpFloat(a, b float64) int {
 	return 0
 }
 
-func (r *run) equals(fv any, spells []any, v any, t FieldType) bool {
-	if valueEq(fv, v, t) {
+func (sc *stmtCtx) eval(e *EntityDef, r *record, c Cond) bool {
+	switch x := c.(type) {
+	case nil:
+		return true
+	case *AllOf:
+		for _, m := range x.M {
+			if !sc.eval(e, r, m) {
+				return false
+			}
+		}
+		return true
+	case *AnyOf:
+		for _, m := range x.M {
+			if sc.eval(e, r, m) {
+				return true
+			}
+		}
+		return false
+	case *Negation:
+		return !sc.eval(e, r, x.M)
+	case *NullTest:
+		return noValue(r.vals[x.Field]) != x.Negated
+	case *InList:
+		for _, v := range x.Vals {
+			if v.kind == vNull || (v.kind == vText && v.s == "") {
+				if noValue(r.vals[x.Field]) {
+					return true
+				}
+				continue
+			}
+			if sc.eq(e, r, x.Field, v) {
+				return true
+			}
+		}
+		return false
+	case *Cmp:
+		return sc.evalCmp(e, r, x)
+	}
+	return false
+}
+
+// keep evaluates the WHERE condition; an applied conjunct counts as true.
+func (sc *stmtCtx) keep(e *EntityDef, r *record, where Cond, applied map[Cond]bool) bool {
+	if where == nil {
 		return true
 	}
-	if noValue(fv) {
-		return false
+	if applied[where] {
+		return true
 	}
-	for _, s := range spells {
-		if valueEq(s, v, ftString) {
+	if a, ok := where.(*AllOf); ok {
+		for _, m := range a.M {
+			if applied[m] {
+				continue
+			}
+			if !sc.eval(e, r, m) {
+				return false
+			}
+		}
+		return true
+	}
+	return sc.eval(e, r, where)
+}
+
+// ---- order (build-rows, step 4) ----
+
+// orderTexts compares two texts by their comparison form, with runs of
+// digits compared as numbers.
+func orderTexts(a, b string) int {
+	x, y := []rune(compForm(a)), []rune(compForm(b))
+	i, j := 0, 0
+	for i < len(x) && j < len(y) {
+		if unicode.IsDigit(x[i]) && unicode.IsDigit(y[j]) {
+			si := i
+			for i < len(x) && unicode.IsDigit(x[i]) {
+				i++
+			}
+			sj := j
+			for j < len(y) && unicode.IsDigit(y[j]) {
+				j++
+			}
+			na := strings.TrimLeft(string(x[si:i]), "0")
+			nb := strings.TrimLeft(string(y[sj:j]), "0")
+			if len(na) != len(nb) {
+				if len(na) < len(nb) {
+					return -1
+				}
+				return 1
+			}
+			if c := strings.Compare(na, nb); c != 0 {
+				return c
+			}
+			continue
+		}
+		if x[i] != y[j] {
+			if x[i] < y[j] {
+				return -1
+			}
+			return 1
+		}
+		i++
+		j++
+	}
+	switch {
+	case i < len(x):
+		return 1
+	case j < len(y):
+		return -1
+	}
+	return strings.Compare(a, b)
+}
+
+func isNum(v any) bool { _, ok := v.(float64); return ok }
+
+// orderValues: numbers before text, numbers by value, text by orderTexts.
+func orderValues(a, b any) int {
+	an, bn := isNum(a), isNum(b)
+	switch {
+	case an && bn:
+		return cmpFloat(a.(float64), b.(float64))
+	case an:
+		return -1
+	case bn:
+		return 1
+	}
+	return orderTexts(textOf(a), textOf(b))
+}
+
+// ---- plan-fetch ----
+
+type fetched struct {
+	api    apiRec
+	prod   string
+	parent string
+	pre    *record
+}
+
+type fetchResult struct {
+	recs      []fetched
+	scope     string
+	total     int
+	hasTotal  bool
+	applied   map[Cond]bool
+	countOnly bool
+	idConj    Cond   // conjunct whose id route was read
+	idFound   string // id of the record that the id route read
+	groups    []statusGroup
+	product   *Product
+}
+
+type target struct {
+	field  string
+	route  string
+	scope  string
+	prod   string
+	parent string
+	single bool // an ApiGet by id
+	kind   string
+	value  string
+	singul string
+}
+
+func (sc *stmtCtx) eqConj(conj []Cond, field string) *Cmp {
+	for _, c := range conj {
+		if x, ok := c.(*Cmp); ok && x.Field == field && x.Op == "=" && (x.Val.kind == vText || x.Val.kind == vNumber) {
+			return x
+		}
+	}
+	return nil
+}
+
+var commentParentKinds = map[string]bool{"feature": true, "release": true, "epic": true, "idea": true, "initiative": true, "goal": true, "requirement": true}
+
+// resolveTarget checks one value for one route (plan-fetch, step 3).
+func (sc *stmtCtx) resolveTarget(e *EntityDef, field string, v string, conj []Cond) (*target, *AqlError) {
+	up := strings.ToUpper(v)
+	r, _ := e.route(field)
+	switch {
+	case field == "id":
+		ok := isNumericID(v) || (e.Name != "comments" && refKind(v) == e.Kind)
+		if !ok {
+			return nil, sc.wrongKind(e, field, v, conj)
+		}
+		return &target{field: field, route: strings.ReplaceAll(r.Path, "{v}", esc(up)), single: true, value: up}, nil
+	case field == "product":
+		p, err := sc.resolveProduct(v, e, true)
+		if err != nil {
+			return nil, err
+		}
+		return &target{field: field, route: strings.ReplaceAll(r.Path, "{v}", esc(p.ID)), scope: "product " + p.Key, prod: p.Key, value: p.Key, kind: "product"}, nil
+	case e.Name == "comments" && field == "parent":
+		if k := refKind(v); commentParentKinds[k] {
+			ke := entityOfKind(k)
+			return &target{field: field, route: "/" + ke.Name + "/" + esc(up) + "/comments", scope: k + " " + up, parent: up, value: up, kind: k}, nil
+		}
+		p, err := sc.findProductQuiet(v)
+		if err != nil {
+			return nil, err
+		}
+		if p != nil {
+			return &target{field: field, route: "/products/" + esc(p.ID) + "/comments", scope: "product " + p.Key, parent: p.Key, prod: p.Key, value: p.Key, kind: "product"}, nil
+		}
+		return nil, sc.errK08(v)
+	}
+	fd := e.field(field)
+	kind := ""
+	if fd != nil {
+		kind = fd.RefKind
+	}
+	if !(isNumericID(v) || (kind != "" && refKind(v) == kind)) {
+		return nil, sc.wrongKind(e, field, v, conj)
+	}
+	return &target{field: field, route: strings.ReplaceAll(r.Path, "{v}", esc(up)), scope: field + " " + up, parent: up, value: up, kind: kind}, nil
+}
+
+// wrongKind gives the message of plan-fetch, step 4.
+func (sc *stmtCtx) wrongKind(e *EntityDef, field, v string, conj []Cond) *AqlError {
+	kind := refKind(v)
+	up := strings.ToUpper(v)
+	expected := e.Kind
+	if field != "id" {
+		if fd := e.field(field); fd != nil {
+			expected = fd.RefKind
+		}
+	}
+	if expected == "" {
+		expected = singularOf(e)
+	}
+	if kind != "" && field == "id" {
+		for _, rt := range e.ReadRoutes {
+			if fd := e.field(rt.Field); fd != nil && fd.RefKind == kind {
+				return aqlErr("wrong_kind", "%s is the id of %s %s, not of %s %s. For the %s of that %s: SELECT * FROM %s WHERE %s = '%s'",
+					quote(v), article(kind), kind, article(singularOf(e)), singularOf(e), e.Name, kind, e.Name, rt.Field, up)
+			}
+		}
+	}
+	if kind != "" {
+		ke := entityOfKind(kind)
+		return aqlErr("wrong_kind", "%s is the id of %s %s, not of %s %s. To read it: SELECT * FROM %s WHERE id = '%s'",
+			quote(v), article(kind), kind, article(expected), expected, ke.Name, up)
+	}
+	p, err := sc.findProductQuiet(v)
+	if err != nil {
+		return err
+	}
+	if p != nil && e.hasParentFilter("product") {
+		return aqlErr("wrong_kind", "%s is a product, not %s %s. Use: WHERE product = '%s'", quote(v), article(expected), expected, p.Key)
+	}
+	if field == "id" {
+		return sc.errK04(v, e)
+	}
+	fe := entityOfKind(expected)
+	if field == "release" || field == "initiative" || field == "epic" {
+		if pc := sc.eqConj(conj, "product"); pc != nil {
+			if pp, err := sc.findProductQuiet(pc.Val.written()); err != nil {
+				return err
+			} else if pp != nil {
+				list, err := sc.recordsOf(fe, pp)
+				if err != nil {
+					return err
+				}
+				return aqlErr("wrong_kind", "%s = needs the id of the %s, not its name. The %s of %s: %s", field, field, fe.Name, pp.Key, list)
+			}
+		}
+	}
+	name := expected + "s"
+	if fe != nil {
+		name = fe.Name
+	}
+	return aqlErr("wrong_kind", "%s = needs the id of the %s, for example '%s', not its name. To find the id: SELECT id, name FROM %s WHERE product = '%s'",
+		field, field, sc.exampleID(expected), name, sc.key())
+}
+
+// recordsOf reads the records of an entity in a product with one list
+// request and gives <records>.
+func (sc *stmtCtx) recordsOf(fe *EntityDef, p *Product) (string, *AqlError) {
+	params := url.Values{}
+	params.Set("page", "1")
+	params.Set("per_page", strconv.Itoa(pageSize))
+	params.Set("fields", sourceMembers(fe, map[string]bool{}, false))
+	lp, f := sc.c.apiList(sc.ctx, sc.acct, "/products/"+esc(p.ID)+"/"+fe.Name, params)
+	if f != nil {
+		return "", sc.failErr(f)
+	}
+	var items []string
+	for _, r := range lp.records {
+		items = append(items, fmt.Sprintf("%s (%s)", strOf(lookup(r, fe.field("id").Source)), strOf(r["name"])))
+	}
+	if len(items) == 0 {
+		return "none", nil
+	}
+	return listMax(items), nil
+}
+
+type listMode struct {
+	countOnly bool
+	early     bool
+	enough    int
+	account   bool
+}
+
+// readList reads a list page by page (plan-fetch, step 8).
+func (sc *stmtCtx) readList(e *EntityDef, route string, used map[string]bool, custom bool, q string, mode listMode, st *ReadStmt, conj []Cond) ([]apiRec, int, bool, bool, *AqlError) {
+	params := url.Values{}
+	params.Set("per_page", strconv.Itoa(pageSize))
+	params.Set("fields", sourceMembers(e, used, custom))
+	if q != "" {
+		params.Set("q", q)
+	}
+	var out []apiRec
+	for page := 1; ; page++ {
+		params.Set("page", strconv.Itoa(page))
+		lp, f := sc.c.apiList(sc.ctx, sc.acct, route, params)
+		if f != nil {
+			return nil, 0, false, false, listFail(sc, f)
+		}
+		if page == 1 && custom && len(lp.records) > 0 && !anyHasMember(lp.records, "custom_fields") {
+			return nil, 0, false, false, sc.errX05(e)
+		}
+		if page == 1 && mode.countOnly {
+			return nil, lp.totalRecords, true, true, nil
+		}
+		out = append(out, lp.records...)
+		if mode.early && len(out) >= mode.enough {
+			if page < lp.totalPages {
+				return out, lp.totalRecords, true, false, nil
+			}
+			return out, 0, false, false, nil
+		}
+		if page == 1 && lp.totalPages > maxPages {
+			return nil, 0, false, false, aqlErr("scope", "this would read %d records. %s", lp.totalRecords, sc.narrowHint(e, mode.account, st, conj))
+		}
+		if page >= lp.totalPages || page >= maxPages {
+			return out, 0, false, false, nil
+		}
+	}
+}
+
+// listFail maps a failed list request: NotFound is K07 for the caller.
+func listFail(sc *stmtCtx, f *apiFailure) *AqlError {
+	if f.kind == fNotFound {
+		return &AqlError{Kind: "_notfound"}
+	}
+	return sc.failErr(f)
+}
+
+func condUses(c Cond, field string) bool {
+	switch x := c.(type) {
+	case *AllOf:
+		for _, m := range x.M {
+			if condUses(m, field) {
+				return true
+			}
+		}
+	case *AnyOf:
+		for _, m := range x.M {
+			if condUses(m, field) {
+				return true
+			}
+		}
+	case *Negation:
+		return condUses(x.M, field)
+	case *Cmp:
+		return x.Field == field
+	case *NullTest:
+		return x.Field == field
+	case *InList:
+		return x.Field == field
+	}
+	return false
+}
+
+func (sc *stmtCtx) narrowHint(e *EntityDef, account bool, st *ReadStmt, conj []Cond) string {
+	if account {
+		return "Narrow it down, for example with product = '" + sc.key() + "'"
+	}
+	for _, pf := range e.ParentFilters {
+		if pf == "product" || condUses(st.Where, pf) {
+			continue
+		}
+		kind := "feature"
+		if fd := e.field(pf); fd != nil && fd.RefKind != "" {
+			kind = fd.RefKind
+		}
+		return "Narrow it down, for example with " + pf + " = '" + sc.exampleID(kind) + "'"
+	}
+	return "Use LIMIT without ORDER BY, GROUP BY and DISTINCT to read the first records, or COUNT(*) alone to count them."
+}
+
+func (st *ReadStmt) hasAggregate() bool {
+	for _, it := range st.Items {
+		if it.aggregate() {
 			return true
 		}
 	}
 	return false
 }
 
+func (st *ReadStmt) limit() int {
+	l := defaultLimit
+	if st.HasLimit {
+		l = st.Limit
+	}
+	if l > maxLimit {
+		l = maxLimit
+	}
+	return l
+}
+
+func (sc *stmtCtx) readTarget(e *EntityDef, t *target, used map[string]bool, custom bool, mode listMode, st *ReadStmt, conj []Cond) ([]fetched, int, bool, bool, string, *AqlError) {
+	if t.single {
+		rec, f := sc.c.apiGet(sc.ctx, sc.acct, t.route, e.Singular)
+		if f != nil {
+			if f.kind == fNotFound {
+				return nil, 0, false, false, singularOf(e) + " " + t.value, nil
+			}
+			return nil, 0, false, false, "", sc.failErr(f)
+		}
+		id := strOf(lookup(rec, e.field("id").Source))
+		if id == "" {
+			id = t.value
+		}
+		return []fetched{{api: rec}}, 0, false, false, singularOf(e) + " " + id, nil
+	}
+	recs, total, hasTotal, countOnly, err := sc.readList(e, t.route, used, custom, "", mode, st, conj)
+	if err != nil {
+		if err.Kind == "_notfound" {
+			kind := t.kind
+			if kind == "" {
+				kind = t.field
+			}
+			return nil, 0, false, false, "", sc.errK07(kind, t.value)
+		}
+		return nil, 0, false, false, "", err
+	}
+	var out []fetched
+	for _, r := range recs {
+		out = append(out, fetched{api: r, prod: t.prod, parent: t.parent})
+	}
+	return out, total, hasTotal, countOnly, t.scope, nil
+}
+
+func (sc *stmtCtx) planFetch(st *ReadStmt, used map[string]bool, custom bool) (*fetchResult, *AqlError) {
+	e := st.E
+	conj := conjuncts(st.Where)
+	fr := &fetchResult{applied: map[Cond]bool{}}
+	countOnlyItems := len(st.Items) == 1 && st.Items[0].CountStar && len(st.GroupBy) == 0
+	allApplied := func() bool {
+		for _, c := range conj {
+			if !fr.applied[c] {
+				return false
+			}
+		}
+		return true
+	}
+	mode := func() listMode {
+		m := listMode{enough: st.limit()}
+		if allApplied() {
+			m.countOnly = countOnlyItems
+			m.early = len(st.OrderBy) == 0 && len(st.GroupBy) == 0 && !st.Distinct && !st.hasAggregate()
+		}
+		return m
+	}
+	switch e.FixedSource {
+	case "me":
+		rec, f := sc.c.apiGet(sc.ctx, sc.acct, "/me", "user")
+		if f != nil {
+			return nil, sc.failErr(f)
+		}
+		fr.recs = []fetched{{api: rec}}
+		fr.scope = "current user"
+		return fr, nil
+	case "products":
+		prods, err := sc.productList(used["description"], custom)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range prods {
+			fr.recs = append(fr.recs, fetched{api: p.rec})
+		}
+		fr.scope = "all products"
+		return fr, nil
+	case "users":
+		recs, total, hasTotal, countOnly, err := sc.readList(e, "/users", used, false, "", mode(), st, conj)
+		if err != nil {
+			if err.Kind == "_notfound" {
+				return nil, aqlErr("api_error", "aha: API error (status 404) on GET /users: (no text)")
+			}
+			return nil, err
+		}
+		for _, r := range recs {
+			fr.recs = append(fr.recs, fetched{api: r})
+		}
+		fr.total, fr.hasTotal, fr.countOnly = total, hasTotal, countOnly
+		fr.scope = "all users"
+		return fr, nil
+	case "statuses":
+		pc := sc.eqConj(conj, "product")
+		if pc == nil {
+			return nil, sc.errC01(e)
+		}
+		p, err := sc.resolveProduct(pc.Val.written(), e, true)
+		if err != nil {
+			return nil, err
+		}
+		groups, err := sc.productStatuses(p.ID)
+		if err != nil {
+			return nil, err
+		}
+		fr.groups, fr.product = groups, p
+		fr.applied[pc] = true
+		for _, g := range groups {
+			for _, s := range g.names {
+				r := &record{vals: map[string]any{}, alts: map[string][]string{}, multi: map[string][][]string{}}
+				r.vals["name"] = plain(s["name"])
+				r.vals["entity"] = g.entity
+				r.vals["position"] = numberOf(s["position"])
+				if b, ok := s["complete"].(bool); ok {
+					r.vals["complete"] = b
+				} else {
+					r.vals["complete"] = false
+				}
+				r.vals["product"] = p.Key
+				if en := entityByName(g.entity); en != nil {
+					r.alts["entity"] = append(r.alts["entity"], en.Singular)
+				}
+				r.alts["entity"] = append(r.alts["entity"], g.prefix)
+				fr.recs = append(fr.recs, fetched{pre: r})
+			}
+		}
+		fr.scope = "product " + p.Key
+		return fr, nil
+	}
+	// step 2: route by an id or a parent
+	for _, rt := range e.ReadRoutes {
+		if rt.Field == "product" {
+			continue
+		}
+		c := sc.eqConj(conj, rt.Field)
+		if c == nil {
+			continue
+		}
+		t, err := sc.resolveTarget(e, rt.Field, c.Val.written(), conj)
+		if err != nil {
+			return nil, err
+		}
+		fr.applied[c] = true
+		recs, total, hasTotal, countOnly, scope, err := sc.readTarget(e, t, used, custom, mode(), st, conj)
+		if err != nil {
+			return nil, err
+		}
+		if rt.Field == "id" {
+			fr.idConj = c
+			if len(recs) > 0 {
+				fr.idFound = strOf(lookup(recs[0].api, e.field("id").Source))
+			}
+		}
+		fr.recs, fr.total, fr.hasTotal, fr.countOnly, fr.scope = recs, total, hasTotal, countOnly, scope
+		return fr, nil
+	}
+	// step 5: route by a list of values
+	for _, c := range conj {
+		in, ok := c.(*InList)
+		if !ok || len(in.Vals) > maxInValues {
+			continue
+		}
+		if _, has := e.route(in.Field); !has {
+			continue
+		}
+		usable := true
+		for _, v := range in.Vals {
+			if v.kind == vNull || v.kind == vBool || (v.kind == vText && v.s == "") {
+				usable = false
+			}
+		}
+		if !usable {
+			continue
+		}
+		var targets []*target
+		for _, v := range in.Vals {
+			t, err := sc.resolveTarget(e, in.Field, v.written(), conj)
+			if err != nil {
+				return nil, err
+			}
+			dup := false
+			for _, o := range targets {
+				if strings.EqualFold(o.value, t.value) {
+					dup = true
+				}
+			}
+			if !dup {
+				targets = append(targets, t)
+			}
+		}
+		fr.applied[c] = true
+		seen := map[string]bool{}
+		var scopes []string
+		for _, t := range targets {
+			recs, _, _, _, scope, err := sc.readTarget(e, t, used, custom, listMode{}, st, conj)
+			if err != nil {
+				return nil, err
+			}
+			for _, r := range recs {
+				id := strOf(r.api["id"])
+				if id != "" && seen[id] {
+					continue
+				}
+				seen[id] = true
+				fr.recs = append(fr.recs, r)
+			}
+			dupScope := false
+			for _, s := range scopes {
+				if s == scope {
+					dupScope = true
+				}
+			}
+			if !dupScope {
+				scopes = append(scopes, scope)
+			}
+		}
+		fr.scope = strings.Join(scopes, ", ")
+		return fr, nil
+	}
+	// step 6: route by product
+	if _, has := e.route("product"); has {
+		if c := sc.eqConj(conj, "product"); c != nil {
+			t, err := sc.resolveTarget(e, "product", c.Val.written(), conj)
+			if err != nil {
+				return nil, err
+			}
+			fr.applied[c] = true
+			recs, total, hasTotal, countOnly, scope, err := sc.readTarget(e, t, used, custom, mode(), st, conj)
+			if err != nil {
+				return nil, err
+			}
+			fr.recs, fr.total, fr.hasTotal, fr.countOnly, fr.scope = recs, total, hasTotal, countOnly, scope
+			return fr, nil
+		}
+	}
+	// step 7: account-wide list
+	if e.AccountList == "" {
+		return nil, sc.errC01(e)
+	}
+	q := ""
+	if e.NameSearch {
+		for _, c := range conj {
+			if x, ok := c.(*Cmp); ok && x.Field == "name" && (x.Op == "=" || x.Op == "contains") && x.Val.kind == vText && x.Val.s != "" {
+				q = x.Val.s
+				break
+			}
+		}
+	}
+	m := mode()
+	m.account = true
+	recs, total, hasTotal, countOnly, err := sc.readList(e, e.AccountList, used, custom, q, m, st, conj)
+	if err != nil {
+		if err.Kind == "_notfound" {
+			return nil, aqlErr("api_error", "aha: API error (status 404) on GET %s: (no text)", e.AccountList)
+		}
+		return nil, err
+	}
+	for _, r := range recs {
+		fr.recs = append(fr.recs, fetched{api: r})
+	}
+	fr.total, fr.hasTotal, fr.countOnly = total, hasTotal, countOnly
+	fr.scope = "all products"
+	return fr, nil
+}
+
+// ---- read-statement ----
+
+func (sc *stmtCtx) collectUsed(st *ReadStmt) map[string]bool {
+	used := map[string]bool{}
+	for _, it := range st.Items {
+		if it.Field != "" {
+			used[it.Field] = true
+		}
+	}
+	var walk func(c Cond)
+	walk = func(c Cond) {
+		switch x := c.(type) {
+		case *AllOf:
+			for _, m := range x.M {
+				walk(m)
+			}
+		case *AnyOf:
+			for _, m := range x.M {
+				walk(m)
+			}
+		case *Negation:
+			walk(x.M)
+		case *Cmp:
+			used[x.Field] = true
+		case *NullTest:
+			used[x.Field] = true
+		case *InList:
+			used[x.Field] = true
+		}
+	}
+	walk(st.Where)
+	for _, g := range st.GroupBy {
+		used[g] = true
+	}
+	for _, k := range st.OrderBy {
+		if k.Field != "" {
+			used[k.Field] = true
+		}
+		if k.Item != nil && k.Item.Field != "" {
+			used[k.Item.Field] = true
+		}
+	}
+	return used
+}
+
+func (sc *stmtCtx) usedCustoms(used map[string]bool) []*CustomField {
+	var names []string
+	for n := range used {
+		if strings.HasPrefix(n, "custom.") && sc.custom[n] != nil {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	var out []*CustomField
+	for _, n := range names {
+		out = append(out, sc.custom[n])
+	}
+	return out
+}
+
+// runRead is read-statement; it gives the result object of the tool query.
+func (sc *stmtCtx) runRead(st *ReadStmt) (omap, *AqlError) {
+	e := st.E
+	conj := conjuncts(st.Where)
+	idf := e.idField()
+	idConj := idf != "" && sc.eqConj(conj, idf) != nil
+	var notes []string
+	// step 1: replace a Star item by fields
+	hasStar := false
+	for _, it := range st.Items {
+		if it.Star {
+			hasStar = true
+		}
+	}
+	if hasStar {
+		var fields []string
+		if idConj {
+			fields = fieldNames(e)
+		} else {
+			fields = e.DefaultFields
+			var others []string
+			def := map[string]bool{}
+			for _, d := range e.DefaultFields {
+				def[d] = true
+			}
+			for _, fd := range e.Fields {
+				if !def[fd.Name] {
+					others = append(others, fd.Name)
+				}
+			}
+			notes = append(notes, fmt.Sprintf("* shows %s. Other fields of %s: %s.", strings.Join(e.DefaultFields, ", "), e.Name, strings.Join(others, ", ")))
+		}
+		var items []*Item
+		for _, it := range st.Items {
+			if !it.Star {
+				items = append(items, it)
+				continue
+			}
+			for _, f := range fields {
+				items = append(items, &Item{Field: f, Label: f})
+			}
+		}
+		var kept []*Item
+		for _, it := range items {
+			dup := false
+			for _, k := range kept {
+				if k.Func == "" && it.Func == "" && k.Label == it.Label && k.Field == it.Field {
+					dup = true
+				}
+			}
+			if !dup {
+				kept = append(kept, it)
+			}
+		}
+		st.Items = kept
+	}
+	used := sc.collectUsed(st)
+	customs := sc.usedCustoms(used)
+	fr, err := sc.planFetch(st, used, len(customs) > 0)
+	if err != nil {
+		return nil, err
+	}
+	if err := sc.prepareLookups(e, st.Where, fr.applied); err != nil {
+		return nil, err
+	}
+	var kept []*record
+	var keptFetched []fetched
+	for _, f := range fr.recs {
+		r := f.pre
+		if r == nil {
+			var cerr *AqlError
+			r, cerr = sc.convert(e, f.api, f.prod, f.parent, used, customs)
+			if cerr != nil {
+				return nil, cerr
+			}
+		}
+		if sc.keep(e, r, st.Where, fr.applied) {
+			kept = append(kept, r)
+			keptFetched = append(keptFetched, f)
+		}
+	}
+	grouped := len(st.GroupBy) > 0 || st.hasAggregate()
+	// step 6 a: star custom fields
+	var starCustom []*CustomField
+	if hasStar && idConj && !grouped && len(kept) == 1 {
+		all, err := sc.customFieldsOf(e)
+		if err != nil {
+			return nil, err
+		}
+		labels := map[string]bool{}
+		selectedNames := map[string]bool{}
+		for _, it := range st.Items {
+			labels[it.Label] = true
+			if it.Func == "" {
+				selectedNames[it.Field] = true
+			}
+		}
+		for _, c := range all {
+			if selectedNames[c.Name] || labels[c.Name] {
+				continue
+			}
+			starCustom = append(starCustom, c)
+		}
+		if len(starCustom) > 0 {
+			api := kept[0].api
+			if e.Name == "products" {
+				rec, f := sc.productRecord(strOf(api["id"]))
+				switch {
+				case f == nil:
+					api = rec
+				case f.kind == fNotFound:
+					api = apiRec{}
+				default:
+					return nil, sc.failErr(f)
+				}
+			}
+			for _, c := range starCustom {
+				sc.convertCustom(kept[0], c, api)
+			}
+		}
+	}
+	rows, count, total, hasTotal, truncated := sc.buildRows(st, kept, starCustom, fr)
+	if truncated {
+		notes = append(notes, fmt.Sprintf("Showing %d of %d records. Narrow the result with WHERE, raise LIMIT (up to %d), or count with COUNT(*).", count, total, maxLimit))
+	}
+	if len(kept) == 0 && !grouped {
+		notes = append(notes, sc.emptyNotes(st, fr)...)
+	}
+	_ = keptFetched
+	out := omap{{"entity", e.Name}, {"scope", fr.scope}, {"count", count}}
+	if hasTotal {
+		out = append(out, kv{"total", total})
+	}
+	if truncated {
+		out = append(out, kv{"truncated", true})
+	}
+	recs := []any{}
+	for _, r := range rows {
+		recs = append(recs, r)
+	}
+	out = append(out, kv{"records", recs})
+	if len(notes) > 0 {
+		out = append(out, kv{"note", strings.Join(notes, " ")})
+	}
+	return out, nil
+}
+
+// emptyNotes explains an empty result (read-statement, step 8).
+func (sc *stmtCtx) emptyNotes(st *ReadStmt, fr *fetchResult) []string {
+	e := st.E
+	var notes []string
+	idf := e.idField()
+	for _, c := range conjuncts(st.Where) {
+		if len(notes) >= 2 {
+			break
+		}
+		x, ok := c.(*Cmp)
+		if !ok || x.Val.kind != vText {
+			continue
+		}
+		v := strings.TrimSuffix(strings.TrimPrefix(x.Val.s, "%"), "%")
+		switch {
+		case x.Field == idf && x.Op == "=" && idf != "":
+			if e.Name == "products" || e.Name == "users" {
+				found := ""
+				for _, f := range fr.recs {
+					if textEq(strOf(lookup(f.api, e.field(idf).Source)), v) || textEq(strOf(f.api["id"]), v) {
+						found = strOf(lookup(f.api, e.field(idf).Source))
+					}
+				}
+				if found == "" {
+					notes = append(notes, fmt.Sprintf("There is no %s with the %s %s.", singularOf(e), idf, quote(v)))
+				} else {
+					notes = append(notes, fmt.Sprintf("The %s %s exists, and another condition of the statement is not true for it. To see the record: SELECT * FROM %s WHERE %s = '%s'", singularOf(e), found, e.Name, idf, found))
+				}
+				continue
+			}
+			if fr.idConj != c {
+				continue
+			}
+			if fr.idFound == "" {
+				notes = append(notes, fmt.Sprintf("There is no %s with the %s %s.", singularOf(e), idf, quote(v)))
+			} else {
+				notes = append(notes, fmt.Sprintf("The %s %s exists, and another condition of the statement is not true for it. To see the record: SELECT * FROM %s WHERE %s = '%s'", singularOf(e), fr.idFound, e.Name, idf, fr.idFound))
+			}
+		case e.Name == "products" && x.Field == "name" && matchProduct(sc.products, v) != nil:
+			p := matchProduct(sc.products, v)
+			notes = append(notes, fmt.Sprintf("%s is the key of a product, not its name. Use: SELECT key, name FROM products WHERE key = '%s'", quote(v), p.Key))
+		case x.Field == "name" && refKind(v) != "" && refKind(v) == e.Kind:
+			notes = append(notes, fmt.Sprintf("%s looks like an id, not a name. Use: WHERE id = '%s'", quote(v), strings.ToUpper(v)))
+		case x.Field == "name" && refKind(v) != "" && e.hasParentFilter(refKind(v)):
+			k := refKind(v)
+			notes = append(notes, fmt.Sprintf("%s looks like the id of %s %s, not a name. Use: WHERE %s = '%s'", quote(v), article(k), k, k, strings.ToUpper(v)))
+		case x.Field == "name" && x.Op == "=":
+			notes = append(notes, fmt.Sprintf("No %s has exactly the name %s. name = compares the whole name; to search inside names use: name CONTAINS %s", singularOf(e), quote(v), quote(v)))
+		case e.Name == "statuses" && x.Field == "entity" && x.Op == "=" && fr.product != nil:
+			want := v
+			if en := resolveEntity(v); en != nil {
+				want = en.Name
+			}
+			has := false
+			var ents []string
+			seen := map[string]bool{}
+			for _, g := range fr.groups {
+				if g.entity == want || strings.EqualFold(g.prefix, v) {
+					has = true
+				}
+				if !seen[g.entity] {
+					seen[g.entity] = true
+					ents = append(ents, g.entity)
+				}
+			}
+			if !has {
+				list := "(none)"
+				if len(ents) > 0 {
+					list = strings.Join(ents, ", ")
+				}
+				notes = append(notes, fmt.Sprintf("%s has statuses for: %s.", fr.product.Key, list))
+			}
+		}
+	}
+	return notes
+}
+
 // ---- build-rows ----
 
-func groupKey(v any) string {
-	switch x := v.(type) {
-	case nil:
-		return "\x00"
-	case string:
-		return "s" + cform(x)
-	case float64:
-		return "n" + fmtFloat(x)
-	case bool:
-		return "b" + strconv.FormatBool(x)
-	}
-	return "s" + cform(textOf(v))
-}
-
-// orderCmp: numbers before text, numbers by value, text by its comparison
-// form. Values without a value are handled by the caller.
-func orderCmp(a, b any) int {
-	fa, na := a.(float64)
-	fb, nb := b.(float64)
-	switch {
-	case na && nb:
-		return cmpFloat(fa, fb)
-	case na:
-		return -1
-	case nb:
-		return 1
-	}
-	return strings.Compare(cform(textOf(a)), cform(textOf(b)))
-}
-
-func round2(f float64) float64 {
+func roundAgg(f float64) any {
 	if f == math.Trunc(f) {
 		return f
 	}
 	return math.Round(f*100) / 100
 }
 
-func aggregate(it SelectItem, recs []*Record) any {
-	if it.Fn == "COUNT" && it.Field == "" {
-		return float64(len(recs))
+func (sc *stmtCtx) aggregate(it *Item, group []*record) any {
+	if it.CountStar {
+		return float64(len(group))
 	}
 	var vals []any
 	seen := map[string]bool{}
-	for _, rc := range recs {
-		v := rc.vals[it.Field]
+	for _, r := range group {
+		v := r.vals[it.Field]
 		if noValue(v) {
 			continue
 		}
 		if it.Distinct {
-			k := groupKey(v)
+			k := compForm(textOf(v))
 			if seen[k] {
 				continue
 			}
@@ -1244,13 +1649,16 @@ func aggregate(it SelectItem, recs []*Record) any {
 		}
 		vals = append(vals, v)
 	}
-	switch it.Fn {
+	switch it.Func {
 	case "COUNT":
 		return float64(len(vals))
 	case "SUM", "AVG":
 		sum, n := 0.0, 0
 		for _, v := range vals {
-			if f, ok := v.(float64); ok {
+			if _, isBool := v.(bool); isBool {
+				continue
+			}
+			if f, ok := toNumber(v); ok {
 				sum += f
 				n++
 			}
@@ -1258,54 +1666,51 @@ func aggregate(it SelectItem, recs []*Record) any {
 		if n == 0 {
 			return nil
 		}
-		if it.Fn == "AVG" {
-			return round2(sum / float64(n))
+		if it.Func == "AVG" {
+			return roundAgg(sum / float64(n))
 		}
-		return round2(sum)
+		return roundAgg(sum)
 	case "MIN", "MAX":
-		if len(vals) == 0 {
-			return nil
-		}
-		best := vals[0]
-		for _, v := range vals[1:] {
-			c := orderCmp(v, best)
-			if (it.Fn == "MIN" && c < 0) || (it.Fn == "MAX" && c > 0) {
+		var best any
+		for _, v := range vals {
+			if best == nil {
+				best = v
+				continue
+			}
+			c := orderValues(v, best)
+			if (it.Func == "MIN" && c < 0) || (it.Func == "MAX" && c > 0) {
 				best = v
 			}
-		}
-		if f, ok := best.(float64); ok {
-			return round2(f)
 		}
 		return best
 	}
 	return nil
 }
 
-type rowsResult struct {
-	rows      []Obj
-	count     int
-	total     *int
-	truncated bool
+type rowWithKeys struct {
+	row  omap
+	keys []any
 }
 
-func sortRows[T any](items []T, keys []OrderKey, value func(T, OrderKey) any) {
-	sort.SliceStable(items, func(i, j int) bool {
-		for _, k := range keys {
-			a, b := value(items[i], k), value(items[j], k)
+func sortRows(rows []rowWithKeys, order []OrderKey) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		for k, key := range order {
+			a, b := rows[i].keys[k], rows[j].keys[k]
 			an, bn := noValue(a), noValue(b)
-			switch {
-			case an && bn:
+			if an && bn {
 				continue
-			case an:
+			}
+			if an {
 				return false
-			case bn:
+			}
+			if bn {
 				return true
 			}
-			c := orderCmp(a, b)
+			c := orderValues(a, b)
 			if c == 0 {
 				continue
 			}
-			if k.Desc {
+			if key.Desc {
 				return c > 0
 			}
 			return c < 0
@@ -1314,425 +1719,147 @@ func sortRows[T any](items []T, keys []OrderKey, value func(T, OrderKey) any) {
 	})
 }
 
-func buildRows(st *ReadStmt, recs []*Record, starCustom []*CustomField, listTotal *int, countOnly bool) rowsResult {
-	if countOnly {
-		row := Obj{{st.Items[0].Label, float64(*listTotal)}}
-		return rowsResult{rows: []Obj{row}, count: 1}
-	}
-	var rows []Obj
-	if hasAggregate(st) || len(st.GroupBy) > 0 {
-		groupFields := append([]string{}, st.GroupBy...)
-		inGroup := map[string]bool{}
-		for _, g := range groupFields {
-			inGroup[g] = true
+func (sc *stmtCtx) buildRows(st *ReadStmt, recs []*record, starCustom []*CustomField, fr *fetchResult) ([]omap, int, int, bool, bool) {
+	if fr.countOnly {
+		label := "COUNT(*)"
+		if len(st.Items) > 0 {
+			label = st.Items[0].Label
 		}
+		return []omap{{{label, float64(fr.total)}}}, 1, 0, false, false
+	}
+	var rows []rowWithKeys
+	if len(st.GroupBy) > 0 || st.hasAggregate() {
+		groupFields := append([]string{}, st.GroupBy...)
 		selected := map[string]bool{}
 		for _, it := range st.Items {
-			if it.Fn == "" {
+			if it.Func == "" && !it.Star {
 				selected[it.Field] = true
-				if !inGroup[it.Field] {
+				in := false
+				for _, g := range groupFields {
+					if g == it.Field {
+						in = true
+					}
+				}
+				if !in {
 					groupFields = append(groupFields, it.Field)
-					inGroup[it.Field] = true
 				}
 			}
 		}
-		type group struct{ recs []*Record }
-		var groups []*group
-		index := map[string]*group{}
-		for _, rc := range recs {
-			var kb strings.Builder
+		var keys []string
+		groups := map[string][]*record{}
+		for _, r := range recs {
+			var parts []string
 			for _, g := range groupFields {
-				kb.WriteString(groupKey(rc.vals[g]))
-				kb.WriteString("\x01")
+				v := r.vals[g]
+				if noValue(v) {
+					parts = append(parts, "\x00null")
+				} else {
+					parts = append(parts, compForm(textOf(v)))
+				}
 			}
-			g := index[kb.String()]
-			if g == nil {
-				g = &group{}
-				index[kb.String()] = g
-				groups = append(groups, g)
+			k := strings.Join(parts, "\x01")
+			if _, ok := groups[k]; !ok {
+				keys = append(keys, k)
 			}
-			g.recs = append(g.recs, rc)
+			groups[k] = append(groups[k], r)
 		}
-		if len(groupFields) == 0 && len(groups) == 0 {
-			groups = []*group{{}}
+		if len(groupFields) == 0 && len(keys) == 0 {
+			keys = []string{""}
+			groups[""] = nil
 		}
-		first := func(g *group, f string) any {
-			if len(g.recs) == 0 {
-				return nil
-			}
-			return g.recs[0].vals[f]
-		}
-		sortRows(groups, st.OrderBy, func(g *group, k OrderKey) any {
-			if k.Agg != nil {
-				return aggregate(*k.Agg, g.recs)
-			}
-			return first(g, k.Field)
-		})
-		for _, g := range groups {
-			var row Obj
+		for _, k := range keys {
+			g := groups[k]
+			row := omap{}
 			for _, gf := range st.GroupBy {
 				if !selected[gf] {
-					row = append(row, KV{gf, first(g, gf)})
+					var v any
+					if len(g) > 0 {
+						v = g[0].vals[gf]
+					}
+					row = append(row, kv{gf, v})
 				}
 			}
 			for _, it := range st.Items {
-				if it.Fn != "" {
-					row = append(row, KV{it.Label, aggregate(it, g.recs)})
+				if it.Func != "" {
+					row = append(row, kv{it.Label, sc.aggregate(it, g)})
 				} else {
-					row = append(row, KV{it.Label, first(g, it.Field)})
+					var v any
+					if len(g) > 0 {
+						v = g[0].vals[it.Field]
+					}
+					row = append(row, kv{it.Label, v})
 				}
 			}
-			rows = append(rows, row)
-		}
-	} else {
-		sorted := append([]*Record{}, recs...)
-		sortRows(sorted, st.OrderBy, func(rc *Record, k OrderKey) any { return rc.vals[k.Field] })
-		seen := map[string]bool{}
-		for _, rc := range sorted {
-			var row Obj
-			for _, it := range st.Items {
-				row = append(row, KV{it.Label, rc.vals[it.Field]})
+			var okeys []any
+			for _, ok := range st.OrderBy {
+				switch {
+				case ok.Item != nil && ok.Item.Func != "":
+					okeys = append(okeys, sc.aggregate(ok.Item, g))
+				case ok.Item != nil:
+					v, _ := row.get(ok.Item.Label)
+					okeys = append(okeys, v)
+				default:
+					var v any
+					if len(g) > 0 {
+						v = g[0].vals[ok.Field]
+					}
+					okeys = append(okeys, v)
+				}
 			}
-			if st.Distinct {
-				k := toJSON(row)
+			rows = append(rows, rowWithKeys{row, okeys})
+		}
+		sortRows(rows, st.OrderBy)
+	} else {
+		for _, r := range recs {
+			row := omap{}
+			for _, it := range st.Items {
+				row = append(row, kv{it.Label, r.vals[it.Field]})
+			}
+			for _, c := range starCustom {
+				if v := r.vals[c.Name]; !noValue(v) {
+					row = append(row, kv{c.Name, v})
+				}
+			}
+			var okeys []any
+			for _, ok := range st.OrderBy {
+				if ok.Item != nil {
+					okeys = append(okeys, r.vals[ok.Item.Field])
+				} else {
+					okeys = append(okeys, r.vals[ok.Field])
+				}
+			}
+			rows = append(rows, rowWithKeys{row, okeys})
+		}
+		sortRows(rows, st.OrderBy)
+		if st.Distinct {
+			var kept []rowWithKeys
+			seen := map[string]bool{}
+			for _, r := range rows {
+				k := encodeJSON(r.row)
 				if seen[k] {
 					continue
 				}
 				seen[k] = true
+				kept = append(kept, r)
 			}
-			for _, cf := range starCustom {
-				if v := rc.vals[cf.Name]; !noValue(v) {
-					row = append(row, KV{cf.Name, v})
-				}
-			}
-			rows = append(rows, row)
+			rows = kept
 		}
 	}
-	res := rowsResult{}
-	limit := effectiveLimit(st)
+	limit := st.limit()
+	total, hasTotal := 0, false
 	if len(rows) > limit {
-		n := len(rows)
-		res.total = &n
+		total, hasTotal = len(rows), true
 		rows = rows[:limit]
 	}
-	if listTotal != nil {
-		t := *listTotal
-		res.total = &t
+	if fr.hasTotal {
+		total, hasTotal = fr.total, true
 	}
-	res.rows = rows
-	res.count = len(rows)
-	res.truncated = res.total != nil && (st.Limit == nil || *st.Limit > maxLimit)
-	return res
+	truncated := hasTotal && (!st.HasLimit || st.Limit > maxLimit)
+	var out []omap
+	for _, r := range rows {
+		out = append(out, r.row)
+	}
+	return out, len(out), total, hasTotal, truncated
 }
 
-// ---- read-statement ----
-
-func (r *run) readStatement(st *ReadStmt) (Obj, *AqlError) {
-	e := st.Entity
-	idf := e.IDField()
-	idConj := false
-	for _, c := range conjuncts(st.Where) {
-		if _, ok := eqConj(c, idf); ok && idf != "" {
-			idConj = true
-		}
-	}
-	var notes []string
-	// step 1: replace a Star item by fields
-	var items []SelectItem
-	labels := map[string]bool{}
-	hasStar := false
-	for _, it := range st.Items {
-		if it.Star {
-			hasStar = true
-		}
-	}
-	for _, it := range st.Items {
-		if !it.Star {
-			continue
-		}
-		var names []string
-		if idConj {
-			for _, f := range e.Fields {
-				names = append(names, f.Name)
-			}
-		} else {
-			names = e.DefaultFields
-			var others []string
-			def := map[string]bool{}
-			for _, d := range e.DefaultFields {
-				def[d] = true
-			}
-			for _, f := range e.Fields {
-				if !def[f.Name] {
-					others = append(others, f.Name)
-				}
-			}
-			notes = append(notes, fmt.Sprintf("* shows %s. Other fields of %s: %s.", strings.Join(e.DefaultFields, ", "), e.Name, strings.Join(others, ", ")))
-		}
-		for _, n := range names {
-			if !labels[n] {
-				labels[n] = true
-				items = append(items, SelectItem{Field: n, Label: n})
-			}
-		}
-		break
-	}
-	for _, it := range st.Items {
-		if it.Star {
-			continue
-		}
-		if hasStar && labels[it.Label] {
-			continue
-		}
-		labels[it.Label] = true
-		items = append(items, it)
-	}
-	st.Items = items
-	// step 2: the used fields
-	used := map[string]bool{}
-	for _, it := range st.Items {
-		if it.Field != "" {
-			used[it.Field] = true
-		}
-	}
-	condFields(st.Where, used)
-	for _, g := range st.GroupBy {
-		used[g] = true
-	}
-	for _, o := range st.OrderBy {
-		if o.Field != "" {
-			used[o.Field] = true
-		}
-		if o.Agg != nil && o.Agg.Field != "" {
-			used[o.Agg.Field] = true
-		}
-	}
-	var custom []*CustomField
-	for f := range used {
-		if cf := r.custom[f]; cf != nil && strings.HasPrefix(f, "custom.") {
-			custom = append(custom, cf)
-		}
-	}
-	sort.Slice(custom, func(i, j int) bool { return custom[i].Name < custom[j].Name })
-	// step 3
-	fr, err := r.planFetch(st, used, len(custom) > 0)
-	if err != nil {
-		return nil, err
-	}
-	// steps 4 and 5
-	var kept []*Record
-	for _, f := range fr.recs {
-		rec := r.convert(e, f, custom, used)
-		if r.eval(rec, st.Where, e, fr.applied) {
-			kept = append(kept, rec)
-		}
-	}
-	// step 6 a and b: star custom fields
-	var starCustom []*CustomField
-	if hasStar && idConj && !hasAggregate(st) && len(st.GroupBy) == 0 && len(kept) == 1 && !fr.countOnly {
-		cfs, err := r.customFields(e)
-		if err != nil {
-			return nil, err
-		}
-		for _, cf := range cfs {
-			if !used[cf.Name] {
-				starCustom = append(starCustom, cf)
-			}
-		}
-		if len(starCustom) > 0 {
-			api := kept[0].api
-			if e.Name == "products" {
-				id := str(api["id"])
-				route := routeWith("/products/{v}", "v", id)
-				m, f := r.get(route, "product")
-				switch {
-				case f == nil:
-					api = m
-				case f.Kind == failNotFound:
-					api = map[string]any{}
-				default:
-					return nil, r.failErr(f, "GET", route)
-				}
-			}
-			for _, cf := range starCustom {
-				kept[0].vals[cf.Name] = nil
-				if entry := customEntry(api, cf.Key); entry != nil {
-					v, _ := customValue(cf, entry)
-					kept[0].vals[cf.Name] = v
-				}
-			}
-		}
-	}
-	rr := buildRows(st, kept, starCustom, fr.total, fr.countOnly)
-	if rr.truncated {
-		notes = append(notes, fmt.Sprintf("Showing %d of %d records. Narrow the result with WHERE, raise LIMIT (up to %d), or count with COUNT(*).", rr.count, *rr.total, maxLimit))
-	}
-	if len(rr.rows) == 0 && !hasAggregate(st) && len(st.GroupBy) == 0 {
-		notes = append(notes, r.emptyNotes(st)...)
-	}
-	out := Obj{{"entity", e.Name}, {"scope", fr.scope}, {"count", rr.count}}
-	if rr.total != nil {
-		out = append(out, KV{"total", *rr.total})
-	}
-	if rr.truncated {
-		out = append(out, KV{"truncated", true})
-	}
-	rows := rr.rows
-	if rows == nil {
-		rows = []Obj{}
-	}
-	out = append(out, KV{"records", rows})
-	if len(notes) > 0 {
-		out = append(out, KV{"note", strings.Join(notes, " ")})
-	}
-	return out, nil
-}
-
-func (r *run) emptyNotes(st *ReadStmt) []string {
-	e := st.Entity
-	var notes []string
-	for _, c := range conjuncts(st.Where) {
-		if len(notes) >= 2 {
-			break
-		}
-		cmp, ok := c.(*Cmp)
-		if !ok {
-			continue
-		}
-		s, ok := cmp.Value.(string)
-		if !ok {
-			continue
-		}
-		t := strings.TrimSuffix(strings.TrimPrefix(s, "%"), "%")
-		k := refKind(t)
-		switch {
-		case cmp.Field == e.IDField() && cmp.Op == "=":
-			notes = append(notes, fmt.Sprintf("There is no %s with the id %s.", e.Singular, quoteVal(s)))
-		case cmp.Field != "name":
-		case e.Name == "products" && r.productFound(t) != nil:
-			p := r.productFound(t)
-			notes = append(notes, fmt.Sprintf("%s is the key of a product, not its name. Use: SELECT key, name FROM products WHERE key = '%s'", quoteVal(s), p.Key))
-		case k != "" && k == e.Kind:
-			notes = append(notes, fmt.Sprintf("%s looks like an id, not a name. Use: WHERE id = '%s'", quoteVal(s), strings.ToUpper(t)))
-		case k != "" && e.HasParentFilter(k):
-			notes = append(notes, fmt.Sprintf("%s looks like the id of a %s, not a name. Use: WHERE %s = '%s'", quoteVal(s), k, k, strings.ToUpper(t)))
-		case cmp.Op == "=":
-			notes = append(notes, fmt.Sprintf("No %s has exactly the name %s. name = compares the whole name; to search inside names use: name CONTAINS %s", e.Singular, quoteVal(s), quoteVal(s)))
-		}
-	}
-	return notes
-}
-
-func (r *run) productFound(v string) *Product {
-	p, _ := r.findProduct(v)
-	return p
-}
-
-// ---- describe-statement ----
-
-func typeText(f *FieldDef) string {
-	switch f.Type {
-	case ftString:
-		return "string"
-	case ftText:
-		return "text"
-	case ftNumber:
-		return "number"
-	case ftBoolean:
-		return "boolean"
-	case ftKey:
-		return "product key"
-	case ftUser:
-		if f.UserAsName {
-			return "user (name)"
-		}
-		return "user (e-mail address)"
-	case ftStatus:
-		return "status name"
-	case ftDate:
-		return "date (YYYY-MM-DD)"
-	case ftDatetime:
-		return "timestamp"
-	case ftReference:
-		return "id of " + article(f.RefKind)
-	}
-	return "string"
-}
-
-func (r *run) describe(st *DescribeStmt) (Obj, *AqlError) {
-	if st.Entity == nil {
-		var ents []Obj
-		for _, e := range catalog {
-			ents = append(ents, Obj{{"entity", e.Name}, {"about", withKey(e.About)}})
-		}
-		return Obj{{"entities", ents}, {"note", "DESCRIBE entity lists the fields of one entity, for example: DESCRIBE features"}}, nil
-	}
-	e := st.Entity
-	out := Obj{{"entity", e.Name}, {"about", withKey(e.About)}}
-	var fields []Obj
-	for i := range e.Fields {
-		f := &e.Fields[i]
-		o := Obj{{"name", f.Name}, {"type", typeText(f)}}
-		switch f.Writable {
-		case wYes:
-			o = append(o, KV{"writable", true})
-		case wInsertOnly:
-			o = append(o, KV{"writable", "INSERT only"})
-		}
-		fields = append(fields, o)
-	}
-	out = append(out, KV{"fields", fields})
-	cfs, err := r.customFields(e)
-	if err != nil {
-		return nil, err
-	}
-	if len(cfs) > 0 {
-		var l []Obj
-		for _, cf := range cfs {
-			o := Obj{{"name", cf.Name}, {"label", cf.Label}, {"type", customKindText[cf.Kind]}}
-			if cf.Kind != "scorecard" && e.CanUpdate {
-				o = append(o, KV{"writable", true})
-			}
-			l = append(l, o)
-		}
-		out = append(out, KV{"custom_fields", l})
-		idf := e.IDField()
-		kind := e.Kind
-		out = append(out, KV{"custom_fields_note", fmt.Sprintf("* shows custom fields only with %s = '...', and only those that have a value. To select one by name: SELECT %s, %s FROM %s WHERE %s = '%s'",
-			idf, idf, cfs[0].Name, e.Name, idf, exampleID(kind))})
-	}
-	if len(e.ParentFilters) > 0 {
-		var l []string
-		for _, p := range e.ParentFilters {
-			l = append(l, p+" = '...'")
-		}
-		out = append(out, KV{"filter_by_parent", l})
-	}
-	if e.HasField("status") {
-		out = append(out, KV{"status_values", fmt.Sprintf("SELECT name FROM statuses WHERE product = '%s' AND entity = '%s'", keyMark, e.Name)})
-	}
-	if !e.HasOperation() {
-		out = append(out, KV{"change_with_execute", "read-only"})
-	} else {
-		var l []string
-		if e.CanCreate {
-			what := "the id of the commented record"
-			switch {
-			case e.ParentKind == "product":
-				what = "a product key"
-			case e.ParentKind != "any":
-				what = "the id of " + article(e.ParentKind)
-			}
-			l = append(l, fmt.Sprintf("INSERT INTO %s (parent, ...) VALUES (...): parent is %s", e.Name, what))
-		}
-		if e.CanUpdate {
-			l = append(l, fmt.Sprintf("UPDATE %s SET field = 'value' WHERE id = '...'", e.Name))
-		}
-		if e.CanDelete {
-			l = append(l, fmt.Sprintf("DELETE FROM %s WHERE id = '...'", e.Name))
-		}
-		out = append(out, KV{"change_with_execute", l})
-	}
-	out = append(out, KV{"example", exampleOf(e)})
-	return out, nil
-}
+var _ = utf8.RuneLen

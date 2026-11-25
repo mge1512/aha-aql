@@ -2,12 +2,13 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.13.0
+Version:      0.20.1
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
 Verification: none
 Safety-Level: QM
+Module:       github.com/mge1512/aha-aql
 
 This specification describes mcp-server-aha-aql, a small MCP server for the
 Aha! product management service. A language model works with Aha! through
@@ -285,8 +286,8 @@ ErrorKind := syntax | bad_name | scope | bad_args | bad_product | wrong_kind
 // wrong_kind:     An id of another kind of record, or a name where an id
 //                 is needed
 // not_found:      A record that does not exist
-// bad_value:      A value that cannot be written to the field, or a
-//                 required value that is missing
+// bad_value:      A value that cannot be written to the field or compared
+//                 with it, or a required value that is missing
 // guard_failed:   A condition next to the id is not true for the record;
 //                 nothing was changed
 // not_authorized: Aha! did not accept the credential, or the credential
@@ -395,17 +396,29 @@ Values in an API record:
 - A member that names a status, a user or another record is an object. The catalog writes its source with a dot: `workflow_status.name`, `assigned_to_user.email`, `feature.reference_num`.
 - A feature names its release, its initiative and its epic in members of their own, for example `release_reference_num`. An epic has `initiative_reference_num` and no `release_reference_num`. It names its release in the object `release`, whose member `reference_num` has the id.
 - The success metric of a goal is the object `success_metric`. Its member `name` has the text of the metric, and its member `workflow_status` has the status of the goal. A goal has no member `workflow_status` of its own.
+- A timestamp is a JSON string in an ISO 8601 form, for example `2026-02-02T08:00:00.000Z`. evaluate-condition reads it as a point in time. The result of a comparison does not depend on the number of digits after the seconds, and it does not depend on how the zone is written.
 
 The parameter `fields` of ApiList names top-level members only. For the
 API source `workflow_status.name` it names `workflow_status`, and each
 name is there once.
 
-Test double: FakeAha. It takes the place of the HTTPS connection (see
-aha-request). It gets every request with its method, address, headers and
-body, answers it from memory with a fixture account, and never opens a
-network connection.
+Test double: FakeAha. FakeAha is an HTTPS server outside the server
+process, and it is the HTTPS proxy of the test. A test gives the server
+the address of FakeAha in HTTPS_PROXY and the certificate authority of
+the test in SSL_CERT_FILE, as a sandbox does (see aha-request). The
+server then asks FakeAha with CONNECT for a tunnel to `example.aha.io`,
+port 443. Inside the tunnel FakeAha ends the TLS connection with a
+certificate for that host name, which the certificate authority of the
+test has signed. FakeAha gets every request with its method, address,
+headers and body, and answers it from memory with a fixture account. It
+opens no network connection of its own.
 
-- FakeAha serves the subdomain `example` and accepts the credential `fixture-key`. A request with another credential is answered with the status 403. A request to another host is a failure of the test.
+The server has no hook for tests: no option, no variable and no part of
+its code is there for a test only. A test starts the server as a user
+starts it, and sees what a user sees: the tool results, the two output
+streams, the exit code, and the requests that arrive at FakeAha.
+
+- FakeAha serves the subdomain `example` and accepts the credential `fixture-key`. A request with another credential is answered with the status 403. A CONNECT request for another host is a failure of the test.
 - Every answer of FakeAha has the JSON form of the section above. A record is in the member with its singular name, and a list is in the member with the name of the last part of the route. `description` and `theme` are objects with the member `body`.
 - ApiList returns pages of `per_page` records with correct `total_records` and `total_pages`.
 - A record of a list has the members of the parameter `fields`, and `id`.
@@ -419,13 +432,14 @@ network connection.
 - A record that is read by its id has the member `custom_fields`. A product that is read with ApiGet on /products/{id}, with its NumericId, has that member too. A record of a list has it only when the parameter `fields` names `custom_fields`. The member is a list with one entry per custom field that has a value in the record. It is an empty list for a record without such a value. The entries have the form that custom-fields describes.
 - ApiUpdate with the member `custom_fields` sets these custom values, and the answer has them as entries. For a users field FakeAha accepts the id or the e-mail address of a user of the fixture account.
 - A test can tell FakeAha to leave the member `custom_fields` out of every record of a list.
-- A test can tell FakeAha to answer a route with a given status and header a given number of times, or to give no answer. A test can also give FakeAha the body of an answer.
-- FakeAha records for every request the proxy that the server chose for it, or that it chose none. A test can tell FakeAha that the proxy does not open the tunnel.
-- FakeAha records every call with its method, address, headers, parameters and body. A test can then check which requests a statement caused, which credential they had, and that a failed statement caused no write request.
+- A test can tell FakeAha to answer a route with a given status and header a given number of times, or to give no answer. The value of such a header can be a time: the UTC Unix time of the answer plus a number of seconds. A test can also give FakeAha the body of an answer.
+- FakeAha records every CONNECT request with its host, its port and its headers. A test can tell FakeAha to refuse CONNECT: that is a proxy that does not open the tunnel.
+- FakeAha records every call with its method, address, headers, parameters and body, and with the time when it arrived. A test can then check which requests a statement caused, which credential they had, and that a failed statement caused no write request.
 
 The EXAMPLES use this fixture account. Unless an example says otherwise:
 
 - The server runs in stdio mode. Its Account has the subdomain `example` and the credential `fixture-key`.
+- The environment of the server has HTTPS_PROXY with the address of FakeAha and SSL_CERT_FILE with the certificate authority of the test. It has no NO_PROXY and no other proxy variable.
 - The setting default_product has no value, and read_only is false.
 - The tool list was answered before the call of the example. The ExampleKey is therefore chosen, and it is PROD.
 - The calls that an example counts are the calls that its statement caused.
@@ -477,6 +491,13 @@ Features of DEMO, in the order in which the API lists them:
 | DEMO-4 | Live video feed | Under consideration | DEMO-R-3 | DEMO-S-1 | (none) |
 | DEMO-5 | Rider's handbook | Shipped | DEMO-R-3 | (none) | (none) |
 | DEMO-6 | Route planner | Under consideration | DEMO-R-1 | (none) | (none) |
+
+Every feature of DEMO has the created_at `2026-02-01T08:00:00.000Z`.
+DEMO-1 has the updated_at `2026-02-02T08:00:00.000Z`, and the other five
+features have the updated_at `2026-02-03T23:30:00.000Z`.
+
+DEMO-3 has the tags live and dashboard, in this order, and DEMO-4 has
+the tag live. No other feature of the fixture account has tags.
 
 Other records of the fixture account:
 
@@ -639,8 +660,6 @@ without an error:
 The line has no value of a field, no text of the statement and no
 credential.
 
-MECHANISM: the time comes from a clock that tests replace.
-
 POSTCONDITIONS:
 - at most one record of the account was created, changed or deleted
 - when the result is an error that was found before the write request, no ApiCreate, ApiUpdate or ApiDelete call was made
@@ -672,7 +691,7 @@ PRECONDITIONS:
 - load-configuration has succeeded
 
 STEPS:
-1. Register `query` with the description below. It has one parameter, `query`: text, required, with the description "One AQL statement". Its annotations say that it only reads: readOnlyHint true, openWorldHint true.
+1. Register `query` with the description below. It has one parameter, `query`: text, required, with the description "One AQL statement". Its annotations say that it only reads: readOnlyHint true, destructiveHint false, idempotentHint true, openWorldHint true.
 2. Unless read_only is true: register `execute` with the description below. It has one parameter, `statement`: text, required, with the description "One AQL statement". Its annotations say that it changes data and can delete: readOnlyHint false, destructiveHint true, idempotentHint false, openWorldHint true.
 3. Register no other tool, no MCP resource and no MCP prompt.
 4. When the tool list is answered: replace every {KEY} in both descriptions by the ExampleKey of the Account that asks (see choose-example-key).
@@ -820,8 +839,8 @@ STEPS:
    a. `read-only` and `dry-run`: `true` or `false`; otherwise → G04.
    b. `subdomain`: put the value into lower case. If it does not match Subdomain → G04.
    c. `default-product` and `api-key-file`: if the option is given with an empty value → G04.
-   d. `listen`: the value goes to the http transport of the deployment template. If its host is not a loopback address: write a warning to the diagnostic output. The warning says that every request has a credential and that the connection needs TLS in front of the server.
-7. In http mode: the account is none, and the variable AHA_API_KEY is not read. If that variable is not empty: write a warning to the diagnostic output that says so. Continue with step 11.
+   d. `listen`: the value goes to the http transport of the deployment template. If its host is not a loopback address: write the warning G13 to the diagnostic output. The server starts.
+7. In http mode: the account is none, and the variable AHA_API_KEY is not read. If that variable is not empty: write the warning G14 to the diagnostic output. Continue with step 11.
 8. In stdio mode and manual mode: if there is no subdomain → G05.
 9. Credential from a file. When the option `api-key-file` is given, the variable AHA_API_KEY is not read.
    a. If the path is not a regular file that the process can read → G07.
@@ -843,7 +862,12 @@ Options:
 | query | One read statement or describe statement, or `-` | query | none | Required |
 | statement | One write statement, or `-` | execute | none | Required |
 
-Environment variables. The server reads these variables and no other:
+Environment variables. The code of the server reads the first four
+variables of this table and no other variable. They give settings. The
+standard library of the language reads the other variables of the table
+for the connection to Aha!. A variable that the standard library or the
+runtime of the language reads for another purpose is not a setting of
+the server:
 
 | Variable | Use | Read in |
 |---|---|---|
@@ -872,6 +896,19 @@ Start messages. Each one is a single line on standard error:
 | G11 | `error: execute is not available, because read-only is true (option read-only or variable AHA_READ_ONLY)` |
 | G12 | `error: unknown transport '<word>'. Valid: stdio, http, query, execute` |
 
+Warnings. Each one is a single line on standard error. After a warning
+the server goes on:
+
+| ID | Text | Written by |
+|---|---|---|
+| G13 | `warning: the listen address is not a loopback address. Every request has a credential: put a TLS endpoint in front of the server` | load-configuration, step 6 d |
+| G14 | `warning: AHA_API_KEY is not read in http mode. Each request brings its credential in the header Aha-Api-Key` | load-configuration, step 7 |
+| G15 | `warning: default-product names no product of the account. Examples use the key <KEY>` | choose-example-key, step 4 |
+| G16 | `warning: the product list could not be read. Examples use the key PROD` | choose-example-key, step 5 |
+
+In G15, `<KEY>` is the ExampleKey that step 3 of choose-example-key
+gives. No warning has the value of an option or of a variable.
+
 In G12, `<word>` is the first word as it was given, and it is empty when
 the command line has none. The text has the form of the message of the
 deployment template for an unknown transport, with the two words of manual
@@ -899,7 +936,7 @@ POSTCONDITIONS:
 - no request was sent
 - an option took precedence over its variable, and the key file over AHA_API_KEY
 - no start message and no warning has the credential, and none has the value of an argument or of a variable other than the path of the key file
-- the settings come from the arguments, from the key file and from the variables of the second table, and from no other variable and no other file
+- the settings come from the arguments, from the key file and from the four AHA_ variables of the second table, and from no other variable and no other file
 
 ERRORS:
 - start error with exit code 2: G01 to G09, and G12
@@ -952,8 +989,9 @@ text.
 
 The Account of a request is used for that request only. When the request
 is answered, the server keeps neither the credential nor anything that it
-read from Aha! with it. Where a behavior says that a list may be kept
-between statements, this applies to stdio mode only.
+read from Aha! with it. In stdio mode the server keeps nothing that it
+read from Aha! after a statement either. The one value that it keeps is
+the ExampleKey (see choose-example-key).
 
 POSTCONDITIONS:
 - in http mode no request reaches a tool, the tool list or any other MCP method without a credential
@@ -986,21 +1024,23 @@ STEPS:
 1. Replace a Star item by fields. They are catalog fields. Custom fields come to a Star item only in step 6 a, for one record that the statement selects by its id field.
    a. When the WHERE condition has a conjunct that compares the id field of the entity with `=`: all fields of the entity.
    b. Otherwise: the default fields of the entity, followed by the other fields that the statement selects by name. Add note H01. Here a custom field is in the result only when the statement names it.
+   c. After the replacement, a field item that has the label and the field of an earlier item is left out, as parse-statement says for two equal items: `SELECT *, name` shows `name` once.
 2. Collect the used fields: the fields of the select items, of the WHERE condition, of GROUP BY and of ORDER BY. Custom fields are among them.
 3. Run plan-fetch with the statement and the used fields; on failure → the error of plan-fetch. plan-fetch returns the API records, the scope and the applied conjuncts. It also returns the total of a list that was not read to its end, and the mark that page 1 was read for a count only.
 4. Run convert-record for every API record, with the custom fields among the used fields.
 5. Keep each record for which evaluate-condition is true for the WHERE condition. A conjunct that the route has applied counts as true.
 6. Run build-rows with the kept records, the star custom fields, and the total and the count-only mark of plan-fetch. It returns the rows, count, total and truncated.
-   a. Star custom fields. There are some only when all of this is true: step 1 a applied, the statement has no aggregate item and no GROUP BY, and one record is kept. Then run custom-fields for the entity without a key; on failure → the error of custom-fields. The star custom fields are the custom fields of its result that the statement does not select by name. Their values are taken as step 4 of convert-record says, from the API record that step b names.
+   a. Star custom fields. There are some only when all of this is true: step 1 a applied, the statement has no aggregate item and no GROUP BY, and one record is kept. Then run custom-fields for the entity without a key; on failure → the error of custom-fields. The star custom fields are the custom fields of its result that the statement does not select by name and whose name is not a label of the statement. Their values are taken as step 4 of convert-record says, from the API record that step b names.
    b. The API record for these values. For a record that plan-fetch read by its id route, it is the API record of the kept record. A product comes from the product list, which has no custom fields. When the list of star custom fields is not empty, read the kept product with one ApiGet on /products/{product}, with its NumericId. Its answer is the API record. NotFound → no star custom field has a value. Any other failure → the error that step 10 of plan-fetch gives for it.
    c. In every other case there are no star custom fields, and a Star item causes no request for custom field definitions.
 7. If truncated: add note H02.
-8. If there is no row and the statement has no aggregate item and no GROUP BY: add notes that explain the empty result, at most two. Go through the conjuncts that are a Comparison with a Text value, in the order of the statement. A `%` at the start or at the end of the value is ignored for these tests.
-   a. The id field of the entity with the operator `=` gives H03.
+8. If no record was kept in step 5 and the statement has no aggregate item and no GROUP BY: add notes that explain the empty result, at most two. Go through the conjuncts that are a Comparison with a Text value, in the order of the statement. A `%` at the start or at the end of the value is ignored for these tests.
+   a. The id field of the entity with the operator `=`. This case applies when plan-fetch read the id route for the value of this conjunct. On products and on users it applies to every such conjunct, because their list is complete. If no record with that id was read, the conjunct gives H03. If the record was read, another condition is not true for it, and the conjunct gives H08.
    b. On products, the field `name` with a value that resolve-product finds gives H04.
    c. The field `name` with a value that has the form of a ReferenceNumber of the entity's kind gives H05.
    d. The field `name` with a value that has the form of a ReferenceNumber whose kind is a parent filter of the entity gives H06.
    e. Any other comparison of the field `name` with the operator `=` gives H07.
+   f. On statuses, the field `entity` with the operator `=`, when the product has no status for the entity of the value, gives H09.
 9. Return the ReadResult with entity, scope, rows, count, total, truncated and notes.
 
 POSTCONDITIONS:
@@ -1150,11 +1190,11 @@ STEPS:
 2. Call ApiGet on the id route of the entity. NotFound → not_found, message W20. NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Rejected → api_error, message X03.
    MECHANISM: the record is read with one request by its id. The statement never lists records to find the record to change.
 3. Run convert-record for the record, with the custom fields that the statement uses.
-4. For each guard, in the order of the statement: run evaluate-condition with the operator "=" on the record. The first guard that is not true → guard_failed, message W29.
+4. For each guard, in the order of the statement: run evaluate-condition for it on the record. A guard is a comparison with the operator "=", or the test for no value that parse-statement reads from `field = ''`. The first guard that is not true → guard_failed, message W29.
 5. Run check-write-values for the assigned fields with the product of the record; on failure → the error of check-write-values.
 6. If dry_run: return a WriteResult with the id, the assigned fields with their checked values, and the message "would update <singular> <id>". A checked value that is a TextList is shown as text, joined by a comma and a space. No write request is sent.
 7. Run write-request for the entity and the checked fields. Call ApiUpdate on the update route with that body. NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. NotFound, when the statement assigns exactly one reference → not_found, message W25 for that reference. Any other failure → api_error, message W30.
-8. Return the WriteResult. `id` is the id of the record. `values` has `name`, or `parent` for a comment, followed by each assigned field with the value that the record has after the write. A custom field is in `values` under its name, `custom.` and the key, with the value that convert-record gives for the answer of the write request. `message` is "<Singular> <id> status changed to '<status>'" when `status` is the only assigned field, and "<Singular> <id> updated" in every other case.
+8. Return the WriteResult. `id` is the id of the record. `values` has `name`, or `parent` for a comment, and then each assigned field that is not yet in it. Each one has the value that the record has after the write, so a statement that assigns `name` shows `name` once. A custom field is in `values` under its name, `custom.` and the key, with the value that convert-record gives for the answer of the write request. `message` is "<Singular> <id> status changed to '<status>'" when `status` is the only assigned field, and "<Singular> <id> updated" in every other case.
 
 POSTCONDITIONS:
 - exactly one record was changed, in every assigned field and in no other field
@@ -1303,7 +1343,8 @@ Form of a read statement:
 
 item       = * | field [AS label] | function ( * | [DISTINCT] field ) [AS label]
 function   = COUNT | SUM | AVG | MIN | MAX
-key        = field | label of an aggregate item | function ( * | field )
+label      = word | text
+key        = field | label | function ( * | [DISTINCT] field )
 condition  = condition OR condition | condition AND condition
            | NOT condition | ( condition ) | comparison
 comparison = field operator value
@@ -1320,15 +1361,42 @@ Rules for a read statement:
 - Without SELECT, the item is `*`.
 - NOT binds stronger than AND, and AND binds stronger than OR.
 - `field = NULL` is read as `field IS NULL`, and `field != NULL` as `field IS NOT NULL`.
+- `field = ''` is read as `field IS NULL`, and `field != ''` as `field IS NOT NULL`. No field has empty text as its value: evaluate-condition takes empty text as no value.
+- In an IN list, NULL and empty text stand for a field without a value (see evaluate-condition, step 3).
+- The value of a comparison with `=`, `!=`, `<`, `<=`, `>`, `>=`, IN or BETWEEN must fit the type of its field, as the table of values in a condition says (below). A custom field has the field type of its kind (see custom-fields). A value that does not fit → bad_value, message V01. `<`, `<=`, `>`, `>=` or BETWEEN on a field of the type boolean → bad_value, message V02. The check needs no record, and it is made before the first request for records. CONTAINS and LIKE take any text.
 - `field BETWEEN a AND b` is read as `field >= a AND field <= b`.
 - NOT before IN, CONTAINS, LIKE or BETWEEN negates that comparison.
 - The label of a field item is the word as the statement writes it, without a qualifier, or the label after AS. The label of an aggregate item is the label after AS, or the function name in capital letters with its argument in parentheses as written: `COUNT(*)`, `COUNT(name)`, `COUNT(DISTINCT status)`.
-- `COUNT(1)` and COUNT with the name of an entity as its argument are read as `COUNT(*)`.
+- `COUNT(1)` and COUNT with the name of an entity as its argument are read as `COUNT(*)`. Their label is `COUNT(*)`.
+- `*` is the argument of COUNT only, and it does not follow DISTINCT. `*` in SUM, AVG, MIN or MAX → syntax, message S03. What was expected is `a field inside <FUNCTION>( )`. `*` after DISTINCT → syntax, message S03. What was expected is `a field after DISTINCT`.
+- A label after AS is a word that is not a keyword, or a text that is not empty. It is used as the statement writes it.
+- A row has each label once. A select item that has the label and the content of an earlier item is left out. The content of an item is its field, or its function with its argument: `SELECT id, id` is read as `SELECT id`, and `COUNT(1)` after `COUNT(*)` is left out. Labels are compared as they are written: `id` and `ID` are two labels. A field that GROUP BY names a second time, in any spelling, is left out in the same way.
+- Two select items with the same label and different content → syntax, message S15.
+- A label after AS must not be the name of another field that the row can show. There are two cases, and both → syntax, message S16. First: the label is the name of a field of GROUP BY that the statement does not select; build-rows shows that field under its name. Second: the statement has a Star item, and the label is the name of a field of the entity that is not the field of its own item.
+- A key of ORDER BY is a field, a label of a select item or an aggregate. A label stands for its select item. A word that is a label of the statement and also a field word is the label. An aggregate key does not have to be a select item.
+- In a statement with an aggregate item or GROUP BY, a key that is a field must be a field of GROUP BY or a selected field. Any other field → syntax, message S03. What was expected is `a field of GROUP BY, a selected field or an aggregate after ORDER BY`.
+- In a statement without an aggregate item and without GROUP BY, an aggregate key → syntax, message S03. What was expected is `a field name`.
 - A qualifier before a field (`f.name`, `features.name`) is ignored, and `alias.*` is `*`.
 - The part `custom.` of a custom field word is not a qualifier. It belongs to the word and to its label: the label of `f.custom.priority` is `custom.priority`.
 - A word directly followed by `(` that is not one of the five functions → syntax, message S12.
 - A word that is not a keyword, where a value is expected → syntax, message S13.
 - LIMIT takes a whole number that is not negative.
+
+Values in a condition:
+
+| Type of the field | Accepted value | Compared as |
+|---|---|---|
+| number | A Number, or Text that reads as a number | A number |
+| boolean | TRUE or FALSE, the number 1 or 0, or the text `true` or `false` in any case | A truth value |
+| date | A DateText that is a day of the calendar, or a timestamp | A day: the first 10 characters of the value |
+| datetime | A DateText that is a day of the calendar, or a timestamp | A day or a point in time, as evaluate-condition says |
+| every other type | Text, a Number or a Boolean | Text, as evaluate-condition says |
+
+A timestamp is text that starts with a DateText. `T` or one space follows,
+and then the time as hh:mm. The time can go on with :ss and with a fraction
+of the second. `Z`, or an offset of the form +hh:mm or -hh:mm, can end the
+text. Without `Z` and without an offset the timestamp is in UTC. NULL fits
+every type.
 
 Form of a describe statement:
 
@@ -1351,12 +1419,13 @@ Rules for a write statement:
 - The entity goes through resolve-names. An unknown entity → bad_name, message W12. An entity without any operation → bad_name, message W13. An entity that does not have the operation of the statement → bad_name, message W14.
 - INSERT has one row of values. A second row → syntax, message W07. A different number of columns and values → syntax, message W08.
 - A column of INSERT is the parent when it is `parent`, the name of the parent kind of the entity, or another name of the parent field of the entity. The parent given twice with different values → syntax, message W09.
+- A write statement sets each field once, whatever the spelling: `title` is `name`, and in an UPDATE of a feature `parent` is `release`. A column of INSERT or an assigned field of UPDATE that names the field of an earlier column or assignment → syntax, message W33. A custom field counts in the same way. The parent of INSERT has the rule of W09 instead: the parent given twice with one value is one parent. A guard may name a field that the statement assigns.
 - A column or an assigned field that is the id field of the entity → bad_name, message W15. A column or an assigned field that is unknown or not writable → bad_name, message W16. An assigned field of UPDATE that is writable in INSERT only → bad_name, message W16.
 - An assigned field of UPDATE can be a custom field of the entity. A column or an assigned field that is a custom field of a kind that cannot be set → bad_name, message W16. Every other custom field as a column of INSERT → bad_name, message W31: a custom field is set with UPDATE only.
 - An assignment is `field = value`. Anything between the value and the next `,` or WHERE → syntax, message W10.
 - UPDATE and DELETE need a WHERE clause; without it → syntax, message W04.
 - The first condition of the WHERE clause must compare the id field of the entity with `=`. The id field may have any spelling that resolve-names accepts. Any other first condition → syntax, message W05. The value must be a text or a number; otherwise → syntax, message W03.
-- Each further condition must be joined with AND and have the form `field = value`. OR, NOT or parentheses → syntax, message W05. Another operator → syntax, message W06. A field that is not a field of the entity → bad_name, message W17. A custom field of the entity is a field of the entity here. These conditions are the guards of the statement.
+- Each further condition must be joined with AND and have the form `field = value`. OR, NOT or parentheses → syntax, message W05. Another operator → syntax, message W06. A field that is not a field of the entity → bad_name, message W17. A custom field of the entity is a field of the entity here. These conditions are the guards of the statement. The value of a guard must fit the type of its field, as the table of values in a condition says; otherwise → bad_value, message V01. A guard `field = ''` is read as `field IS NULL`: it is true when the field has no value.
 - NULL as a value → syntax, message W11. A word that is not a keyword, where a value is expected → syntax, message S13.
 - Any other departure from the forms → syntax, message W03.
 
@@ -1366,8 +1435,9 @@ POSTCONDITIONS:
 - no input is left after the statement
 
 ERRORS:
-- syntax: S03 to S14, W01 to W11, and S01 and S02 from tokenize
+- syntax: S03 to S16, W01 to W11 and W33, and S01 and S02 from tokenize
 - bad_name: W12 to W17 and W31, and N01 to N07 from resolve-names
+- bad_value: a value in a condition or in a guard that does not fit the type of its field (V01), and an ordering operator on a boolean field (V02)
 - rate_limited, network, api_error: X01, X02, X03, when resolve-names needs the custom field definitions and they cannot be read
 
 ## BEHAVIOR/INTERNAL: entity-catalog
@@ -1457,7 +1527,7 @@ exceptions are:
 | name | string | name | no | |
 | product_line | boolean | product_line | no | false when the API record has no value |
 | parent | key | parent_id | no | The key of the product with that NumericId |
-| description | text | description | no | |
+| description | text | description | no | heavy |
 | created_at | datetime | created_at | no | |
 | url | string | url | no | |
 
@@ -1877,18 +1947,17 @@ PRECONDITIONS:
 
 STEPS:
 1. Take the record types that the catalog entry of the entity names for custom fields. If the entry names none, the entity has no custom fields, and no request is sent. Without a key the result is an empty list. With a key: when explicit is true → bad_name, message N06; otherwise the result is none.
-2. Take the custom field definitions of the account. When they were not read before, call ApiList on /custom_field_definitions with per_page = PageSize, page by page to the last page.
+2. Take the custom field definitions of the account. When the statement has not read them yet, call ApiList on /custom_field_definitions with per_page = PageSize, page by page to the last page.
    a. NotAuthorized or NotFound: the credential cannot read the definitions. The server then works as if the account had no custom fields. Without a key the result is an empty list. With a key: when explicit is true → bad_name, message N07; otherwise the result is none.
    b. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Rejected → api_error, message X03.
-   c. In stdio mode the definitions, or the answer of step 2 a, may be kept between statements. In http mode they are read at most once per request and are not kept.
+   c. The definitions, or the answer of step 2 a, are read at most once per statement. They are not kept after the statement, in stdio mode and in http mode.
 3. Choose the definitions of the entity. The record type of a definition is its member `custom_fieldable_type`, and its type name is its member `type`. Of both, only the part after the last `::` counts, and it is compared without regard to case: `Ideas::Idea` is `Idea`, and `CustomFieldDefinitions::Records::UsersField` is `UsersField`. A definition belongs to the entity when its record type is one of the record types of step 1. When two definitions of the entity have the same key, the first one in the order of the API counts.
 4. Give each definition of the entity its kind from the table of kinds below. A definition whose type name is not in that table is not supported: the server does not read it and does not set it.
 5. Without a key: the result has one CustomField for each supported definition of the entity. The list is sorted by name, character by character.
 6. With a key: compare the key with the keys of the definitions of the entity, without regard to case.
    a. A supported definition has the key: the result is its CustomField.
    b. A definition that is not supported has the key → bad_name, message N05.
-   c. No definition has the key, and the definitions were kept from an earlier statement: read them again as step 2 says, and compare once more. A statement reads them again at most once.
-   d. Still no definition has the key. When explicit is false, the result is none. When the entity has a supported definition → bad_name, message N04. In every other case → bad_name, message N06.
+   c. No definition has the key. When explicit is false, the result is none. When the entity has a supported definition → bad_name, message N04. In every other case → bad_name, message N06.
 
 Kinds. The type names are the names of Aha! for its types of custom
 fields. The field type says how evaluate-condition and build-rows treat a
@@ -1960,14 +2029,13 @@ Options. A definition of the kind fixed_choice or fixed_tags has options.
 They are read with ApiGet on /custom_field_definitions/{definition}/options.
 The member `options` of the answer is a list, and the member `text` of
 each of its objects is the text of one option. The order of the list is
-the order of the options. In stdio mode the options of a definition may be
-kept between statements. In http mode they are read at most once per
-request and are not kept.
+the order of the options. The options of a definition are read at most
+once per statement and are not kept after it.
 
 POSTCONDITIONS:
 - every CustomField of a result comes from a definition of the account whose record type the catalog names for the entity
 - a word that the catalog resolves causes no request of this behavior
-- one statement reads the definitions at most twice
+- one statement reads the definitions at most once, and the server does not keep them after the statement
 
 ERRORS:
 - bad_name: an unknown custom field (N04); a custom field of a type that is not supported (N05); an entity without custom fields (N06); definitions that the credential cannot read (N07)
@@ -2049,18 +2117,17 @@ PRECONDITIONS:
 - none
 
 STEPS:
-1. Take the product list. When it was not read before: call ApiList on /products for all pages, with the members that the fields of the entity products need. NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Any other failure → api_error, message X03. In stdio mode the list may be kept between statements. In http mode it is read at most once per request and is not kept.
+1. Take the product list. When the statement has not read it yet: call ApiList on /products for all pages. The parameter `fields` names the API sources of the fields of products that are not heavy. NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Any other failure → api_error, message X03. The list is read at most once for one statement, and at most once for the answer to the tool list. It is not kept after that, in stdio mode and in http mode.
 2. Compare the value with the key and the NumericId of every product, and then with the name of every product. The comparison is the equality of text of evaluate-condition. The first match is the result.
-3. Without a match, when the product list was kept from an earlier statement: read it again as in step 1 and repeat step 2 once.
-4. Without a match, when hints is true, take the first case that applies:
+3. Without a match, when hints is true, take the first case that applies:
    a. the value is a ReferenceNumber whose kind is a parent filter of the entity → wrong_kind, message P02;
    b. the value is a ReferenceNumber of the kind of the entity → wrong_kind, message P03;
    c. the value is a ReferenceNumber with a kind, and the part before its first `-` is the key of a product → wrong_kind, message P04.
-5. In every other case → bad_product, message P01.
+4. In every other case → bad_product, message P01.
 
 POSTCONDITIONS:
 - the key of the result is written as the account writes it, whatever the case of the value
-- a product that was created after the list was read is found
+- a product that exists when the statement runs is found, because the statement reads the list
 
 ERRORS:
 - bad_product: P01
@@ -2097,7 +2164,7 @@ PRECONDITIONS:
 STEPS:
 1. Entities with a fixed source. For them the steps 2 to 7 do not apply.
    a. me: one ApiGet on /me. Scope: "current user".
-   b. products: the product list, as resolve-product reads it. Scope: "all products". When used_fields has a custom field, the list is read for this statement with `custom_fields` in the parameter `fields`, and step 8 e applies. This reading does not replace a product list that is kept.
+   b. products: the product list, as resolve-product reads it. Scope: "all products". When used_fields has the field `description` or a custom field, the parameter `fields` of this reading also names `description` or `custom_fields`, and step 8 e applies to the custom fields. This reading is the product list of the statement: the statement does not read the list a second time.
    c. users: the list /users, read as step 8 says. Scope: "all users".
    d. statuses: the WHERE condition must have a conjunct `product = value`; otherwise → scope, message C01. Run resolve-product with hints for the value; on failure → the error of resolve-product. Call ApiGet on /products/{product} and ApiGet on /products/{product}/workflows, both with the NumericId of the product. The record of the product names the workflow of each record kind, and the entity statuses says which records the two answers give. Scope: "product <KEY>". The conjunct is applied.
 2. Route by an id or a parent. Go through the read routes of the entity in catalog order and leave out the route of the field `product`. Take the first route whose field a conjunct of the WHERE condition compares with `=`. When several conjuncts compare that field, take the first in the order of the statement. Read the route as step 3 says. The conjunct is applied.
@@ -2115,7 +2182,10 @@ STEPS:
    d. the field is `id` → message K04;
    e. the field is release, initiative or epic, and the WHERE condition has a conjunct `product = value` that resolve-product finds → message K05. The records of that kind in the product are read for it with one list request;
    f. in every other case → message K06.
-5. Route by a list of values. This step applies when step 2 took no route. Take the first conjunct of the form `field IN (values)` that has at most MaxInValues values and whose field has a read route. The route of the field `product` counts here. Read every value as step 3 says, each list to its last page; the steps 8 a and 8 b do not apply. Put the records together and leave out a record that was read before. Scope: the scopes of the values, joined by a comma and a space. The conjunct is applied.
+5. Route by a list of values. This step applies when step 2 took no route. Take the first conjunct of the form `field IN (values)` that has at most MaxInValues values and whose field has a read route. The route of the field `product` counts here. A list with NULL or with empty text is not taken, because no route reads the records without a value. The conjunct is applied.
+   a. First check every value of the list, in its order, as step 3 says for the field: the form of the value, and for the field `product` the result of resolve-product. The first value that fails gives its error. No record and no list of the entity is requested before every value has passed.
+   b. A value that means the same as an earlier value of the list is left out: the same text without regard to case, or the same product. It is read once, and the scope names it once.
+   c. Read every value that is left as step 3 says, each list to its last page; the steps 8 a and 8 b do not apply. Put the records together and leave out a record that was read before. Scope: the scopes of these values, joined by a comma and a space. A scope that equals an earlier one is named once.
 6. Route by product. This step applies when no route was taken so far and the entity has a read route for the field `product`. When the WHERE condition has a conjunct `product = value`: read it as step 3 b says, and the conjunct is applied.
 7. Account-wide list. This step applies when no route was taken so far.
    a. When the entity has no account-wide list → scope, message C01.
@@ -2128,11 +2198,12 @@ STEPS:
    d. In every other case read the list to its last page.
    e. Custom fields. When used_fields has a custom field, the parameter `fields` also names `custom_fields`. When page 1 then has records and none of them has the member `custom_fields` → api_error, message X05. No further page is requested. The server does not deliver such records with empty custom fields, and it does not read them one by one.
    MECHANISM: every list request has the parameter `fields`. It has the API sources of all fields of the entity that are not heavy, and of the heavy fields among used_fields. Of a source with a dot it has the part before the dot (see INTERFACES). It has `custom_fields` only when used_fields has a custom field. One request per page delivers complete records. No request is sent per record of a list.
-9. Lookups for the evaluation. When the WHERE condition compares a field of the type user with `me`, `myself` or `current_user`, read the current user with one ApiGet on /me. When it compares a field of the type key outside the applied conjuncts, take the product list as resolve-product does. Each lookup is read at most once per statement.
+9. Lookups for the evaluation. When the WHERE condition compares a field of the type user with `me`, `myself` or `current_user`, read the current user with one ApiGet on /me. For a custom field of the kind users, one part of a value with commas that is such a word counts in the same way (evaluate-condition, step 11 c). When it compares a field of the type key outside the applied conjuncts, take the product list as resolve-product does. Each lookup is read at most once per statement.
 10. A request of the steps 1 to 9 that fails in another way than the steps say: NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Any other failure → api_error, message X03. No partial result is returned.
 
 POSTCONDITIONS:
 - every record of the result belongs to the scope
+- the scope is never empty text
 - every page of a list was requested at most once, with increasing page numbers
 - the number of requests does not grow with the number of records in a page
 - at most max_pages pages of one list were requested
@@ -2190,6 +2261,7 @@ STEPS:
    - `parent` of comments: the NumericId of the commented record.
    - `entity` of statuses: the singular of the entity and the part of the member name before `_workflow`.
    - a custom field of the kind users: the names of its users, joined by a comma and a space. The NumericIds of its users, joined in the same way, are a second spelling.
+   - a field with several values: each single value, as the API record lists it. These fields are `tags` of features, and a custom field of the kind tags, fixed_tags or users. For a users field the single values are the e-mail address, the name and the NumericId of each user. evaluate-condition, step 11, uses them.
 
 POSTCONDITIONS:
 - the record has every field of the entity and every custom field of the input, each with a value or null
@@ -2220,12 +2292,13 @@ result: Boolean
 
 PRECONDITIONS:
 - every field of the condition is a field of the record
+- every value of the condition fits the type of its field: parse-statement has checked it against the table of values in a condition
 - the lookups that the condition needs were read; update-statement and delete-statement read them in the same way before they check their guards, and a failed request there is the error of plan-fetch, step 10
 
 STEPS:
 1. AllOf is true when every member is true. AnyOf is true when at least one member is true. Negation is true when its member is not true.
 2. NullTest: a field has no value when it is null or empty text. IS NULL is true for a field without a value, and IS NOT NULL for a field with a value.
-3. InList is true when the comparison `field = value` is true for at least one of its values.
+3. InList is true when the comparison `field = value` is true for at least one of its values. NULL or empty text in the list stands for a field without a value: the list is then also true for such a field.
 4. Comparison. First replace the value of the statement in three cases.
    a. The field has the type user and the value is `me`, `myself` or `current_user` in any case. The value becomes the e-mail address of the current user. Where the field is read as a name, it becomes the name of the current user.
    b. The field has the type key and resolve-product finds the value. The value becomes the key of that product.
@@ -2234,17 +2307,26 @@ STEPS:
 6. `=` is true when the value equals the value of the field or one of its other spellings:
    a. when one side is a Boolean: the truth values are equal, where the texts `true` and `false` and the numbers 1 and 0 are read as truth values;
    b. when the field has the type number: the numbers are equal;
-   c. when the field has the type date or datetime and the value has 10 characters: the first 10 characters of the field equal the value;
-   d. in every other case: the comparison forms are equal.
+   c. when the field has the type date: the day of the field equals the day of the value. The day is the first 10 characters;
+   d. when the field has the type datetime and the value is a DateText: the day of the field in UTC equals the value;
+   e. when the field has the type datetime and the value is a timestamp: both are the same point in time;
+   f. in every other case: the comparison forms are equal.
    A field without a value equals nothing.
 7. `!=` is true when `=` is not true. It is true for a field without a value.
 8. CONTAINS is true when the comparison form of the value is inside the comparison form of the field or of one of its other spellings. LIKE is true when the pattern covers the text from its first to its last character, where `%` stands for any text and `_` for one character. Both are false for a field without a value.
-9. `<`, `<=`, `>` and `>=` are false for a field without a value. A field of the type number is compared as a number. A field of the type date or datetime is compared as text, and against a value of 10 characters only its first 10 characters are compared. Every other field is compared in its comparison form.
-10. Custom fields. A custom field has the field type that the table of kinds in custom-fields gives for its kind. The steps 1 to 9 apply to it as to a catalog field of that type.
+9. `<`, `<=`, `>` and `>=` are false for a field without a value. A field of the type number is compared as a number. A field of the type date is compared by its day with the day of the value, as text. A field of the type datetime is compared with a DateText by its day in UTC, and with a timestamp as a point in time. A value of a datetime field that cannot be read as a timestamp is compared as text. Every other field is compared in the order of text that build-rows, step 4, gives: a run of digits counts as a number.
+10. Custom fields. A custom field has the field type that the table of kinds in custom-fields gives for its kind. The steps 1 to 9 and step 11 apply to it as to a catalog field of that type.
+11. A field with several values: `tags` of features, and a custom field of the kind tags, fixed_tags or users. convert-record gives each single value of such a field as another spelling.
+   a. `=` is therefore true when one value of the field equals the value of the statement. `tags = 'urgent'` is true for a feature with the tags urgent and customer.
+   b. A value of the statement that has a comma is also read as several values: it is split as check-write-values, step 8, says. `=` is then true as well when the field has each of these values, in any order. The field can have more values. A value without any part after the split adds nothing.
+   c. For a users field, step 4 a applies to each value of the statement: `me` stands for the current user. A value is compared with the e-mail address, the name and the NumericId of each user of the field.
+   d. `!=` is true when `=` is not true, and IN is true when `=` is true for one value of its list.
+   e. The steps 2, 8 and 9 are not changed for such a field. The test for no value, CONTAINS, LIKE and the operators `<`, `<=`, `>` and `>=` work on the joined text, and CONTAINS also on the other spellings. GROUP BY, ORDER BY and DISTINCT use the joined text.
 
 POSTCONDITIONS:
 - the result depends only on the record, the condition and the lookups
 - `=` on `name` is equality of the complete name, not a search
+- `=` on a field with several values is true for every record that has the value among the values of the field
 
 ERRORS:
 - none
@@ -2281,12 +2363,12 @@ STEPS:
 1. Count only: when count_only is true, the result is one row with the label of the item and the value list_total. count is 1, total has no value and truncated is false.
 2. Grouped result: when the statement has an aggregate item or GROUP BY.
    a. The group fields are the fields of GROUP BY, followed by the selected fields that are not among them. `SELECT status, COUNT(*) FROM features` groups by status without GROUP BY.
-   b. Records with equal values in all group fields are one group. Text values are equal when their comparison forms are equal (see evaluate-condition). The groups are in the order of their first record. Without group fields all records are one group, and there is one group also when there is no record.
+   b. Records with equal values in all group fields are one group. Text values are equal when their comparison forms are equal (see evaluate-condition). Records without a value in a group field are one group for that field. The groups are in the order of their first record. Without group fields all records are one group, and there is one group also when there is no record.
    c. One row per group. First the group fields that the statement does not select, under their field names. Then the select items in the order of the statement: a field item has the value of the first record of the group, and an aggregate item has its result.
    d. COUNT(*) is the number of records of the group. COUNT(field) is the number of records with a value in the field. COUNT(DISTINCT field) is the number of different values. SUM and AVG use the values that are numbers. MIN and MAX use the order of step 4. Without a value the result is null, and 0 for COUNT. A result that is a whole number is written without decimals; every other result is rounded to two decimals.
 3. Plain result: when the statement has no aggregate item and no GROUP BY. Sort the records as step 4 says. Make one row per record with the select items in the order of the statement, each under its label. With DISTINCT, leave out a row that equals an earlier row in all values.
    a. Star custom fields. After the select items, the row gets every star custom field that has a value in the record. Each one is under the name of the field, and they are in the order of these names. A star custom field without a value is not in the row.
-4. ORDER BY. Sort by the first key. Rows that are equal in it are sorted by the next key, and so on. Rows that are equal in all keys keep their order. A key is a field, the label of an aggregate item, or an aggregate that the statement selects. Numbers come before text. Numbers are sorted by value and text by its comparison form. A row without a value in the key comes last, with ASC and with DESC. A grouped result is sorted after step 2.
+4. ORDER BY. Sort by the first key. Rows that are equal in it are sorted by the next key, and so on. Rows that are equal in all keys keep their order. A key is a field, the label of a select item, or an aggregate, as parse-statement accepts it. A label stands for its select item. In a grouped result an aggregate key is computed for each group, also when the statement does not select it. Numbers come before text. Numbers are sorted by value. Text is sorted by its comparison form, character by character. Where both texts have a run of digits at the same place, the two runs are compared as numbers of any length: `DEMO-9` comes before `DEMO-10`. Two texts that this order does not separate are sorted character by character. A row without a value in the key comes last, with ASC and with DESC. A grouped result is sorted after step 2.
 5. Limits. The limit is the LIMIT of the statement, and default_limit without a LIMIT. It is never more than max_limit. rows are the first rows up to the limit, and count is their number.
 6. total has a value in two cases. When step 5 cut rows, it is the number of rows before the cut. When plan-fetch did not read the list to its end, it is list_total.
 7. truncated is true when total has a value and the statement did not ask for the cut: it has no LIMIT, or a LIMIT above max_limit.
@@ -2295,6 +2377,7 @@ POSTCONDITIONS:
 - an aggregate is computed over all matching records, also when step 5 cuts the rows of a grouped result
 - every row has the labels of the statement in its order; in a grouped result the group fields that are not selected come first
 - after these labels a row has the star custom fields that have a value, and no other label
+- no row has a label twice
 - count is never above max_limit
 
 ERRORS:
@@ -2333,14 +2416,14 @@ STEPS:
 7. reference: the value must be a ReferenceNumber of the kind of the field, or a NumericId. It is sent in capital letters. For a value of another form: when resolve-product finds it as a product → wrong_kind, message W24. The records of that kind in the product are read for the message with one list request. Any other value → not_found, message W25.
 8. The field `tags`: the text is split at commas into tags. White space around a tag is removed and an empty tag is left out.
 9. status, unless form_only is true.
-   a. Take the workflow statuses of the entity in the product, in workflow order, as plan-fetch reads them for the entity statuses. The record of the product names the workflow of the entity, and the list of workflows has its statuses. In stdio mode both answers may be kept between statements.
+   a. Take the workflow statuses of the entity in the product, in workflow order, as plan-fetch reads them for the entity statuses. The record of the product names the workflow of the entity, and the list of workflows has its statuses. Both answers are read at most once per statement and are not kept after it.
    b. For a new record the product is the product of the parent. When the parent is a record, read it with ApiGet on its id route to learn its product; NotFound → not_found, message W25.
    c. Compare the value with the names of the statuses. The comparison is the equality of text of evaluate-condition. The name is sent as the workflow writes it.
-   d. Without a match, read both answers again when they were kept from an earlier statement, and compare once more. Still without a match → bad_value, message W21. This is also the error when the product names no workflow for the entity.
+   d. Without a match → bad_value, message W21. This is also the error when the product names no workflow for the entity.
 10. A custom field, by its kind. The table of values to set in custom-fields gives the accepted value and the form that is sent.
    a. text, url, note and choice: the value must be Text; otherwise → bad_value, message W28.
    b. number: as step 3. date: as step 5.
-   c. fixed_choice: the value must be Text; otherwise → bad_value, message W28. Empty text is accepted without a comparison. Any other text is compared with the texts of the options of the definition, which are read as custom-fields says. The comparison is the equality of text of evaluate-condition, and the text is sent as the option writes it. Without a match, read the options again when they were kept from an earlier statement, and compare once more. Still without a match → bad_value, message W32.
+   c. fixed_choice: the value must be Text; otherwise → bad_value, message W28. Empty text is accepted without a comparison. Any other text is compared with the texts of the options of the definition, which are read as custom-fields says. The comparison is the equality of text of evaluate-condition, and the text is sent as the option writes it. Without a match → bad_value, message W32.
    d. tags: the value must be Text; otherwise → bad_value, message W28. The text is split into tags as step 8 says. The checked value is the TextList of the tags.
    e. fixed_tags: as tags. Then each tag is compared with the options as step 10 c says, and it is sent as the option writes it. The first tag without a match → bad_value, message W32.
    f. users: the value must be Text; otherwise → bad_value, message W28. The text is split at commas into parts. White space around a part is removed, and an empty part is left out. `me`, `myself` or `current_user` in any case is replaced by the NumericId of the current user, read with ApiGet on /me. An e-mail address and a NumericId stay as they are. Any other part → bad_value, message W23. The checked value is the TextList of the parts.
@@ -2459,13 +2542,6 @@ proxy. The operator of the environment decides this with the trust store.
 In such an environment the credential can be a placeholder that the proxy
 replaces on the way to Aha!. The server sends it as it is.
 
-MECHANISM: the HTTPS connection can be replaced as a whole, and FakeAha
-takes its place in tests. The choice of the proxy is a function of the
-environment and the address. FakeAha calls it for every request and
-records the result. The waiting of step 7 goes through a clock that
-tests replace, so that no test waits. It is the clock of the log line of
-`execute`.
-
 POSTCONDITIONS:
 - the request was for the account of the Account and for no other host
 - the server connected to that host or to the proxy of the environment, and to nothing else
@@ -2508,6 +2584,7 @@ STEPS:
 4. Take lists of entities and of fields from the catalog, in catalog order, joined by a comma and a space.
 5. Show at most MaxListed entries of a list of records, of product keys, of custom fields or of options. When there are more, end the list with `, and <n> more`.
 6. The message of an error is the complete tool result of `query` and of `execute` for that error. A note is part of the result of a read statement.
+7. Articles. Where a text below has the word `a` directly before `<kind>`, `<expected kind>` or `<singular>`, the message has `an` when the word that replaces the placeholder starts with a, e, i, o or u: `an epic`, `an idea`, `an initiative`.
 
 The messages speak of the query tool and the execute tool. In manual mode
 these are the two commands of the same names; the texts stay the same.
@@ -2530,7 +2607,7 @@ Placeholders that several messages use:
 | `<apostrophe hint>` | Empty, unless the statement has an apostrophe directly between a letter or digit and a letter. Then: ` The text contains an apostrophe (<word>). Inside text, write an apostrophe twice: <word doubled>`. `<word>` is the run of characters without a space around the first such apostrophe, without the characters ' " % ( ) , ; at its ends |
 | `<example id>` | By kind: feature `<KEY>-23`, release `<KEY>-R-3`, initiative `<KEY>-S-1`, epic `<KEY>-E-1`, goal `<KEY>-G-1`, idea `<KEY>-I-1`, requirement `<KEY>-23-1`, product `<KEY>` |
 | `<records>` | One entry `<id> (<name>)` per record, joined by a comma and a space; `none` when there is no record |
-| `<singular>`, `<kind>` | The singular of the entity, or the name of the record kind |
+| `<singular>`, `<kind>` | The singular of the entity, or the name of the record kind. For the entity me the singular is `user` |
 | `<custom list>` | The names of the custom fields of the entity, as custom-fields returns them without a key, joined by a comma and a space |
 | `<writable custom list>` | The names of the custom list whose kind can be set |
 | `<custom hint>` | Empty when the custom list is empty. Otherwise: ` Custom fields of <entity>: <custom list>.` |
@@ -2558,7 +2635,7 @@ Messages for a statement that cannot be read:
 | S02 | syntax | `unexpected character <c> at position <n>.<apostrophe hint>` |
 | S03 | syntax | `cannot read the statement at <where>: expected <what>.<apostrophe hint> Form: <read form>. Example: <example of features>` |
 | S04 | syntax | `a statement starts with SELECT or DESCRIBE.<apostrophe hint> Form: <read form>. Example: <example of features>` |
-| S05 | syntax | `<id> is an id, not a statement. To read that record: SELECT * FROM <entity> WHERE id = '<id>'` |
+| S05 | syntax | `<ID> is an id, not a statement. To read that record: SELECT * FROM <entity> WHERE id = '<ID>'` |
 | S06 | syntax | `<word> is an entity, not a statement. To list its records: <example of entity>. To see its fields: DESCRIBE <entity>` |
 | S07 | syntax | `query only reads. Use the execute tool for INSERT, UPDATE and DELETE.` |
 | S08 | syntax | `JOIN is not supported. Read one entity per statement and filter by its parent, for example: <example of features>` |
@@ -2568,6 +2645,14 @@ Messages for a statement that cannot be read:
 | S12 | syntax | `unknown function <NAME>. Functions: COUNT, SUM, AVG, MIN, MAX. Example: SELECT COUNT(*) FROM features WHERE product = '<KEY>'` |
 | S13 | syntax | `text goes in single quotes: write '<word>' instead of <word>` |
 | S14 | syntax | `DESCRIBE <entity> lists the fields of <entity> and takes nothing else. To read records: <example of entity>` |
+| S15 | syntax | `two select items have the label '<label>'. Give one of them another label, in the form: field AS label` |
+| S16 | syntax | `the label '<label>' is also the name of a field of <entity>. Choose another label, in the form: field AS label` |
+
+In S05, `<ID>` is the id of the text in capital letters: the text `demo-3`
+gets `DEMO-3`.
+
+In S15 and S16, `<label>` is the label as the statement writes it. In S15
+it is the label of the first pair of items that parse-statement refuses.
 
 In S01, `<quote>` is `apostrophe` or `double quote`. `<text hint>` is the
 apostrophe hint when that is not empty. Otherwise it is ` Text goes in
@@ -2583,7 +2668,10 @@ In S03, `<what>` is one of these texts:
 - `a field, * or COUNT(*)`
 - `a field name`
 - `a field name (<field list>)`
-- `a field or * inside <FUNCTION>( )`
+- `a field or * inside COUNT( )`
+- `a field inside <FUNCTION>( )`, for SUM, AVG, MIN and MAX
+- `a field after DISTINCT`
+- `a field of GROUP BY, a selected field or an aggregate after ORDER BY`
 - `a name after AS`
 - `BY after GROUP`
 - `BY after ORDER`
@@ -2649,6 +2737,24 @@ order, joined by a comma and a space.
 In K04, for comments the text is `'<value>' is not the id of a comment. To
 find the id: SELECT id, body FROM comments WHERE parent = '<KEY>-23'`.
 
+Messages for a value in a condition or in a guard:
+
+| ID | Kind | Text |
+|---|---|---|
+| V01 | bad_value | `<field> is <type text>: write the value as <form>. Got '<value>'.` |
+| V02 | bad_value | `<field> is true or false: compare it with = or !=, for example <field> = TRUE` |
+
+In V01 and V02, `<field>` is the name of the field; for a custom field it
+is `custom.` and its key. In V01, `<type text>` and `<form>` depend on the
+type of the field:
+
+| Type of the field | `<type text>` | `<form>` |
+|---|---|---|
+| number | `a number` | `5 or 2.5` |
+| boolean | `true or false` | `TRUE or FALSE` |
+| date | `a date` | `'YYYY-MM-DD'` |
+| datetime | `a timestamp` | `'YYYY-MM-DD' or 'YYYY-MM-DDThh:mm:ssZ'` |
+
 Messages of write statements:
 
 | ID | Kind | Text |
@@ -2658,7 +2764,7 @@ Messages of write statements:
 | W03 | syntax | `<problem><apostrophe hint> Forms: <write forms>` |
 | W04 | syntax | `<KEYWORD> needs WHERE id = '...' with the id of the one record to change.<apostrophe hint> Forms: <write forms>` |
 | W05 | syntax | `one statement changes one record: the WHERE must start with id = '...'. Further conditions are joined with AND and have the form field = 'value'. To change several records, find their ids with the query tool and send one statement per record.` |
-| W06 | syntax | `after WHERE id = '...', further conditions must have the form AND field = 'value'` |
+| W06 | syntax | `after WHERE id = '...', further conditions must have the form AND field = 'value'. For a field without a value write: AND field = ''` |
 | W07 | syntax | `one INSERT creates one record. Send one statement per record.` |
 | W08 | syntax | `<n> fields but <m> values` |
 | W09 | syntax | `the parent is given twice with different values` |
@@ -2685,6 +2791,7 @@ Messages of write statements:
 | W30 | api_error | `aha: API error (status <n>) on <method> <route>: <answer>` |
 | W31 | bad_name | `custom fields cannot be set in INSERT. Leave out <name>, create the record, and then send: UPDATE <entity> SET <name> = '...' WHERE id = '...'` |
 | W32 | bad_value | `<field>: there is no option '<value>'. Options: <options>` |
+| W33 | syntax | `the field <field> is given twice. A statement sets each field once.` |
 
 In W03, `<problem>` is one of these texts:
 
@@ -2717,6 +2824,9 @@ custom list>` when the writable custom list is not empty, and empty
 otherwise. In W17, `<custom guard hint>` is `. Custom fields of <entity>:
 <custom list>` when the custom list is not empty, and empty otherwise.
 
+In W33, `<field>` is the name of the field in the catalog, whatever the
+statement writes. For a custom field it is `custom.` and its key.
+
 In W31, `<name>` is the name of the custom field, `custom.` and its key. In
 W32, `<field>` is that name too. `<options>` are the texts of the options
 in the order of their list, joined by a comma and a space.
@@ -2732,6 +2842,12 @@ In W25, `<PRODUCT>` is the key of the product of the record that the
 statement changes. Without such a record it is the part of the value
 before its first `-`, when that part is the key of a product. In every
 other case it is the ExampleKey.
+
+For the kind requirement the statement of W25 is `SELECT id, name FROM
+requirements WHERE feature = '<FEATURE>'`, because requirements are listed
+per feature and not per product. `<FEATURE>` is the value in capital
+letters without its last hyphen and the number after it: `DEMO-1` for
+`DEMO-1-9`.
 
 In W29, for a field without a value the text is `nothing was changed:
 <singular> <id> has no <field>, not '<value>'`.
@@ -2771,11 +2887,18 @@ Notes in the result of a read statement:
 |---|---|
 | H01 | `* shows <default fields>. Other fields of <entity>: <other fields>.` |
 | H02 | `Showing <count> of <total> records. Narrow the result with WHERE, raise LIMIT (up to <max_limit>), or count with COUNT(*).` |
-| H03 | `There is no <singular> with the id '<value>'.` |
+| H03 | `There is no <singular> with the <id field> '<value>'.` |
 | H04 | `'<value>' is the key of a product, not its name. Use: SELECT key, name FROM products WHERE key = '<PRODUCT>'` |
 | H05 | `'<value>' looks like an id, not a name. Use: WHERE id = '<VALUE>'` |
 | H06 | `'<value>' looks like the id of a <kind>, not a name. Use: WHERE <kind> = '<VALUE>'` |
 | H07 | `No <singular> has exactly the name '<value>'. name = compares the whole name; to search inside names use: name CONTAINS '<value>'` |
+| H08 | `The <singular> <ID> exists, and another condition of the statement is not true for it. To see the record: SELECT * FROM <entity> WHERE <id field> = '<ID>'` |
+| H09 | `<PRODUCT> has statuses for: <entities>.` |
+
+In H08, `<ID>` is the id of the record as the record has it. In H09,
+`<entities>` are the values of `entity` that the product has statuses for,
+in the order of the entity statuses, joined by a comma and a space. For a
+product without any status it is `(none)`.
 
 POSTCONDITIONS:
 - every complete statement that a message shows is accepted by parse-statement, after its placeholders are replaced
@@ -2807,11 +2930,11 @@ PRECONDITIONS:
 - none
 
 STEPS:
-1. Choose the ExampleKey when it is first needed. That is when the tool list is answered, or when a DESCRIBE result, a message or a note shows it. In stdio mode and manual mode it is chosen once for the process. In http mode it is chosen at most once for each request, with the Account of that request.
+1. Choose the ExampleKey when it is first needed. That is when the tool list is answered, or when a DESCRIBE result, a message or a note shows it. In stdio mode and manual mode it is chosen once for the process. It is the one value from Aha! that the process keeps between statements; the product list that was read for it is not kept. In http mode it is chosen at most once for each request, with the Account of that request.
 2. When the setting default_product has a value and resolve-product finds it: the ExampleKey is the key of that product.
 3. In every other case the ExampleKey is PROD. While a product of the account has the ExampleKey as its key, in any case, add the letter X at its end.
-4. When the setting default_product has a value and resolve-product does not find it: write a warning to the diagnostic output and continue with step 3.
-5. When the product list cannot be read: the ExampleKey is PROD. Write a warning to the diagnostic output. The failed reading is not an error of the call that needed the key.
+4. When the setting default_product has a value and resolve-product does not find it: continue with step 3, and then write the warning G15 to the diagnostic output.
+5. When the product list cannot be read: the ExampleKey is PROD. Write the warning G16 to the diagnostic output, and not G15. The failed reading is not an error of the call that needed the key.
 
 POSTCONDITIONS:
 - the ExampleKey is the key of the product of the setting default_product, or a key that no product of the account had when the key was chosen, or PROD when the product list could not be read
@@ -2835,6 +2958,7 @@ ERRORS:
 - The create route and the delete route of every entity that can be changed work as the catalog says. This was observed on one account on 2026-11-24; a comment was created on a feature only. An update was observed for features, epics, requirements and goals.
 - The record of a product names the workflow of each record kind in a member whose name ends in `_workflow`. The list of workflows of the product has that workflow. This was observed on two products of one account on 2026-11-24, where features, epics and requirements named one workflow. The API documentation shows the same members.
 - The Aha! API creates a goal only when the request has a success metric with a name. An update takes the status of a goal as `workflow_status`. Both were observed on one account on 2026-11-24. A new goal takes its status inside `success_metric`, as the documentation shows; this was observed on the same day. An update with a new text in `success_metric.name` is answered without an error and does not change the text. The documentation shows no other form for it.
+- The Aha! API writes a timestamp as text in an ISO 8601 form. The runs of 2026-11-24 did not record which form: with or without a fraction of the second, with `Z` or with an offset. The server reads each of these forms, so no result depends on it. The fixture account uses the form with milliseconds and `Z`.
 
 ## POSTCONDITIONS
 
@@ -2855,6 +2979,7 @@ ERRORS:
 - [observable] one call of execute creates, changes or deletes at most one record
 - [observable] a write statement is checked completely before its write request: an unknown column, an unknown field, a value of the wrong form, an unknown status, a value that a fixed list of options does not have and a guard that is not true are errors, and none of them changes data
 - [observable] an accepted write statement sends every field that it assigns; no column, assignment or condition is ignored without an error
+- [observable] no JSON object of a tool result and no body of a request has two members with the same name
 - [observable] the tool query sends only read requests, and with read_only true the server offers no tool that accepts INSERT, UPDATE or DELETE
 - [observable] the tool list is query and execute, or query alone with read_only true; the server offers no other tool, no resource and no prompt
 - [observable] text that follows a complete statement is an error, for every statement kind
@@ -2869,16 +2994,18 @@ ERRORS:
 - [observable] manual mode writes to standard output the same text that the MCP tool returns for the same statement and the same Account
 - [observable] the credential is in no tool result, no message, no note, no log line, no start message, no warning and no output of manual mode, and no option of the command line takes it
 - [observable] every request of the server is for https://<subdomain>.aha.io/api/v1 with the subdomain of the Account of the call; the server follows no redirect, and the only other host that it connects to is the HTTPS proxy of the environment
-- [observable] the server reads these environment variables and no other: AHA_SUBDOMAIN, AHA_API_KEY, AHA_DEFAULT_PRODUCT and AHA_READ_ONLY for its settings, HTTPS_PROXY, https_proxy, NO_PROXY and no_proxy for the way to Aha!, SSL_CERT_FILE and SSL_CERT_DIR for the trust store
+- [observable] the settings of the server come from its arguments, from the key file and from the variables AHA_SUBDOMAIN, AHA_API_KEY, AHA_DEFAULT_PRODUCT and AHA_READ_ONLY, and no other variable changes a setting
 - [observable] an option takes precedence over its environment variable, and the key file over AHA_API_KEY
 - [observable] in http mode a request without a credential reaches no tool and no tool list, and the server uses no credential of its own
 - [observable] in http mode nothing that was read with the credential of one request is part of the answer to another request
+- [observable] one statement reads the product list, the custom field definitions, the options of one definition, and the record and the workflows of one product at most once each; the server keeps none of them after the statement, in stdio mode and in http mode, and the ExampleKey is the one value that it keeps between statements
 - [observable] a read statement or a write statement whose field words are all catalog names causes no request for custom field definitions, and its list requests do not ask for custom fields; the one exception is a read statement with `*` that selects one record by its id field, which reads the definitions when it has found the record
 - [observable] a result has a custom field only when the statement names it, or when the statement has `*` and selects one record by its id field: then the row also has the custom fields that have a value in that record; in every other statement `*` stands for catalog fields only
 - [observable] a custom field is set with UPDATE only; INSERT with a custom field is an error and creates no record
 - [observable] a list that Aha! returns without the custom fields of the request is an error of the statement; no result shows a custom field as empty for that reason
 - [implementation] the certificate for the host of Aha! is checked against the trust store on every connection, also inside the tunnel of a proxy, and no setting turns the check off
 - [implementation] in http mode the server keeps no credential and no data of Aha! after a request is answered
+- [implementation] the code of the server reads the variables AHA_SUBDOMAIN, AHA_API_KEY, AHA_DEFAULT_PRODUCT and AHA_READ_ONLY and no other; the standard library of the language reads HTTPS_PROXY, https_proxy, NO_PROXY and no_proxy for the way to Aha!, and SSL_CERT_FILE and SSL_CERT_DIR for the trust store
 - [implementation] the server has no direct dependency other than the MCP framework that the deployment template selects
 - [implementation] the entity-catalog is the single source for name resolution, DESCRIBE, the parameter fields, record conversion, value checks, request bodies and the lists in messages; the server has no second list of entities or fields, and it has no built-in list of custom fields: these come from the definitions of the account
 - [implementation] no list is read with one request per record
@@ -2978,28 +3105,30 @@ THEN:
 ### EXAMPLE: execute_writes_a_log_line (of: execute)
 GIVEN:
   the fixture account
-  the clock of the test shows 2026-11-13T09:30:00Z
 WHEN:
   the tool execute is called with statement =
   `UPDATE features SET status = 'shipped' WHERE id = 'demo-1'`
 THEN:
   the tool result is
   `{"id":"DEMO-1","name":"CSV export","status":"Shipped","message":"Feature DEMO-1 status changed to 'Shipped'"}`
-  the diagnostic output has the line
-  `2026-11-13T09:30:00Z execute account=example op=update entity=features id=DEMO-1 result=ok`
+  the diagnostic output has exactly one new line, and it has the form
+  `<time> execute account=example op=update entity=features id=DEMO-1 result=ok`
+  `<time>` has the form YYYY-MM-DDThh:mm:ssZ; it is not before the second
+  in which the call started and not after the second in which it ended,
+  both in UTC
 
 ### EXAMPLE: execute_logs_a_refused_statement (of: execute)
 GIVEN:
   the fixture account
-  the clock of the test shows 2026-11-13T09:30:00Z
 WHEN:
   the tool execute is called with statement =
   `DELETE FROM features WHERE name = 'CSV export'`
 THEN:
   the tool result is an error whose message starts with
   `one statement changes one record: the WHERE must start with id = '...'.`
-  the diagnostic output has the line
-  `2026-11-13T09:30:00Z execute account=example op=none entity=none id=none result=syntax`
+  the diagnostic output has exactly one new line, and it has the form
+  `<time> execute account=example op=none entity=none id=none result=syntax`
+  `<time>` has the form YYYY-MM-DDThh:mm:ssZ
   the diagnostic output does not contain `CSV export` and does not contain `fixture-key`
   FakeAha recorded no call
 
@@ -3243,8 +3372,9 @@ WHEN:
 THEN:
   load-configuration returns settings with the subdomain `example`, and no
   account
-  the diagnostic output has a warning that AHA_API_KEY is not read in http
-  mode, and the warning does not contain `fixture-key`
+  stderr contains the line
+  `warning: AHA_API_KEY is not read in http mode. Each request brings its credential in the header Aha-Api-Key`
+  stderr does not contain `fixture-key`
   the server starts and sends no request to Aha!
 WHEN:
   load-configuration runs for the command line
@@ -3260,6 +3390,24 @@ WHEN:
 THEN:
   load-configuration returns settings without a subdomain, and no account
   the diagnostic output has no warning
+
+### EXAMPLE: listen_address_that_is_not_loopback (of: load-configuration)
+GIVEN:
+  the environment has AHA_SUBDOMAIN = `example`
+  192.0.2.1 is an address for documentation, which the machine of the
+  test does not have
+WHEN:
+  load-configuration runs for the command line
+  `mcp-server-aha-aql http listen=192.0.2.1:8080`
+THEN:
+  stderr contains the line
+  `warning: the listen address is not a loopback address. Every request has a credential: put a TLS endpoint in front of the server`
+  FakeAha recorded no call
+WHEN:
+  load-configuration runs for the command line
+  `mcp-server-aha-aql http listen=127.0.0.1:8080`
+THEN:
+  stderr has no line that starts with `warning:`
 
 ### EXAMPLE: unknown_first_word (of: load-configuration)
 GIVEN:
@@ -3443,6 +3591,41 @@ THEN:
   the tool result is
   `{"entity":"features","scope":"feature DEMO-99","count":0,"records":[],"note":"There is no feature with the id 'DEMO-99'."}`
   FakeAha recorded no call on /custom_field_definitions
+
+### EXAMPLE: record_that_exists_and_does_not_match (of: read-statement)
+GIVEN:
+  the fixture account, in which DEMO-1 has the status "In design"
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE id = 'demo-1' AND status = 'Shipped'`
+  and read-statement explains the empty result
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"feature DEMO-1","count":0,"records":[],"note":"The feature DEMO-1 exists, and another condition of the statement is not true for it. To see the record: SELECT * FROM features WHERE id = 'DEMO-1'"}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE id = 'DEMO-1' AND id = 'DEMO-2'`
+THEN:
+  the tool result has the same `note` and no other note, because the id
+  route was read for DEMO-1 only
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE id = 'DEMO-1' LIMIT 0`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"feature DEMO-1","count":0,"total":1,"records":[]}`
+  it has no `note`, because the record was kept and LIMIT cut the row
+
+### EXAMPLE: statuses_of_an_entity_that_has_none (of: read-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query =
+  `SELECT name FROM statuses WHERE product = 'DEMO' AND entity = 'comments'`
+  and read-statement explains the empty result
+THEN:
+  the tool result is
+  `{"entity":"statuses","scope":"product DEMO","count":0,"records":[],"note":"DEMO has statuses for: releases, features, epics, requirements, initiatives, goals, ideas."}`
 
 ### EXAMPLE: default_limit_is_reported (of: read-statement)
 GIVEN:
@@ -3784,6 +3967,25 @@ THEN:
   FakeAha recorded one ApiGet call on /features/DEMO-2
   no write request
 
+### EXAMPLE: update_with_a_guard_for_no_value (of: update-statement)
+GIVEN:
+  the fixture account, in which DEMO-2 has no assignee and DEMO-1 is
+  assigned to test.user@example.com
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE features SET assigned_to = 'me' WHERE id = 'DEMO-2' AND assigned_to = ''`
+  and update-statement checks the guard for no value
+THEN:
+  the tool result is
+  `{"id":"DEMO-2","name":"Offline maps","assigned_to":"test.user@example.com","message":"Feature DEMO-2 updated"}`
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE features SET assigned_to = 'me' WHERE id = 'DEMO-1' AND assigned_to = ''`
+THEN:
+  the tool result is an error with the message
+  `nothing was changed: feature DEMO-1 has assigned_to = 'test.user@example.com', not ''`
+  no write request
+
 ### EXAMPLE: update_of_an_unknown_record (of: update-statement)
 GIVEN:
   the fixture account, which has no feature DEMO-99
@@ -3819,6 +4021,20 @@ WHEN:
 THEN:
   the tool result is
   `{"id":"DEMO-1","name":"CSV export","due_date":"2026-12-01","message":"Feature DEMO-1 updated"}`
+
+### EXAMPLE: update_of_the_name_shows_it_once (of: update-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE features SET name = 'CSV export 2', due_date = '2026-05-01' WHERE id = 'DEMO-1'`
+  and update-statement returns the WriteResult
+THEN:
+  FakeAha recorded one ApiUpdate call on /features/DEMO-1 with the body
+  `{"feature":{"name":"CSV export 2","due_date":"2026-05-01"}}`
+  the tool result is
+  `{"id":"DEMO-1","name":"CSV export 2","due_date":"2026-05-01","message":"Feature DEMO-1 updated"}`
+  the object of the result has the member `name` once
 
 ### EXAMPLE: update_sets_a_custom_field (of: update-statement)
 GIVEN:
@@ -4209,6 +4425,155 @@ THEN:
   the tool result is
   `{"entity":"features","scope":"feature DEMO-1","count":1,"records":[{"custom.priority":"High","customer":"Acme"}]}`
 
+### EXAMPLE: labels_of_select_items (of: parse-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query = `SELECT COUNT(1) FROM features WHERE product = 'DEMO'`
+  and parse-statement reads `COUNT(1)` as `COUNT(*)`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":1,"records":[{"COUNT(*)":6}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id AS 'feature id' FROM features WHERE release = 'DEMO-R-2'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"release DEMO-R-2","count":2,"records":[{"feature id":"DEMO-1"},{"feature id":"DEMO-2"}]}`
+
+### EXAMPLE: keys_and_arguments_that_are_refused (of: parse-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query =
+  `SELECT status, COUNT(*) FROM features WHERE product = 'DEMO' GROUP BY status ORDER BY name`
+  and parse-statement checks the key of ORDER BY
+THEN:
+  the tool result is an error whose message starts with
+  `cannot read the statement at position 87 (name): expected a field of GROUP BY, a selected field or an aggregate after ORDER BY.`
+  FakeAha recorded no call
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' ORDER BY COUNT(*)`
+THEN:
+  the tool result is an error whose message starts with
+  `cannot read the statement at position 57 (COUNT(*)): expected a field name.`
+WHEN:
+  the tool query is called with query = `SELECT SUM(*) FROM features WHERE product = 'DEMO'`
+THEN:
+  the tool result is an error whose message starts with
+  `cannot read the statement at position 12 (*) FROM features WHERE p): expected a field inside SUM( ).`
+
+### EXAMPLE: a_row_has_each_label_once (of: parse-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query =
+  `SELECT id, id, f.name, name FROM features f WHERE release = 'DEMO-R-2'`
+  and parse-statement leaves out the items that repeat an earlier item
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"release DEMO-R-2","count":2,"records":[{"id":"DEMO-1","name":"CSV export"},{"id":"DEMO-2","name":"Offline maps"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT COUNT(*), COUNT(1) FROM features WHERE product = 'DEMO'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":1,"records":[{"COUNT(*)":6}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT COUNT(*) FROM features WHERE product = 'DEMO' GROUP BY status, workflow_status`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":4,"records":[{"status":"In design","COUNT(*)":1},{"status":"Under consideration","COUNT(*)":3},{"status":"In development","COUNT(*)":1},{"status":"Shipped","COUNT(*)":1}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT *, name FROM features WHERE release = 'DEMO-R-2'`
+THEN:
+  each of the two rows has the labels id, name, status and release, in
+  this order, and no other label
+WHEN:
+  the tool query is called with query =
+  `SELECT id, name AS id FROM features WHERE release = 'DEMO-R-2'`
+THEN:
+  the tool result is an error with the message
+  `two select items have the label 'id'. Give one of them another label, in the form: field AS label`
+  FakeAha recorded no call
+WHEN:
+  the tool query is called with query =
+  `SELECT COUNT(*) AS status FROM features WHERE product = 'DEMO' GROUP BY status`
+THEN:
+  the tool result is an error with the message
+  `the label 'status' is also the name of a field of features. Choose another label, in the form: field AS label`
+WHEN:
+  the tool query is called with query =
+  `SELECT *, name AS id FROM features WHERE release = 'DEMO-R-2'`
+THEN:
+  the tool result is an error with the message
+  `the label 'id' is also the name of a field of features. Choose another label, in the form: field AS label`
+
+### EXAMPLE: a_field_that_is_given_twice (of: parse-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE features SET status = 'Shipped', status = 'In design' WHERE id = 'DEMO-2'`
+  and parse-statement finds the second assignment of the field
+THEN:
+  the tool result is an error with the message
+  `the field status is given twice. A statement sets each field once.`
+  FakeAha recorded no call
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE features SET release = 'DEMO-R-3', parent = 'DEMO-R-1' WHERE id = 'DEMO-2'`
+THEN:
+  the tool result is an error with the message
+  `the field release is given twice. A statement sets each field once.`
+WHEN:
+  the tool execute is called with statement =
+  `INSERT INTO comments (parent, body, text) VALUES ('DEMO-3', 'one', 'two')`
+THEN:
+  the tool result is an error with the message
+  `the field body is given twice. A statement sets each field once.`
+  FakeAha recorded no call
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE features SET custom.customer = 'Acme', custom.CUSTOMER = 'Globex' WHERE id = 'DEMO-2'`
+THEN:
+  the tool result is an error with the message
+  `the field custom.customer is given twice. A statement sets each field once.`
+  FakeAha recorded no ApiUpdate call
+
+### EXAMPLE: values_that_do_not_fit_the_type (of: parse-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND created_at > '01.02.2026'`
+  and parse-statement checks the value against the type of the field
+THEN:
+  the tool result is an error with the message
+  `created_at is a timestamp: write the value as 'YYYY-MM-DD' or 'YYYY-MM-DDThh:mm:ssZ'. Got '01.02.2026'.`
+  FakeAha recorded no call
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM releases WHERE product = 'DEMO' AND release_date = '2026-02-30'`
+THEN:
+  the tool result is an error with the message
+  `release_date is a date: write the value as 'YYYY-MM-DD'. Got '2026-02-30'.`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND score > 'abc'`
+THEN:
+  the tool result is an error with the message
+  `score is a number: write the value as 5 or 2.5. Got 'abc'.`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM releases WHERE product = 'DEMO' AND released > 0`
+THEN:
+  the tool result is an error with the message
+  `released is true or false: compare it with = or !=, for example released = TRUE`
+
 ### EXAMPLE: insert_with_a_custom_field_is_refused (of: parse-statement)
 GIVEN:
   the fixture account
@@ -4427,7 +4792,7 @@ WHEN:
   `SELECT id, custom.priority FROM goals WHERE product = 'DEMO'`
 THEN:
   the tool result is an error with the message
-  `goals have no custom fields that can be used here. Fields of goals: id, name, status, product, progress, value, effort, description, created_at, updated_at, url. Example: SELECT id, name FROM goals WHERE product = 'PROD'`
+  `goals have no custom fields that can be used here. Fields of goals: id, name, success_metric, status, product, progress, value, effort, description, created_at, updated_at, url. Example: SELECT id, name FROM goals WHERE product = 'PROD'`
 
 ### EXAMPLE: custom_fields_that_the_key_cannot_read (of: custom-fields)
 GIVEN:
@@ -4481,6 +4846,8 @@ WHEN:
 THEN:
   the tool result is
   `{"entity":"features","scope":"feature DEMO-1","count":1,"records":[{"id":"DEMO-1","custom.risk":null}]}`
+  FakeAha recorded one ApiList call on /custom_field_definitions for the
+  second statement, because the definitions of the first one are not kept
 
 ### EXAMPLE: definitions_are_not_kept_in_http_mode (of: custom-fields)
 GIVEN:
@@ -4594,6 +4961,19 @@ WHEN:
   `SELECT id FROM releases WHERE product = 'Demo Product'`
 THEN:
   the tool result is the same
+
+### EXAMPLE: the_product_list_is_not_kept (of: resolve-product)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called two times with query =
+  `SELECT id FROM releases WHERE product = 'DEMO'`
+  and resolve-product takes the product list for each statement
+THEN:
+  both tool results are
+  `{"entity":"releases","scope":"product DEMO","count":4,"records":[{"id":"DEMO-R-1"},{"id":"DEMO-R-2"},{"id":"DEMO-R-3"},{"id":"DEMO-R-4"}]}`
+  FakeAha recorded two ApiList calls on /products, one for each statement
+  the parameter `fields` of both calls does not name `description`
 
 ### EXAMPLE: products_are_not_mixed (of: resolve-product)
 GIVEN:
@@ -4798,6 +5178,42 @@ THEN:
   the tool result is
   `{"entity":"features","scope":"feature DEMO-1","count":1,"records":[{"id":"DEMO-1","custom.priority":"High"}]}`
 
+### EXAMPLE: in_list_is_checked_before_the_first_request (of: plan-fetch)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE id IN ('DEMO-1', 'DEMO-R-2')`
+  and plan-fetch checks both values before it reads one
+THEN:
+  the tool result is an error with the message
+  `'DEMO-R-2' is the id of a release, not of a feature. For the features of that release: SELECT * FROM features WHERE release = 'DEMO-R-2'`
+  FakeAha recorded no call
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE id IN ('DEMO-1', 'demo-1', 'DEMO-2')`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"feature DEMO-1, feature DEMO-2","count":2,"records":[{"id":"DEMO-1"},{"id":"DEMO-2"}]}`
+  FakeAha recorded exactly two calls: ApiGet on /features/DEMO-1 and
+  ApiGet on /features/DEMO-2
+
+### EXAMPLE: description_of_a_product_is_requested_when_it_is_used (of: plan-fetch)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query = `SELECT key, name FROM products`
+  and plan-fetch reads the product list
+THEN:
+  FakeAha recorded exactly one call: ApiList on /products
+  the parameter `fields` of the call does not name `description`
+WHEN:
+  the tool query is called with query = `SELECT key, description FROM products`
+THEN:
+  FakeAha recorded exactly one call: ApiList on /products
+  the parameter `fields` of the call names `description`
+  each of the two rows has the labels key and description
+
 ### EXAMPLE: custom_field_of_a_product (of: plan-fetch)
 GIVEN:
   the fixture account, in which the product DEMO has the cost_center CC-100
@@ -4949,6 +5365,129 @@ THEN:
   the tool result is
   `{"entity":"features","scope":"product DEMO","count":3,"records":[{"id":"DEMO-4"},{"id":"DEMO-5"},{"id":"DEMO-6"}]}`
 
+### EXAMPLE: fields_with_several_values (of: evaluate-condition)
+GIVEN:
+  the fixture account, in which the current user is test.user@example.com
+  DEMO-1 has the markets EMEA and APAC and the reviewer Second User
+  DEMO-3 has the market EMEA and the reviewers Test User and Second User
+  DEMO-3 has the tags live and dashboard, and DEMO-4 has the tag live
+WHEN:
+  the tool query is called with query =
+  `SELECT id, custom.markets FROM features WHERE product = 'DEMO' AND custom.markets = 'emea'`
+  and evaluate-condition looks for the value among the values of the field
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":2,"records":[{"id":"DEMO-1","custom.markets":"EMEA, APAC"},{"id":"DEMO-3","custom.markets":"EMEA"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND custom.markets = 'APAC, EMEA'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":1,"records":[{"id":"DEMO-1"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND custom.markets != 'APAC'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":5,"records":[{"id":"DEMO-2"},{"id":"DEMO-3"},{"id":"DEMO-4"},{"id":"DEMO-5"},{"id":"DEMO-6"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND custom.reviewers = 'me'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":1,"records":[{"id":"DEMO-3"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND custom.reviewers = 'second.user@example.com, me'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":1,"records":[{"id":"DEMO-3"}]}`
+  FakeAha recorded one ApiGet call on /me
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND custom.reviewers IN ('Second User', 'nobody@example.com')`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":2,"records":[{"id":"DEMO-1"},{"id":"DEMO-3"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id, tags FROM features WHERE product = 'DEMO' AND tags = 'LIVE'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":2,"records":[{"id":"DEMO-3","tags":"live, dashboard"},{"id":"DEMO-4","tags":"live"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND tags = 'dashboard, live'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":1,"records":[{"id":"DEMO-3"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND tags CONTAINS 'board'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":1,"records":[{"id":"DEMO-3"}]}`
+
+### EXAMPLE: timestamps_are_points_in_time (of: evaluate-condition)
+GIVEN:
+  the fixture account, in which DEMO-1 has the updated_at
+  `2026-02-02T08:00:00.000Z` and the other five features of DEMO have
+  `2026-02-03T23:30:00.000Z`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND updated_at = '2026-02-02T08:00:00Z'`
+  and evaluate-condition compares two points in time
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":1,"records":[{"id":"DEMO-1"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND updated_at <= '2026-02-02T09:00:00+01:00'`
+THEN:
+  the tool result is the same, because the value is the same point in time
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND updated_at > '2026-02-04T00:15:00+01:00'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":5,"records":[{"id":"DEMO-2"},{"id":"DEMO-3"},{"id":"DEMO-4"},{"id":"DEMO-5"},{"id":"DEMO-6"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND updated_at = '2026-02-02'`
+THEN:
+  the tool result has the one record DEMO-1, because the value is a day
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM releases WHERE product = 'DEMO' AND release_date >= '2026-06-30T00:00:00Z'`
+THEN:
+  the tool result is
+  `{"entity":"releases","scope":"product DEMO","count":2,"records":[{"id":"DEMO-R-3"},{"id":"DEMO-R-4"}]}`
+
+### EXAMPLE: empty_text_and_null_stand_for_no_value (of: evaluate-condition)
+GIVEN:
+  the fixture account, in which DEMO-3 and DEMO-4 have the initiative
+  DEMO-S-1 and the other four features of DEMO have none
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND initiative = ''`
+  and evaluate-condition tests for no value
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":4,"records":[{"id":"DEMO-1"},{"id":"DEMO-2"},{"id":"DEMO-5"},{"id":"DEMO-6"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND initiative != ''`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":2,"records":[{"id":"DEMO-3"},{"id":"DEMO-4"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE product = 'DEMO' AND initiative IN ('DEMO-S-1', NULL)`
+THEN:
+  `scope` is `product DEMO` and `count` is 6
+  FakeAha recorded no call on /initiatives/DEMO-S-1/features, because a
+  list with NULL is not taken as a route
+
 ### EXAMPLE: grouping_without_group_by (of: build-rows)
 GIVEN:
   the fixture account
@@ -4999,6 +5538,58 @@ THEN:
   the tool result is
   `{"entity":"features","scope":"product DEMO","count":2,"total":6,"records":[{"id":"DEMO-1"},{"id":"DEMO-2"}]}`
   the result has no member `truncated` and no `note`
+
+### EXAMPLE: ids_are_sorted_by_their_numbers (of: build-rows)
+GIVEN:
+  the fixture account and, in addition, a product BULK with one release
+  BULK-R-1 and 60 features BULK-1 to BULK-60 in it
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE release = 'BULK-R-1' ORDER BY id DESC LIMIT 2`
+  and build-rows compares the numbers in the ids
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"release BULK-R-1","count":2,"total":60,"records":[{"id":"BULK-60"},{"id":"BULK-59"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT MIN(id), MAX(id) FROM features WHERE release = 'BULK-R-1'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"release BULK-R-1","count":1,"records":[{"MIN(id)":"BULK-1","MAX(id)":"BULK-60"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE release = 'BULK-R-1' AND id > 'BULK-58' ORDER BY id`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"release BULK-R-1","count":2,"records":[{"id":"BULK-59"},{"id":"BULK-60"}]}`
+
+### EXAMPLE: order_by_a_label_and_by_an_aggregate (of: build-rows)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query =
+  `SELECT name AS n FROM features WHERE release = 'DEMO-R-2' ORDER BY n DESC`
+  and build-rows sorts by the field of the label
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"release DEMO-R-2","count":2,"records":[{"n":"Offline maps"},{"n":"CSV export"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT status FROM features WHERE product = 'DEMO' GROUP BY status ORDER BY COUNT(*) DESC, status`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":4,"records":[{"status":"Under consideration"},{"status":"In design"},{"status":"In development"},{"status":"Shipped"}]}`
+
+### EXAMPLE: records_without_a_value_are_one_group (of: build-rows)
+GIVEN:
+  the fixture account, in which four features of DEMO have no initiative
+WHEN:
+  the tool query is called with query =
+  `SELECT initiative, COUNT(*) FROM features WHERE product = 'DEMO' GROUP BY initiative`
+  and build-rows groups the records
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":2,"records":[{"initiative":null,"COUNT(*)":4},{"initiative":"DEMO-S-1","COUNT(*)":2}]}`
 
 ### EXAMPLE: tags_are_split_at_commas (of: check-write-values)
 GIVEN:
@@ -5194,33 +5785,37 @@ THEN:
 ### EXAMPLE: request_through_the_proxy_of_the_environment (of: aha-request)
 GIVEN:
   the fixture account
-  the environment has HTTPS_PROXY = `http://10.200.0.1:3128`
+  the environment has HTTPS_PROXY with the address of FakeAha, as in
+  every example
 WHEN:
   the tool query is called with query = `SELECT id FROM features WHERE id = 'DEMO-3'`
   and aha-request sends the request
 THEN:
-  FakeAha recorded exactly one request:
+  FakeAha recorded one CONNECT request, for `example.aha.io:443`
+  no header of the CONNECT request has `fixture-key`
+  FakeAha recorded exactly one request inside the tunnel:
   GET https://example.aha.io/api/v1/features/DEMO-3
-  the proxy that the server chose for it is `http://10.200.0.1:3128`
   the tool result is
   `{"entity":"features","scope":"feature DEMO-3","count":1,"records":[{"id":"DEMO-3"}]}`
 
-### EXAMPLE: host_of_aha_without_the_proxy (of: aha-request)
+### EXAMPLE: certificate_that_the_trust_store_does_not_have (of: aha-request)
 GIVEN:
   the fixture account
-  the environment has HTTPS_PROXY = `http://10.200.0.1:3128` and
-  NO_PROXY = `.aha.io`
+  the environment has SSL_CERT_FILE with a certificate authority that did
+  not sign the certificate of FakeAha
 WHEN:
   the tool query is called with query = `SELECT id FROM features WHERE id = 'DEMO-3'`
-  and aha-request sends the request
+  and aha-request checks the certificate inside the tunnel
 THEN:
-  FakeAha recorded exactly one request, and the server chose no proxy for it
+  the tool result is an error with the message
+  `cannot reach Aha!: the certificate of example.aha.io could not be verified.`
+  FakeAha recorded no request inside the tunnel, so the credential was
+  not sent
 
 ### EXAMPLE: proxy_does_not_open_the_tunnel (of: aha-request)
 GIVEN:
   the fixture account
-  the environment has HTTPS_PROXY = `http://10.200.0.1:3128`
-  FakeAha is told that the proxy does not open the tunnel
+  FakeAha is told to refuse CONNECT
 WHEN:
   the tool execute is called with statement =
   `UPDATE features SET name = 'CSV export 2' WHERE id = 'DEMO-1'`
@@ -5228,21 +5823,22 @@ WHEN:
 THEN:
   the tool result is an error with the message
   `cannot reach Aha!: the proxy did not open a connection to example.aha.io.`
-  the message does not contain `10.200.0.1`
-  FakeAha recorded no ApiUpdate call
+  the message does not contain the address of FakeAha
+  FakeAha recorded no request inside a tunnel
 
 ### EXAMPLE: too_many_requests_is_sent_again (of: aha-request)
 GIVEN:
   the fixture account
-  the clock of the test shows 2026-11-13T09:30:00Z
   FakeAha answers the route /features/DEMO-3 once with the status 429 and
-  the header `X-Ratelimit-Reset: 1794562202`, and after that as usual
+  with the header `X-Ratelimit-Reset`, whose value is the UTC Unix time of
+  that answer plus 2, and after that as usual
 WHEN:
   the tool query is called with query = `SELECT id FROM features WHERE id = 'DEMO-3'`
   and aha-request sends the request
 THEN:
-  the clock of the test was asked to wait 2 seconds, once
   FakeAha recorded two calls on /features/DEMO-3
+  the second call arrived at least 1 second and less than 5 seconds after
+  the first
   the tool result is
   `{"entity":"features","scope":"feature DEMO-3","count":1,"records":[{"id":"DEMO-3"}]}`
 
@@ -5255,8 +5851,9 @@ WHEN:
   the tool query is called with query = `SELECT id FROM features WHERE id = 'DEMO-3'`
   and aha-request sends the request
 THEN:
-  the clock of the test was asked to wait 5 seconds, twice
   FakeAha recorded three calls on /features/DEMO-3
+  the second call arrived at least 5 seconds after the first, and the
+  third at least 5 seconds after the second
   the tool result is an error with the message
   `aha: API error (status 429): too many requests`
 
@@ -5313,6 +5910,7 @@ WHEN:
   `SELECT COUNT(*) FROM features WHERE product = 'PROD'`;
   `SELECT key, name FROM products`;
   `SELECT id, name FROM releases WHERE product = 'PROD'`;
+  `SELECT id, name FROM requirements WHERE feature = 'PROD-23'`;
   `SELECT * FROM features WHERE name CONTAINS 'x'`;
   `SELECT id, body FROM comments WHERE parent = 'PROD-23'`;
   `SELECT name FROM statuses WHERE product = 'PROD' AND entity = 'features'`;
@@ -5321,6 +5919,47 @@ WHEN:
   `UPDATE features SET custom.priority = '...' WHERE id = '...'`
 THEN:
   parse-statement returns a statement for each of them
+
+### EXAMPLE: articles_and_ids_in_messages (of: error-messages)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query = `SELECT * FROM features WHERE epic = 'DEMO'`
+  and error-messages writes the article before the kind
+THEN:
+  the tool result is an error with the message
+  `'DEMO' is a product, not an epic. Use: WHERE product = 'DEMO'`
+WHEN:
+  the tool query is called with query = `SELECT * FROM epics WHERE id = 'DEMO-S-1'`
+THEN:
+  the tool result is an error with the message
+  `'DEMO-S-1' is the id of an initiative, not of an epic. For the epics of that initiative: SELECT * FROM epics WHERE initiative = 'DEMO-S-1'`
+WHEN:
+  the tool execute is called with statement = `INSERT INTO ideas (parent) VALUES ('DEMO')`
+THEN:
+  the tool result is an error with the message
+  `name is required to create an idea`
+WHEN:
+  the tool query is called with query = `SELECT * FROM products WHERE key = 'NOPE'`
+THEN:
+  the tool result is
+  `{"entity":"products","scope":"all products","count":0,"records":[],"note":"There is no product with the key 'NOPE'."}`
+WHEN:
+  the tool query is called with query = `demo-3`
+THEN:
+  the tool result is an error with the message
+  `DEMO-3 is an id, not a statement. To read that record: SELECT * FROM features WHERE id = 'DEMO-3'`
+WHEN:
+  the tool query is called with query = `SELECT * FROM me WHERE name = 'x'`
+THEN:
+  the note of the tool result ends with
+  `No user has exactly the name 'x'. name = compares the whole name; to search inside names use: name CONTAINS 'x'`
+WHEN:
+  the tool execute is called with statement =
+  `INSERT INTO comments (parent, body) VALUES ('DEMO-1-9', 'c')`
+THEN:
+  the tool result is an error with the message
+  `there is no requirement with the id 'DEMO-1-9'. To find the id, use the query tool: SELECT id, name FROM requirements WHERE feature = 'DEMO-1'`
 
 ### EXAMPLE: example_key_is_the_default_product (of: choose-example-key)
 GIVEN:
@@ -5358,6 +5997,19 @@ THEN:
   `INSERT INTO features (parent, name) VALUES ('PRODX-R-3', 'Export to CSV')`
   no description contains `'PROD-`
 
+### EXAMPLE: default_product_that_the_account_does_not_have (of: choose-example-key)
+GIVEN:
+  the fixture account
+  the setting default_product is `nope`
+WHEN:
+  an MCP client lists the tools for the first time and choose-example-key
+  runs
+THEN:
+  the description of `query` has the line
+  `id is the reference number of a record, for example 'PROD-23'.`
+  stderr contains the line
+  `warning: default-product names no product of the account. Examples use the key PROD`
+
 ### EXAMPLE: example_key_is_chosen_when_it_is_needed (of: choose-example-key)
 GIVEN:
   the fixture account
@@ -5392,8 +6044,9 @@ THEN:
   the tool list is returned, with `query` and `execute`
   the description of `query` has the line
   `id is the reference number of a record, for example 'PROD-23'.`
-  the diagnostic output has a warning, and the warning does not contain
-  `fixture-key`
+  stderr contains the line
+  `warning: the product list could not be read. Examples use the key PROD`
+  stderr does not contain `fixture-key`
 
 ## DEPENDENCIES
 
@@ -5440,7 +6093,9 @@ Where the account name and the credential come from:
 
 The settings default_product and read_only have an option and a variable
 in the same way. The table of environment variables in load-configuration
-is the complete list of what the server reads from its environment.
+lists the variables that the server uses: four for its settings, and the
+variables that the standard library reads for the proxy and for the
+trust store.
 
 Manual mode at a shell. The statement is in double quotes, because AQL
 writes text in single quotes:
@@ -5501,6 +6156,17 @@ specification. The http transport of the deployment template speaks plain
 HTTP. On an address that is not a loopback address, a TLS endpoint in
 front of the server is necessary, because every request has a credential.
 
+Container image. The image has the certificate authorities of its build
+as its trust store, because the server checks the certificate of Aha!. An
+image that is built again has the current list. An operator can also
+give a trust store of their own with SSL_CERT_FILE. The server in the
+image listens on `127.0.0.1:8080`, the default of the deployment
+template. A TLS endpoint in the same pod, or in the same network
+namespace, reaches it at that address. An operator who publishes the
+port of the container sets `listen=0.0.0.0:8080` in the command of the
+container. The server then writes the warning G13, and the TLS endpoint
+in front of it is the task of the operator.
+
 Authentication with OAuth: this version has no OAuth flow. Aha! accepts an
 OAuth2 access token wherever it accepts an API key. A token that was
 obtained in another way can therefore be used as the credential.
@@ -5533,7 +6199,7 @@ these only when a specification declares it:
 | Template key | Declared here |
 |---|---|
 | COMMAND-WORDS | The command words are `query` and `execute`. Each makes one tool call and ends, and it selects no transport (see manual-mode). Their arguments are in the table of options in load-configuration. Their output and their exit codes are in the tables of output streams and exit codes above. An unknown first word gets the message G12, which lists the two transports and then the two command words |
-| CONFIG-ENV-VARS | The server reads the environment variables of the table in load-configuration, and no other. An option takes precedence over its variable |
+| CONFIG-ENV-VARS | The settings of the server come from the four AHA_ variables of the table in load-configuration, and from no other variable. An option takes precedence over its variable. The same table names the variables for the proxy and for the trust store, which the standard library of the language reads |
 | TOOL-EXECUTION-ERRORS | Every AqlError of `query` and of `execute` is a tool execution error. The tool result is marked as an error and has the message as its only text, so that the language model reads it. Protocol errors and internal errors of the server are JSON-RPC error responses |
 
 Platform: as the deployment template says. The check of the permission

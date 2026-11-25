@@ -4,6 +4,8 @@ mcp-server-aha-aql
 Copyright (c) 2026 Matthias G. Eckermann <mge@mailbox.org>
 
 This software is licensed under the MIT License.
-The full text of the license is at: https://opensource.org/license/mit
+The full license text is available at:
+https://opensource.org/license/mit
+https://spdx.org/licenses/MIT.html
 
-Generated from spec: aha-aql.spec.md sha256:9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262
+generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30

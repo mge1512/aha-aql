@@ -1,63 +1,81 @@
-// generated from spec: aha-aql.spec.md sha256:9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262
+// generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
 
 package main
 
-// load-configuration: the first word, the options and the environment
-// variables AHA_SUBDOMAIN, AHA_API_KEY, AHA_DEFAULT_PRODUCT and
-// AHA_READ_ONLY. The proxy and trust store variables are read by the
-// standard library (see aha-request).
-
 import (
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net"
 	"os"
-	"runtime"
 	"strings"
 )
 
-const defaultListen = "127.0.0.1:8080"
-
-var optionOrder = []string{"subdomain", "api-key-file", "default-product", "read-only", "listen", "dry-run", "query", "statement"}
-
-var optionsOf = map[string]map[string]bool{
-	"stdio":   {"subdomain": true, "api-key-file": true, "default-product": true, "read-only": true},
-	"http":    {"subdomain": true, "default-product": true, "read-only": true, "listen": true},
-	"query":   {"subdomain": true, "api-key-file": true, "default-product": true, "read-only": true, "query": true},
-	"execute": {"subdomain": true, "api-key-file": true, "default-product": true, "read-only": true, "dry-run": true, "statement": true},
+// Settings is the configuration of the process (TYPES: Settings).
+type Settings struct {
+	Subdomain      string
+	KeyFile        string
+	DefaultProduct string
+	ReadOnly       bool
+	Listen         string
+	DryRun         bool
+	Statement      string
+	HasStatement   bool
 }
 
-type startConfig struct {
-	word     string
-	mode     Mode
-	settings *Settings
-	acct     Account
-	opts     map[string]string
+type option struct {
+	key      string
+	words    []string
+	variable string
 }
 
-type startError struct{ msg string }
+// options is the first table of load-configuration, in its order.
+var options = []option{
+	{"subdomain", []string{"stdio", "http", "query", "execute"}, "AHA_SUBDOMAIN"},
+	{"api-key-file", []string{"stdio", "query", "execute"}, ""},
+	{"default-product", []string{"stdio", "http", "query", "execute"}, "AHA_DEFAULT_PRODUCT"},
+	{"read-only", []string{"stdio", "http", "query", "execute"}, "AHA_READ_ONLY"},
+	{"listen", []string{"http"}, ""},
+	{"dry-run", []string{"execute"}, ""},
+	{"query", []string{"query"}, ""},
+	{"statement", []string{"execute"}, ""},
+}
 
-func (e *startError) Error() string { return e.msg }
-
-func startErr(format string, args ...any) error { return &startError{fmt.Sprintf(format, args...)} }
-
-func optionKeys(word string) string {
-	var l []string
-	for _, k := range optionOrder {
-		if optionsOf[word][k] {
-			l = append(l, k)
+func optionFor(key, word string) bool {
+	for _, o := range options {
+		if o.key == key {
+			for _, w := range o.words {
+				if w == word {
+					return true
+				}
+			}
 		}
 	}
-	return strings.Join(l, ", ")
+	return false
 }
 
-func isLoopback(listen string) bool {
+func optionsOfWord(word string) string {
+	var out []string
+	for _, o := range options {
+		if optionFor(o.key, word) {
+			out = append(out, o.key)
+		}
+	}
+	return strings.Join(out, ", ")
+}
+
+// startError is a start message with exit code 2.
+type startError struct{ msg string }
+
+func startErr(format string, args ...any) *startError {
+	return &startError{msg: "error: " + fmt.Sprintf(format, args...)}
+}
+
+func isLoopbackHost(listen string) bool {
 	host, _, err := net.SplitHostPort(listen)
 	if err != nil {
-		return false
+		host = listen
 	}
+	host = strings.Trim(host, "[]")
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
@@ -65,187 +83,171 @@ func isLoopback(listen string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// loadConfiguration returns the configuration or a start error (G01 to G09,
-// G12). getenv gives the value of one of the four variables of the server.
-func loadConfiguration(args []string, getenv func(string) string) (*startConfig, error) {
-	word := ""
-	if len(args) > 0 {
-		word = args[0]
+// loadConfiguration is load-configuration. warn writes a warning line.
+func loadConfiguration(args []string, getenv func(string) string, warn func(string)) (string, Settings, *Account, *startError) {
+	var s Settings
+	s.Listen = "127.0.0.1:8080"
+	if len(args) == 0 {
+		return "", s, nil, startErr("unknown transport ''. Valid: stdio, http, query, execute")
 	}
-	cfg := &startConfig{word: word, settings: &Settings{Listen: defaultListen}, opts: map[string]string{}}
+	word := args[0]
+	mode := ""
 	switch word {
-	case "stdio":
-		cfg.mode = modeStdio
-	case "http":
-		cfg.mode = modeHTTP
+	case "stdio", "http":
+		mode = word
 	case "query", "execute":
-		cfg.mode = modeManual
+		mode = "manual"
 	default:
-		return nil, startErr("error: unknown transport '%s'. Valid: stdio, http, query, execute", word)
+		return "", s, nil, startErr("unknown transport '%s'. Valid: stdio, http, query, execute", word)
 	}
-	rest := args[1:]
-	type kv struct{ k, v string }
-	var pairs []kv
-	for i, a := range rest {
-		eq := strings.Index(a, "=")
-		if eq <= 0 {
-			return nil, startErr("error: argument %d is not key=value", i+1)
+	type pair struct{ k, v string }
+	var pairs []pair
+	for i, a := range args[1:] {
+		k, v, ok := strings.Cut(a, "=")
+		if !ok || k == "" {
+			return "", s, nil, startErr("argument %d is not key=value", i+1)
 		}
-		pairs = append(pairs, kv{a[:eq], a[eq+1:]})
+		pairs = append(pairs, pair{k, v})
 	}
-	if cfg.mode == modeHTTP {
+	if mode == "http" {
 		for _, p := range pairs {
 			if p.k == "api-key-file" {
-				return nil, startErr("error: http mode has no option api-key-file. Each request brings its credential in the header Aha-Api-Key")
+				return "", s, nil, startErr("http mode has no option api-key-file. Each request brings its credential in the header Aha-Api-Key")
 			}
 		}
 	}
+	given := map[string]string{}
 	for _, p := range pairs {
-		if !optionsOf[word][p.k] {
-			return nil, startErr("error: unknown option '%s' for %s. Options: %s", p.k, word, optionKeys(word))
+		if !optionFor(p.k, word) {
+			return "", s, nil, startErr("unknown option '%s' for %s. Options: %s", p.k, word, optionsOfWord(word))
 		}
-		if _, dup := cfg.opts[p.k]; dup {
-			return nil, startErr("error: option '%s' is given twice", p.k)
+		if _, dup := given[p.k]; dup {
+			return "", s, nil, startErr("option '%s' is given twice", p.k)
 		}
-		cfg.opts[p.k] = p.v
+		given[p.k] = p.v
 	}
-	// step 5: the variables, where the option is absent
-	type src struct {
-		value string
-		name  string // the key, or the variable
-		set   bool
-	}
-	take := func(key, variable string) src {
-		if v, ok := cfg.opts[key]; ok {
-			return src{v, key, true}
-		}
-		if variable != "" {
-			if v := getenv(variable); v != "" {
-				return src{v, variable, true}
+	// values and their source names (the variable stands for the key)
+	src := map[string]string{}
+	val := map[string]string{}
+	for _, o := range options {
+		if v, ok := given[o.key]; ok {
+			val[o.key], src[o.key] = v, o.key
+		} else if o.variable != "" {
+			if v := getenv(o.variable); v != "" {
+				val[o.key], src[o.key] = v, o.variable
 			}
 		}
-		return src{}
 	}
-	readOnly := take("read-only", "AHA_READ_ONLY")
-	dryRun := take("dry-run", "")
-	sub := take("subdomain", "AHA_SUBDOMAIN")
-	dp := take("default-product", "AHA_DEFAULT_PRODUCT")
-	// step 6 a
-	for _, b := range []struct {
-		s   src
-		dst *bool
-	}{{readOnly, &cfg.settings.ReadOnly}, {dryRun, &cfg.settings.DryRun}} {
-		if !b.s.set {
-			continue
-		}
-		switch b.s.value {
-		case "true":
-			*b.dst = true
-		case "false":
-			*b.dst = false
-		default:
-			return nil, startErr("error: %s must be true or false", b.s.name)
+	for _, k := range []string{"read-only", "dry-run"} {
+		if v, ok := val[k]; ok {
+			switch v {
+			case "true":
+				if k == "read-only" {
+					s.ReadOnly = true
+				} else {
+					s.DryRun = true
+				}
+			case "false":
+			default:
+				return "", s, nil, startErr("%s must be true or false", src[k])
+			}
 		}
 	}
-	// step 6 b
-	if sub.set {
-		v := strings.ToLower(sub.value)
+	if v, ok := val["subdomain"]; ok {
+		v = strings.ToLower(v)
 		if !reSubdomain.MatchString(v) {
-			return nil, startErr("error: %s must be the account name before .aha.io, for example mycompany", sub.name)
+			return "", s, nil, startErr("%s must be the account name before .aha.io, for example mycompany", src["subdomain"])
 		}
-		cfg.settings.Subdomain = v
+		s.Subdomain = v
 	}
-	// step 6 c
-	if dp.set {
-		if dp.value == "" {
-			return nil, startErr("error: default-product must be a product key, id or name")
-		}
-		cfg.settings.DefaultProduct = dp.value
-	}
-	if v, ok := cfg.opts["api-key-file"]; ok {
+	if v, ok := val["default-product"]; ok {
 		if v == "" {
-			return nil, startErr("error: api-key-file must be a file path")
+			return "", s, nil, startErr("default-product must be a product key, id or name")
 		}
-		cfg.settings.APIKeyFile = v
+		s.DefaultProduct = v
 	}
-	// step 6 d
-	if v, ok := cfg.opts["listen"]; ok {
-		cfg.settings.Listen = v
+	if v, ok := val["api-key-file"]; ok {
+		if v == "" {
+			return "", s, nil, startErr("api-key-file must be a file path")
+		}
+		s.KeyFile = v
 	}
-	if cfg.mode == modeHTTP && !isLoopback(cfg.settings.Listen) {
-		warn("listen=%s is not a loopback address. Every request has a credential; put a TLS endpoint in front of the server", cfg.settings.Listen)
+	if v, ok := val["listen"]; ok {
+		s.Listen = v
 	}
-	// step 7
-	if cfg.mode == modeHTTP {
+	if mode == "http" && !isLoopbackHost(s.Listen) {
+		warn("warning: the listen address is not a loopback address. Every request has a credential: put a TLS endpoint in front of the server")
+	}
+	switch word {
+	case "query":
+		s.Statement, s.HasStatement = val["query"], has(given, "query")
+	case "execute":
+		s.Statement, s.HasStatement = val["statement"], has(given, "statement")
+	}
+	if mode == "http" {
 		if getenv("AHA_API_KEY") != "" {
-			warn("AHA_API_KEY is not read in http mode. Each request brings its credential in the header Aha-Api-Key")
+			warn("warning: AHA_API_KEY is not read in http mode. Each request brings its credential in the header Aha-Api-Key")
 		}
-		return cfg, nil
+		return mode, s, nil, nil
 	}
-	// step 8
-	if cfg.settings.Subdomain == "" {
-		return nil, startErr("error: no Aha! account. Use subdomain=NAME or set AHA_SUBDOMAIN")
+	if s.Subdomain == "" {
+		return "", s, nil, startErr("no Aha! account. Use subdomain=NAME or set AHA_SUBDOMAIN")
 	}
-	cfg.acct.Subdomain = cfg.settings.Subdomain
-	// step 9
-	if path := cfg.settings.APIKeyFile; path != "" {
-		cred, err := readKeyFile(path)
+	var cred string
+	if s.KeyFile != "" {
+		c, err := readKeyFile(s.KeyFile)
 		if err != nil {
-			return nil, err
+			return "", s, nil, err
 		}
-		cfg.acct.Credential = cred
-		return cfg, nil
+		cred = c
+	} else {
+		raw := getenv("AHA_API_KEY")
+		if raw == "" {
+			return "", s, nil, startErr("no credential. Use api-key-file=PATH or set AHA_API_KEY")
+		}
+		cred = strings.TrimSpace(raw)
+		if cred == "" {
+			return "", s, nil, startErr("no usable credential in AHA_API_KEY: empty")
+		}
+		if !reCredential.MatchString(cred) {
+			return "", s, nil, startErr("no usable credential in AHA_API_KEY: not a single value of at most 4096 printable characters")
+		}
 	}
-	// step 10
-	raw := getenv("AHA_API_KEY")
-	if raw == "" {
-		return nil, startErr("error: no credential. Use api-key-file=PATH or set AHA_API_KEY")
-	}
-	cred := strings.TrimSpace(raw)
-	if cred == "" {
-		return nil, startErr("error: no usable credential in AHA_API_KEY: empty")
-	}
-	if !reCred.MatchString(cred) {
-		return nil, startErr("error: no usable credential in AHA_API_KEY: not a single value of at most 4096 printable characters")
-	}
-	cfg.acct.Credential = cred
-	return cfg, nil
+	return mode, s, &Account{Subdomain: s.Subdomain, Credential: cred}, nil
 }
 
-func readKeyFile(path string) (string, error) {
-	g07 := func(reason string) error {
-		return startErr("error: no usable credential in %s: %s", path, reason)
-	}
-	st, err := os.Stat(path)
+func has(m map[string]string, k string) bool { _, ok := m[k]; return ok }
+
+// readKeyFile is step 9 of load-configuration.
+func readKeyFile(path string) (string, *startError) {
+	fi, err := os.Stat(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return "", g07("no such file")
+		if os.IsNotExist(err) {
+			return "", startErr("no usable credential in %s: no such file", path)
 		}
-		return "", g07("cannot be read")
+		return "", startErr("no usable credential in %s: cannot be read", path)
 	}
-	if !st.Mode().IsRegular() {
-		return "", g07("not a regular file")
+	if !fi.Mode().IsRegular() {
+		return "", startErr("no usable credential in %s: not a regular file", path)
 	}
-	f, err := os.Open(path)
+	fh, err := os.Open(path)
 	if err != nil {
-		return "", g07("cannot be read")
+		return "", startErr("no usable credential in %s: cannot be read", path)
 	}
-	defer f.Close()
-	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
-		if st.Mode().Perm()&0o077 != 0 {
-			return "", startErr("error: %s can be read by other users. Run: chmod 600 %s", path, path)
-		}
+	defer fh.Close()
+	if permissionBits && fi.Mode().Perm()&0o077 != 0 {
+		return "", startErr("%s can be read by other users. Run: chmod 600 %s", path, path)
 	}
-	data, err := io.ReadAll(io.LimitReader(f, 4097))
+	data, err := io.ReadAll(io.LimitReader(fh, 4097))
 	if err != nil {
-		return "", g07("cannot be read")
+		return "", startErr("no usable credential in %s: cannot be read", path)
 	}
 	cred := strings.TrimSpace(string(data))
 	if cred == "" {
-		return "", g07("empty")
+		return "", startErr("no usable credential in %s: empty", path)
 	}
-	if !reCred.MatchString(cred) {
-		return "", g07("not a single value of at most 4096 printable characters")
+	if !reCredential.MatchString(cred) {
+		return "", startErr("no usable credential in %s: not a single value of at most 4096 printable characters", path)
 	}
 	return cred, nil
 }
