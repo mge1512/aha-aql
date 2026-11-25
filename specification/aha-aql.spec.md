@@ -1,9 +1,8 @@
-- A row has each label once. A select item that has the label and the content of an earlier item is left out. The content of an item is its field, or its function with its argument: `SELECT id, id` is read as `SELECT id`, and `COUNT(1)` after `COUNT(*)` is left out. Labels are compared as they are written: `id` and `ID` are two labels. A field that GROUP BY names a second time, in any spelling, is left out in the same way.
 # aha-aql
 
 ## META
 Deployment:   mcp-server
-Version:      0.20.0
+Version:      0.20.1
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -1371,6 +1370,7 @@ Rules for a read statement:
 - `COUNT(1)` and COUNT with the name of an entity as its argument are read as `COUNT(*)`. Their label is `COUNT(*)`.
 - `*` is the argument of COUNT only, and it does not follow DISTINCT. `*` in SUM, AVG, MIN or MAX → syntax, message S03. What was expected is `a field inside <FUNCTION>( )`. `*` after DISTINCT → syntax, message S03. What was expected is `a field after DISTINCT`.
 - A label after AS is a word that is not a keyword, or a text that is not empty. It is used as the statement writes it.
+- A row has each label once. A select item that has the label and the content of an earlier item is left out. The content of an item is its field, or its function with its argument: `SELECT id, id` is read as `SELECT id`, and `COUNT(1)` after `COUNT(*)` is left out. Labels are compared as they are written: `id` and `ID` are two labels. A field that GROUP BY names a second time, in any spelling, is left out in the same way.
 - Two select items with the same label and different content → syntax, message S15.
 - A label after AS must not be the name of another field that the row can show. There are two cases, and both → syntax, message S16. First: the label is the name of a field of GROUP BY that the statement does not select; build-rows shows that field under its name. Second: the statement has a Star item, and the label is the name of a field of the entity that is not the field of its own item.
 - A key of ORDER BY is a field, a label of a select item or an aggregate. A label stands for its select item. A word that is a label of the statement and also a field word is the label. An aggregate key does not have to be a select item.
