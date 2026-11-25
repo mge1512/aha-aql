@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.13.0
+Version:      0.14.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -995,12 +995,13 @@ STEPS:
    b. The API record for these values. For a record that plan-fetch read by its id route, it is the API record of the kept record. A product comes from the product list, which has no custom fields. When the list of star custom fields is not empty, read the kept product with one ApiGet on /products/{product}, with its NumericId. Its answer is the API record. NotFound → no star custom field has a value. Any other failure → the error that step 10 of plan-fetch gives for it.
    c. In every other case there are no star custom fields, and a Star item causes no request for custom field definitions.
 7. If truncated: add note H02.
-8. If there is no row and the statement has no aggregate item and no GROUP BY: add notes that explain the empty result, at most two. Go through the conjuncts that are a Comparison with a Text value, in the order of the statement. A `%` at the start or at the end of the value is ignored for these tests.
-   a. The id field of the entity with the operator `=` gives H03.
+8. If no record was kept in step 5 and the statement has no aggregate item and no GROUP BY: add notes that explain the empty result, at most two. Go through the conjuncts that are a Comparison with a Text value, in the order of the statement. A `%` at the start or at the end of the value is ignored for these tests.
+   a. The id field of the entity with the operator `=`. This case applies when plan-fetch read the id route for the value of this conjunct. On products and on users it applies to every such conjunct, because their list is complete. If no record with that id was read, the conjunct gives H03. If the record was read, another condition is not true for it, and the conjunct gives H08.
    b. On products, the field `name` with a value that resolve-product finds gives H04.
    c. The field `name` with a value that has the form of a ReferenceNumber of the entity's kind gives H05.
    d. The field `name` with a value that has the form of a ReferenceNumber whose kind is a parent filter of the entity gives H06.
    e. Any other comparison of the field `name` with the operator `=` gives H07.
+   f. On statuses, the field `entity` with the operator `=`, when the product has no status for the entity of the value, gives H09.
 9. Return the ReadResult with entity, scope, rows, count, total, truncated and notes.
 
 POSTCONDITIONS:
@@ -2776,6 +2777,13 @@ Notes in the result of a read statement:
 | H05 | `'<value>' looks like an id, not a name. Use: WHERE id = '<VALUE>'` |
 | H06 | `'<value>' looks like the id of a <kind>, not a name. Use: WHERE <kind> = '<VALUE>'` |
 | H07 | `No <singular> has exactly the name '<value>'. name = compares the whole name; to search inside names use: name CONTAINS '<value>'` |
+| H08 | `The <singular> <ID> exists, and another condition of the statement is not true for it. To see the record: SELECT * FROM <entity> WHERE <id field> = '<ID>'` |
+| H09 | `<PRODUCT> has statuses for: <entities>.` |
+
+In H08, `<ID>` is the id of the record as the record has it. In H09,
+`<entities>` are the values of `entity` that the product has statuses for,
+in the order of the entity statuses, joined by a comma and a space. For a
+product without any status it is `(none)`.
 
 POSTCONDITIONS:
 - every complete statement that a message shows is accepted by parse-statement, after its placeholders are replaced
@@ -3443,6 +3451,41 @@ THEN:
   the tool result is
   `{"entity":"features","scope":"feature DEMO-99","count":0,"records":[],"note":"There is no feature with the id 'DEMO-99'."}`
   FakeAha recorded no call on /custom_field_definitions
+
+### EXAMPLE: record_that_exists_and_does_not_match (of: read-statement)
+GIVEN:
+  the fixture account, in which DEMO-1 has the status "In design"
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE id = 'demo-1' AND status = 'Shipped'`
+  and read-statement explains the empty result
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"feature DEMO-1","count":0,"records":[],"note":"The feature DEMO-1 exists, and another condition of the statement is not true for it. To see the record: SELECT * FROM features WHERE id = 'DEMO-1'"}`
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE id = 'DEMO-1' AND id = 'DEMO-2'`
+THEN:
+  the tool result has the same `note` and no other note, because the id
+  route was read for DEMO-1 only
+WHEN:
+  the tool query is called with query =
+  `SELECT id FROM features WHERE id = 'DEMO-1' LIMIT 0`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"feature DEMO-1","count":0,"total":1,"records":[]}`
+  it has no `note`, because the record was kept and LIMIT cut the row
+
+### EXAMPLE: statuses_of_an_entity_that_has_none (of: read-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query =
+  `SELECT name FROM statuses WHERE product = 'DEMO' AND entity = 'comments'`
+  and read-statement explains the empty result
+THEN:
+  the tool result is
+  `{"entity":"statuses","scope":"product DEMO","count":0,"records":[],"note":"DEMO has statuses for: releases, features, epics, requirements, initiatives, goals, ideas."}`
 
 ### EXAMPLE: default_limit_is_reported (of: read-statement)
 GIVEN:
