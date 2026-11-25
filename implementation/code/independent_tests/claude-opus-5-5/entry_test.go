@@ -1,4 +1,4 @@
-// generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
+// generated from spec: aha-aql.spec.md sha256:caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e
 // tests by: claude-opus-5-5
 
 // Tests for spec version 0.23.0: server instructions, server/discover,
@@ -206,7 +206,7 @@ func TestHTTPModeKeepsNoSession(t *testing.T) {
 
 func TestDryRunOfAnInsert(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	r := e.run("", nil, "execute", "dry-run=true", "statement=INSERT INTO features (parent, name) VALUES ('demo-r-3', 'Export to PDF')")
 	if r.code != 0 || r.stdout != `{"name":"Export to PDF","message":"would create feature under DEMO-R-3"}`+"\n" || r.stderr != "" {
 		t.Fatalf("code %d stdout %q stderr %q", r.code, r.stdout, r.stderr)
@@ -216,7 +216,7 @@ func TestDryRunOfAnInsert(t *testing.T) {
 
 func TestBooleanSettingsAreLowerCase(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	r := e.startAndStop(map[string]string{"AHA_READ_ONLY": "TRUE"})
 	if r.code != 2 || strings.TrimSpace(r.stderr) != `error: AHA_READ_ONLY must be true or false` {
 		t.Fatalf("code %d stderr %q", r.code, r.stderr)

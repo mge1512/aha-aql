@@ -1,8 +1,8 @@
-% MCP-SERVER-AHA-AQL(1) mcp-server-aha-aql 0.23.0 | User Commands
+% MCP-SERVER-AHA-AQL(1) mcp-server-aha-aql 0.24.0 | User Commands
 % Matthias G. Eckermann <mge@mailbox.org>
 % November 2026
 
-<!-- generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268 -->
+<!-- generated from spec: aha-aql.spec.md sha256:caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e -->
 
 # NAME
 
@@ -139,7 +139,9 @@ gives a short guide to the first statements.
 :   The proxy for the connection to Aha!. The Go standard library reads them.
 
 **SSL_CERT_FILE**, **SSL_CERT_DIR**
-:   The trust store on Linux. The Go standard library reads them.
+:   The trust store on Linux. The Go standard library reads them. On macOS
+    the trust store is the keychain, and on Windows it is the certificate
+    store of the system; the two variables have no effect there.
 
 # EXIT STATUS
 
@@ -166,5 +168,5 @@ https://github.com/mge1512/aha-aql
 
 # SPECIFICATION
 
-This program is a translation of the specification aha-aql 0.23.0, with
-the SHA256 b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268.
+This program is a translation of the specification aha-aql 0.24.0, with
+the SHA256 caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e.

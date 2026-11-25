@@ -2,13 +2,13 @@
 
 | Field | Value |
 |---|---|
-| Spec-SHA256 | `b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268` |
-| Spec-SHA256 (host) | `b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268` |
-| Spec | `aha-aql.spec.md`, Version 0.23.0, Spec-Schema 0.4.0 |
+| Spec-SHA256 | `caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e` |
+| Spec-SHA256 (host) | `caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e` |
+| Spec | `aha-aql.spec.md`, Version 0.24.0, Spec-Schema 0.4.0 |
 | Deployment-Template | `mcp-server.template.md` v0.3.24 |
 | LLM-Name | `claude-opus-5-5` |
 | Mode | `translator` |
-| Run | single-LLM (no test-author output in the input directory); incremental build from 0.20.1 to 0.23.0 |
+| Run | single-LLM (no test-author output in the input directory); incremental build from 0.23.0 to 0.24.0 (earlier: 0.20.1 to 0.23.0) |
 | Date | 2026-11-25 |
 
 ## Included-Specs
@@ -23,8 +23,8 @@ hash equals the host hash.
 
 ## Translation Inputs (provenance)
 
-- `Spec-SHA256 (merged):` `b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268`
-- `Spec-SHA256 (host):` `aha-aql.spec.md` `b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268`
+- `Spec-SHA256 (merged):` `caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e`
+- `Spec-SHA256 (host):` `aha-aql.spec.md` `caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e`
 - `Decisions-Hints-SHA256:` none
 - `Milestones-Hints-SHA256:` none
 - `Template-SHA256:` `mcp-server.template.md` `22c55b355e28a6f2635413e72f2281faa3f7f1c79f79ea4eca76aba0b5b37b3e`
@@ -32,10 +32,49 @@ hash equals the host hash.
 - `Library-Hints-SHA256:` `mcp-server.go.mcp-go.hints.md` `3f5898ed241676f5503b22c7f13005dc3d67732c36bbae840718ec0cbf148b70` (Version v1.6.0, Release 1)
 - `Style-Hints-SHA256:` none (no `/etc/pcd/hints/` and no `.pcd/hints/` exist)
 - `Role-SHA256:` `ROLE.md` `e7839aedd9096d8059dd7854cfe94a01bd492cfbce204a445d37f8306c8930cf`
-- `System-Prompt-SHA256:` `system-prompt.txt` `6be5a16f69ce413b0ce8143fd3e66cfc992e41840f43aa0cba6952e53e2b81a6`
-- `Upgrade-Brief-SHA256:` `aha-aql.spec.md.diff` `2e9fc7681e8aab7eaaa36d1549d2218fa1e32d19a2a9267416567a5c50b0d41c` (spec change 0.20.1 → 0.23.0)
-- `Upgrade-Brief-SHA256:` `mcp-server.go.mcp-go.hints.md.diff` `bfd3315e43d3ed3a40d011213124416e7825cdc7c04593910446753f3e609098` (hints change)
+- `System-Prompt-SHA256:` `system-prompt.txt` `dcfa8cd9e2e8603c005979a118c0fd448cbec2d6dca3a4518ef8558a68c26152`
+- `Upgrade-Brief-SHA256:` `aha-aql.spec.md.diff` `982d2e9bb5624991a4caea9e67a7163b8be9c8fb8a961b573f826e9b47e9c31e` (spec change 0.23.0 → 0.24.0)
 - `Directive-SHA256:` none
+
+## Incremental build 0.23.0 → 0.24.0
+
+The input had the full spec 0.24.0, the hints file (unchanged, same hash as
+in the 0.23.0 run) and one diff. The prior translation of 0.23.0 was in the
+output directory. The diff changes prose only: no BEHAVIOR step logic, no
+TYPE, no EXAMPLE and no message text changed.
+
+| Change in the spec | Where | What was done |
+|---|---|---|
+| INTERFACES "Platforms of the tests": a test that needs FakeAha is skipped on macOS and Windows, with a reason that names the platform; the tests of the command line, the configuration, the version and the start of the MCP protocol run on every platform | `harness_test.go`, `platform_test.go`, `config_test.go`, `entry_test.go`, `http_test.go`, `manual_test.go`, `fakeaha_test.go` | `newEnv` now calls `skipWithoutFakeAha`, which skips with `needs FakeAha: on <GOOS> the server ignores SSL_CERT_FILE and uses the trust store of the system` when `runtime.GOOS != "linux"`. A new constructor `newLocalEnv` is for the tests that send no request to Aha!; it runs on every platform. FakeAha stays the proxy of such a test, and a new counter `Tunnels()` (not cleared by `Reset`) makes the test fail when the server opens a tunnel all the same. 22 existing tests were moved to `newLocalEnv` (list below); new test `TestStartOfTheMCPProtocol` covers initialize and server/discover on every platform |
+| "On Windows the binary has the name `mcp-server-aha-aql.exe`" | `harness_test.go` | `TestMain` builds `binaryName()`, which adds `.exe` on Windows; new test `TestBinaryNameOfThePlatform` |
+| A test that needs FakeAha is skipped on macOS and Windows | `platform_test.go` | new test `TestFakeAhaTestsRunOnLinuxOnly`: a subtest with FakeAha (manual `query=SELECT email FROM me`) must run and pass on Linux and must be skipped elsewhere |
+| DEPLOYMENT: the check of the permission bits of the key file applies on Linux and macOS (unchanged text, but `TestKeyFileThatOtherUsersCanRead` now runs on every platform) | `config_test.go` | the test skips on Windows with a reason that names the platform |
+| aha-request step 4: the trust store on macOS is the keychain and on Windows the certificate store of the system; SSL_CERT_FILE and SSL_CERT_DIR have no effect there | `aha.go` | no code change. `tls.Config` has `RootCAs` nil, so the Go standard library uses the trust store of the platform: on Linux the files that SSL_CERT_FILE and SSL_CERT_DIR can name, on macOS the keychain (Security framework), on Windows the CryptoAPI certificate store. No `InsecureSkipVerify`. The comment was updated. `CGO_ENABLED=0` cross builds for darwin/arm64 and windows/amd64 pass |
+| DEPLOYMENT "In a sandbox": the certificate authority of a TLS-ending proxy goes into the trust store, through SSL_CERT_FILE on Linux, the keychain on macOS and the certificate store on Windows | `README.md`, `mcp-server-aha-aql.1.md`, `mcp-server-aha-aql.1` | text added in the Configuration section and in ENVIRONMENT; the README also says that the binary is `mcp-server-aha-aql.exe` on Windows and which tests run on macOS and Windows |
+| Windows cannot send SIGTERM | `harness_test.go` | the cleanup of an http server process kills it at once on Windows, instead of waiting 10 s after a failed SIGTERM. No assertion changed |
+| Version 0.24.0 | `main.go`, `Makefile`, `aha-aql.spec`, `Containerfile`, man page, `debian/changelog`, pikchr | version and spec hash updated in every artefact; new `debian/changelog` entry (the 0.23.0 entry keeps its old hash) |
+
+Tests that now run on every platform (`newLocalEnv`, or no sandbox):
+TestVersionFlag, TestUnknownFirstWord, TestReadOnlyVariableOfTheWrongForm,
+TestStartWithoutAnAccount, TestKeyFileThatOtherUsersCanRead (not on
+Windows), TestKeyFileThatCannotBeUsed, TestCredentialIsNotAnOption,
+TestValuesOfTheWrongForm, TestArgumentsOfTheWrongForm,
+TestHTTPModeUsesNoCredentialOfTheProcess, TestListenAddressThatIsNotLoopback,
+TestHTTPBindError, TestDryRunOfAnInsert, TestBooleanSettingsAreLowerCase,
+TestHTTPRequestWithoutACredential, TestHTTPRequestForAnotherAccount,
+TestHTTPRequestWithoutAnAccount, TestHTTPRequestFromAWebPage,
+TestManualStatementArgumentIsMissing, TestManualExecuteIsRefusedInReadOnly,
+TestManualQueryRefusesWrites, TestManualProxyThatCannotBeReached,
+TestStartOfTheMCPProtocol, TestBinaryNameOfThePlatform and
+TestFakeAhaTestsRunOnLinuxOnly (which asserts the skip). All other 194
+tests need FakeAha and are skipped on macOS and Windows.
+
+How the list was found: 47 candidate tests (no FakeAha assertion in their
+bodies) were moved to `newLocalEnv` and run on Linux. The tunnel check of
+`newLocalEnv` failed for 25 of them, because they reach Aha! (mostly for the
+ExampleKey in the tool list or a product check). Those 25 went back to
+`newEnv`. This is a classification by observation on Linux, so a test can
+not be on the wrong side without failing.
 
 ## Incremental build 0.20.1 → 0.23.0
 
@@ -91,6 +130,15 @@ tests, the changes in `tools_test.go`, `describe_test.go`, `read_test.go`,
 `go vet` and `gofmt -l` before any implementation file was changed. Two
 existing tests were then edited after the first run (see Test
 Refinements), so the answer stays **no**.
+
+Incremental run 0.24.0: all test changes (`harness_test.go`,
+`fakeaha_test.go`, the new `platform_test.go`, the constructor and skip
+changes in five test files) were written and passed `go vet`, `gofmt -l`
+and `GOOS=windows`/`GOOS=darwin go vet` before any implementation file was
+changed. The first run showed `TestVersionFlag` failing (old spec hash in
+the binary), as expected before the implementation change. Of the 47
+tests first moved to `newLocalEnv`, 25 were moved back after that run (see
+above); that is a refinement, so the answer stays **no**.
 
 ## Continuity-Check
 
@@ -163,7 +211,7 @@ output directory is not a git repository, so nothing was committed.
 | OCI | `Containerfile` |
 | Phase 4 | `translation_report/translation-workflow.pikchr` |
 | report | `TRANSLATION_REPORT.md` |
-| tests | `independent_tests/claude-opus-5-5/*_test.go` (12 files) |
+| tests | `independent_tests/claude-opus-5-5/*_test.go` (13 files) |
 
 `vendor/` was made during the compile gate and then removed. The hints file
 says that `vendor/` is never part of the source. `make vendor` makes it
@@ -175,7 +223,7 @@ again, and `make vendor-tarball` makes the tarball `Source1` of the RPM.
 |---|---|
 | every `.go` file (implementation and tests) | `// generated from spec: aha-aql.spec.md sha256:<hash>`; tests also `// tests by: claude-opus-5-5` |
 | `go.mod` | the same comment on the first line |
-| binary | `mcp-server-aha-aql --version` writes `mcp-server-aha-aql 0.23.0 spec:<hash>` |
+| binary | `mcp-server-aha-aql --version` writes `mcp-server-aha-aql 0.24.0 spec:<hash>` |
 | `Makefile` | `SPEC_SHA256 := <hash>` |
 | `aha-aql.spec` | `# pcd-spec-sha256: <hash>` |
 | `debian/control` | `X-PCD-Spec-SHA256: <hash>` |
@@ -204,7 +252,7 @@ allowed in it.
   JSON-RPC, and GET /mcp gives the SSE stream (mcp-go). On SIGTERM or SIGINT:
   `http.Server.Shutdown` with a 30 second drain timeout, then exit 0. The
   server writes one start line to standard error:
-  `mcp-server-aha-aql 0.23.0: listening on http://<addr>/mcp`.
+  `mcp-server-aha-aql 0.24.0: listening on http://<addr>/mcp`.
 - **request-account**: the middleware checks every request to `/mcp`
   before mcp-go sees it: Origin → 403, missing or malformed `Aha-Api-Key` →
   400, malformed `Aha-Subdomain` → 400, another account → 403, no account →
@@ -281,7 +329,10 @@ have the server instructions of tool-registration.
 declared test double. It is an HTTP proxy on 127.0.0.1 that answers
 CONNECT for `example.aha.io:443` and ends TLS inside the tunnel. It uses a
 leaf certificate that a per-test certificate authority signs. The test gives
-the server `HTTPS_PROXY` and `SSL_CERT_FILE`, as a sandbox does. FakeAha
+the server `HTTPS_PROXY` and `SSL_CERT_FILE`, as a sandbox does. Because
+only Linux takes the trust store from `SSL_CERT_FILE`, every test that uses
+FakeAha is skipped on macOS and Windows (`newEnv`); tests that send no
+request use `newLocalEnv` and run everywhere. FakeAha
 answers from memory with the fixture account of INTERFACES: products,
 releases, features, epic, requirement, initiative, goals, comment, users,
 workflows, the 13 custom field definitions with options and custom values.
@@ -323,11 +374,13 @@ is inherited. Illustrative paths of the EXAMPLES (`/run/user/1000/aha-key`,
 | Step | Command | Result |
 |---|---|---|
 | 1 Framework | mcp-go v1.6.0 (template default) | done |
-| 2 Dependencies | `go mod tidy` | pass (0.20.1; go.mod and go.sum unchanged in 0.23.0, no new dependency). Indirect dependencies were resolved by the tool (google/jsonschema-go, google/uuid, santhosh-tekuri/jsonschema/v6, spf13/cast, yosida95/uritemplate/v3, golang.org/x/text) |
-| 3 Compilation | `go build ./...`, `CGO_ENABLED=0`, Go 1.27.4 | pass (0.23.0: first time) |
+| 2 Dependencies | `go mod tidy` | pass (0.20.1; go.mod and go.sum unchanged in 0.23.0 and 0.24.0, no new dependency; `go mod tidy` re-run in 0.24.0 without a change). Indirect dependencies were resolved by the tool (google/jsonschema-go, google/uuid, santhosh-tekuri/jsonschema/v6, spf13/cast, yosida95/uritemplate/v3, golang.org/x/text) |
+| 3 Compilation | `go build ./...`, `CGO_ENABLED=0`, Go 1.27.4 | pass (0.24.0: first time) |
+| — | `CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build`, `CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build` | pass (0.24.0) |
+| — | `GOOS=windows go vet ./independent_tests/...`, `GOOS=darwin go vet ./independent_tests/...` | pass (0.24.0) |
 | — | `go vet ./...`, `gofmt -l` | pass, no output |
-| — | `go mod vendor`, `make build`, `make test` | pass (vendor/ removed afterwards with `make clean`) |
-| 4 Translator tests | `go test ./independent_tests/claude-opus-5-5/...` | **216 passed, 0 failed, 0 skipped** (61 s), in two runs after the last edit |
+| — | `go mod vendor`, `make build`, `make test` | pass in 0.23.0 (vendor/ removed afterwards with `make clean`); not re-run in 0.24.0, because go.mod, go.sum and the Makefile targets did not change |
+| 4 Translator tests | `go test ./independent_tests/claude-opus-5-5/...` | **219 passed, 0 failed, 0 skipped** on Linux (61 s), in two runs after the last edit |
 | 5 Test-author tests | — | not applicable (single-LLM run) |
 | — | `pandoc mcp-server-aha-aql.1.md -s -t man -o mcp-server-aha-aql.1` | pass |
 
@@ -338,21 +391,26 @@ and `make man` passed.
 
 ## Test results — translator suite
 
-All tests are in `independent_tests/claude-opus-5-5/`. Every test passed.
-No test was skipped. No test needs a live Aha! account. The tests on
+All tests are in `independent_tests/claude-opus-5-5/`. Every test passed on
+Linux (linux/amd64). No test was skipped on Linux. The suite was not run on
+macOS or Windows (no such host); there, the 194 tests that need FakeAha
+would be skipped, and 25 tests would run (24 on Windows, where
+TestKeyFileThatOtherUsersCanRead is skipped). Following the spec, a
+translation report counts macOS and Windows as tested only for those tests;
+this report counts them as not tested at all. No test needs a live Aha! account. The tests on
 timeouts wait for the real 60 seconds of aha-request
 (`TestDescribeWhenAhaCannotBeReached`, `TestWriteRequestWithoutAnAnswer`,
 `TestExampleKeyWhenTheProductListCannotBeRead`). The tests on 429 wait
 2 to 10 seconds. These tests run in parallel and have timeouts of 150
 seconds.
 
-Passed (216): TestAccountFromTheEnvironment, TestAFieldThatIsGivenTwice,
+Passed (219): TestAccountFromTheEnvironment, TestAFieldThatIsGivenTwice,
 TestAnswersInTheJSONFormOfAha, TestAnswerWithAnUnknownForm,
 TestApostropheHintInAnError, TestApostropheInsideAWordIsReadAsText,
 TestArgumentsOfTheWrongForm, TestArgumentsTakePrecedence,
 TestARowHasEachLabelOnce, TestArticlesAndIDsInMessages,
 TestAssignmentOfAWordOrAnExpression, TestBareKeyOfACustomField,
-TestBodiesForAGoal, TestBodyOfACreateRequest, TestBodyOfAnUpdateRequest,
+TestBinaryNameOfThePlatform, TestBodiesForAGoal, TestBodyOfACreateRequest, TestBodyOfAnUpdateRequest,
 TestBodyWithCustomFields, TestBooleanSettingsAreLowerCase,
 TestCatalogNameWinsOverACustomKey,
 TestCertificateThatTheTrustStoreDoesNotHave, TestCommentsNeedAParent,
@@ -383,6 +441,7 @@ TestExampleKeyIsKeptForTheProcess, TestExampleKeyIsNotAProductOfTheAccount,
 TestExampleKeyIsTheDefaultProduct,
 TestExampleKeyWhenTheProductListCannotBeRead,
 TestExampleKeyWithoutADefaultProduct, TestExecuteLogsARefusedStatement,
+TestFakeAhaTestsRunOnLinuxOnly,
 TestExecuteRefusesReadStatements, TestExecuteRejectsUnknownParameter,
 TestExecuteRequiresAStatement, TestExecuteResultEnvelope,
 TestExecuteWritesALogLine, TestFieldsWithoutAValueInConditions,
@@ -428,7 +487,7 @@ TestReleasesNeedAProduct, TestRequestAddressAndHeaders,
 TestRequestThroughTheProxyOfTheEnvironment, TestRowsWithoutAValueSortLast,
 TestServerInstructionsAndEntryPoint, TestSettingsFromTheEnvironment,
 TestStarShowsDefaultFields, TestStarShowsTheCustomValuesOfAProduct,
-TestStartPrompt, TestStartWithoutAnAccount,
+TestStartOfTheMCPProtocol, TestStartPrompt, TestStartWithoutAnAccount,
 TestStarWithAnIDShowsCustomValues, TestStarWithoutAnIDHasCatalogFieldsOnly,
 TestStatementsInMessagesCanBeSent, TestStatementsWithoutSelect,
 TestStatusesOfAnEntity, TestStatusesOfAnEntityThatHasNone,
@@ -470,6 +529,10 @@ were in the input directory.
 | TestRequestThroughTheProxyOfTheEnvironment | failed (0.23.0 run 1: no CONNECT recorded) | test edited | The EXAMPLE `request_through_the_proxy_of_the_environment` (0.23.0) asks for at least one CONNECT, all for `example.aha.io:443`. aha-request "Connections" now keeps the tunnel of the tool list open, and the harness had reset the records after the tool list. The test now sends no tools/list before the query, so the CONNECT of the query is recorded. The assertion changed from "exactly one CONNECT" to "at least one, every one for example.aha.io:443", as the EXAMPLE now says. |
 | TestProxyDoesNotOpenTheTunnel | failed (0.23.0 run 1: the update succeeded) | test edited | The GIVEN of `proxy_does_not_open_the_tunnel` is that FakeAha refuses CONNECT. The test turned the refusal on only after the tool list had opened a tunnel, which aha-request "Connections" now keeps open. The refusal is now set before the server starts, and no tools/list is sent. The assertions are unchanged. |
 | TestToolsWithoutReadOnlyMode, TestDescribeWithoutEntity, TestStatementsInMessagesCanBeSent | not run (changed before the first 0.23.0 run) | none | changed for the 0.23.0 spec (description of `query`, prompt list `start`, note text, more statements) before any implementation change; they passed on their first run |
+| 47 tests moved to `newLocalEnv` (0.24.0) | 25 failed (0.24.0 run 1: "sent N request(s) to Aha!; it must use newEnv") | test edited | INTERFACES "Platforms of the tests": only tests that send no request to Aha! run on every platform. The 25 tests that the tunnel check caught reach Aha! and were moved back to `newEnv` (skipped off Linux). No assertion was changed; the 22 that stayed passed |
+| TestVersionFlag | failed (0.24.0 run 1: old spec hash) | code fixed | version output must have `spec:<hash>` of spec 0.24.0; `main.go` and the Makefile were updated |
+| TestStartOfTheMCPProtocol, TestBinaryNameOfThePlatform, TestFakeAhaTestsRunOnLinuxOnly | new (0.24.0) | none | written before the implementation change; passed on their first run |
+| http cleanup in `harness_test.go` | passed | test edited | Windows cannot send SIGTERM (the INTERFACES section now names Windows as a test platform); the cleanup kills the process at once there. No assertion changed |
 | all other tests | passed | none | — |
 
 Before the first test run, `gofmt -w` changed only the white space of
@@ -521,6 +584,18 @@ Before the first test run, `gofmt -w` changed only the white space of
     statements one after the other in one process and asserts at most one
     CONNECT after the tool list. For sequential requests the Go transport
     uses the idle connection deterministically.
+17. **Which tests "need FakeAha" (0.24.0).** The spec names categories
+    (command line, configuration, version, start of the MCP protocol) and
+    the rule "send no request to Aha!". Some tests of these categories reach
+    Aha! (for example a configuration test that lists the tools, whose
+    description needs the ExampleKey). The rule was applied: a test runs on
+    every platform only when it sends no request, and a runtime check
+    enforces it. Tests of the http transport and of manual mode that send no
+    request also run everywhere.
+18. **Key file permissions on Windows in the tests.** The tests of the
+    configuration run on every platform, but the DEPLOYMENT section says the
+    check of the permission bits applies on Linux and macOS only. So
+    `TestKeyFileThatOtherUsersCanRead` skips on Windows.
 13. **Users in the custom field `users`**: when an entry has no
     `email_value`, the e-mail addresses come from `full_value`, else from
     the texts of `value`, as custom-fields says. Each user's name and
@@ -563,7 +638,7 @@ Low confidence.
 | execute_logs_a_refused_statement | Medium | TestExecuteLogsARefusedStatement | — |
 | tools_without_read_only_mode | Medium | TestToolsWithoutReadOnlyMode | — |
 | tools_in_read_only_mode | Medium | TestToolsInReadOnlyMode | — |
-| server_instructions_and_entry_point | Medium | TestServerInstructionsAndEntryPoint | whether an MCP host shows the instructions to the language model is outside the server |
+| server_instructions_and_entry_point | Medium | TestServerInstructionsAndEntryPoint, TestStartOfTheMCPProtocol (initialize and server/discover, every platform) | whether an MCP host shows the instructions to the language model is outside the server |
 | start_prompt | Medium | TestStartPrompt, TestToolsWithoutReadOnlyMode (prompt list is `start` alone) | — |
 | manual_query_prints_the_tool_result | Medium | TestManualQueryPrintsTheToolResult | — |
 | manual_statement_from_standard_input | Medium | TestManualStatementFromStandardInput | — |
@@ -768,7 +843,13 @@ Template EXAMPLES (mcp-server.template.md):
   went to a live Aha! account.
 - The RPM, DEB and OCI builds were not executed (no rpmbuild,
   dpkg-buildpackage or podman on the build host).
-- Windows and macOS were not tested.
+- Windows and macOS were not tested. The skip logic of 0.24.0 and the
+  `.exe` name were checked by cross-compiling (`go vet` with GOOS=windows
+  and GOOS=darwin) and on Linux by `TestFakeAhaTestsRunOnLinuxOnly` and the
+  tunnel check of `newLocalEnv`; the skips themselves never ran.
+- That the server takes the keychain (macOS) and the certificate store
+  (Windows) as its trust store rests on the Go standard library behaviour
+  for `RootCAs == nil`; it is not tested.
 - No test drains a request that is in flight while SIGTERM arrives.
 - Connection reuse (0.23.0) is tested for sequential requests of one stdio
   process (`TestConnectionIsKeptOpen`). Reuse across HTTP requests in http

@@ -1,4 +1,4 @@
-# pcd-spec-sha256: b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
+# pcd-spec-sha256: caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e
 #
 # spec file for package mcp-server-aha-aql
 #
@@ -6,7 +6,7 @@
 #   (go mod vendor && tar -cJf mcp-server-aha-aql-0.23.0-vendor.tar.xz vendor/)
 
 Name:           mcp-server-aha-aql
-Version:        0.23.0
+Version:        0.24.0
 Release:        1%{?dist}
 Summary:        MCP server for Aha! with the query language AQL
 License:        MIT

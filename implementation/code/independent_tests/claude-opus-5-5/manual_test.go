@@ -1,4 +1,4 @@
-// generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
+// generated from spec: aha-aql.spec.md sha256:caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e
 // tests by: claude-opus-5-5
 
 package aqltests
@@ -73,7 +73,7 @@ func TestManualErrorGoesToStandardError(t *testing.T) {
 
 func TestManualStatementArgumentIsMissing(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	r := e.run("", nil, "query")
 	if r.code != 2 || !hasLine(r.stderr, `error: query needs query=STATEMENT, or query=- to read the statement from standard input`) {
 		t.Fatalf("code %d stderr %q", r.code, r.stderr)
@@ -87,7 +87,7 @@ func TestManualStatementArgumentIsMissing(t *testing.T) {
 
 func TestManualExecuteIsRefusedInReadOnly(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	msg := `error: execute is not available, because read-only is true (option read-only or variable AHA_READ_ONLY)`
 	r := e.run("", nil, "execute", "read-only=true", "statement=DELETE FROM features WHERE id = 'DEMO-6'")
 	if r.code != 2 || !hasLine(r.stderr, msg) {
@@ -112,7 +112,7 @@ func TestManualModeWritesNoLogLine(t *testing.T) {
 
 func TestManualQueryRefusesWrites(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	r := e.run("DELETE FROM features WHERE id = 'DEMO-1'\n", nil, "query", "query=-")
 	if r.code != 1 || r.stdout != "" || strings.TrimSpace(r.stderr) != `error: query only reads. Use the execute tool for INSERT, UPDATE and DELETE.` {
 		t.Fatalf("code %d stdout %q stderr %q", r.code, r.stdout, r.stderr)
@@ -154,7 +154,7 @@ func TestExampleKeyIsChosenWhenItIsNeeded(t *testing.T) {
 
 func TestManualProxyThatCannotBeReached(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	e := newLocalEnv(t)
 	r := e.run("", map[string]string{"HTTPS_PROXY": "http://127.0.0.1:1", "AHA_API_KEY": "x"}, "query", "query=SELECT id FROM features WHERE id = 'DEMO-1'")
 	if r.code != 1 || r.stdout != "" || strings.TrimSpace(r.stderr) != `error: cannot reach Aha!: the proxy did not open a connection to example.aha.io.` {
 		t.Fatalf("code %d stdout %q stderr %q", r.code, r.stdout, r.stderr)

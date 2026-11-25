@@ -14,7 +14,7 @@
 . ftr VB CB
 . ftr VBI CBI
 .\}
-.TH "MCP-SERVER-AHA-AQL" "1" "November 2026" "mcp-server-aha-aql 0.23.0" "User Commands"
+.TH "MCP-SERVER-AHA-AQL" "1" "November 2026" "mcp-server-aha-aql 0.24.0" "User Commands"
 .hy
 .SH NAME
 .PP
@@ -174,6 +174,8 @@ The Go standard library reads them.
 \f[B]SSL_CERT_FILE\f[R], \f[B]SSL_CERT_DIR\f[R]
 The trust store on Linux.
 The Go standard library reads them.
+On macOS the trust store is the keychain, and on Windows it is the
+certificate store of the system; the two variables have no effect there.
 .SH EXIT STATUS
 .TP
 \f[B]0\f[R]
@@ -201,8 +203,8 @@ mcp-server-aha-aql http listen=127.0.0.1:8080 subdomain=mycompany
 https://github.com/mge1512/aha-aql
 .SH SPECIFICATION
 .PP
-This program is a translation of the specification aha-aql 0.23.0, with
+This program is a translation of the specification aha-aql 0.24.0, with
 the SHA256
-b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268.
+caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e.
 .SH AUTHORS
 Matthias G. Eckermann <mge@mailbox.org>.

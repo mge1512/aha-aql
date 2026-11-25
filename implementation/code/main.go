@@ -1,4 +1,4 @@
-// generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
+// generated from spec: aha-aql.spec.md sha256:caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e
 
 // Command mcp-server-aha-aql is an MCP server for the Aha! product
 // management service. A language model reads and changes Aha! records
@@ -31,10 +31,10 @@ import (
 
 // serverVersion is the version of the spec; the build can set it with
 // -ldflags "-X main.serverVersion=...".
-var serverVersion = "0.23.0"
+var serverVersion = "0.24.0"
 
 // specSHA256 is the SHA256 of the specification this binary was translated from.
-const specSHA256 = "b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268"
+const specSHA256 = "caab507ed82ebcb6a9f2c7ea6c55bfadfed1208642edbdd0229d95aee417348e"
 
 var permissionBits = runtime.GOOS != "windows"
 
