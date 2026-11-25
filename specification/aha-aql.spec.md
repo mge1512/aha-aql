@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.20.1
+Version:      0.21.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -411,7 +411,9 @@ port 443. Inside the tunnel FakeAha ends the TLS connection with a
 certificate for that host name, which the certificate authority of the
 test has signed. FakeAha gets every request with its method, address,
 headers and body, and answers it from memory with a fixture account. It
-opens no network connection of its own.
+answers several requests in one tunnel, one after the other, as long as
+the server keeps the tunnel open. It opens no network connection of its
+own.
 
 The server has no hook for tests: no option, no variable and no part of
 its code is there for a test only. A test starts the server as a user
@@ -836,7 +838,7 @@ STEPS:
 4. If a key is not an option of the word (see the first table below) → G02. If a key is given twice → G03.
 5. Take from the environment each setting that has a variable (see the first table below) and whose option is absent. A variable that is absent or empty gives no value.
 6. Check the values. In G04 the name of the variable stands for the key when the value comes from a variable.
-   a. `read-only` and `dry-run`: `true` or `false`; otherwise → G04.
+   a. `read-only` and `dry-run`: `true` or `false`, in lower case; any other value, `TRUE` too → G04.
    b. `subdomain`: put the value into lower case. If it does not match Subdomain → G04.
    c. `default-product` and `api-key-file`: if the option is given with an empty value → G04.
    d. `listen`: the value goes to the http transport of the deployment template. If its host is not a loopback address: write the warning G13 to the diagnostic output. The server starts.
@@ -993,8 +995,14 @@ read from Aha! with it. In stdio mode the server keeps nothing that it
 read from Aha! after a statement either. The one value that it keeps is
 the ExampleKey (see choose-example-key).
 
+In http mode the server keeps no MCP session either. Every HTTP request is
+handled on its own. The answer to `initialize` has no header
+`Mcp-Session-Id`, and a request is handled in the same way with or without
+that header. The MCP specification allows a server without sessions.
+
 POSTCONDITIONS:
 - in http mode no request reaches a tool, the tool list or any other MCP method without a credential
+- in http mode no answer has the header `Mcp-Session-Id`
 - no answer of this behavior has a credential, and none says which account the server works with
 
 ERRORS:
@@ -1148,7 +1156,7 @@ STEPS:
    c. Parent kind any-record (comments): the parent must be a ReferenceNumber of the kind feature, epic, idea, release, initiative, goal or requirement; otherwise → wrong_kind, message K08.
 3. If the field `name` (for comments the field `body`) is absent or empty → bad_value, message W19. For goals the field `success_metric` is required in the same way, because Aha! creates no goal without it.
 4. Run check-write-values for the fields; on failure → the error of check-write-values. When a status is assigned and the parent is a record, check-write-values reads the parent to learn its product.
-5. If dry_run: return a WriteResult without id, with the checked fields as values, and the message "would create <singular> under <parent>". No write request is sent.
+5. If dry_run: return a WriteResult without id. `values` has the checked fields of the statement in the order of the statement; the parent is not one of them. `message` is "would create <singular> under <parent>". `<parent>` is the key of the product when the parent kind is product, and otherwise the parent as the statement gives it, in capital letters. No write request is sent.
 6. Run write-request for the entity and the checked fields. Call ApiCreate on the create route of the entity with the parent and that body. NotFound → not_found, message W25. NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. Rejected → api_error, message W30.
 7. Return the WriteResult. `id` is the id of the new record. `values` has `name` and `parent`; for a comment it has `parent`, `body` and `created_at`. `message` is "<Singular> <id> created" with the singular name of the entity starting with a capital letter; for a comment it is "Comment added to <parent>".
 
@@ -2395,7 +2403,6 @@ entity:    EntityName
 fields:    Map<FieldName, Value>
 product:   Product or none     // product of the record that is changed
 parent:    RecordId or none    // parent of a new record
-form_only: Boolean             // check only what needs no record
 ```
 
 OUTPUTS:
@@ -2415,7 +2422,7 @@ STEPS:
 6. user: `me`, `myself` or `current_user` in any case is replaced by the e-mail address of the current user, read with ApiGet on /me. An e-mail address and a NumericId are sent as they are. Any other value → bad_value, message W23.
 7. reference: the value must be a ReferenceNumber of the kind of the field, or a NumericId. It is sent in capital letters. For a value of another form: when resolve-product finds it as a product → wrong_kind, message W24. The records of that kind in the product are read for the message with one list request. Any other value → not_found, message W25.
 8. The field `tags`: the text is split at commas into tags. White space around a tag is removed and an empty tag is left out.
-9. status, unless form_only is true.
+9. status.
    a. Take the workflow statuses of the entity in the product, in workflow order, as plan-fetch reads them for the entity statuses. The record of the product names the workflow of the entity, and the list of workflows has its statuses. Both answers are read at most once per statement and are not kept after it.
    b. For a new record the product is the product of the parent. When the parent is a record, read it with ApiGet on its id route to learn its product; NotFound → not_found, message W25.
    c. Compare the value with the names of the statuses. The comparison is the equality of text of evaluate-condition. The name is sent as the workflow writes it.
@@ -2542,6 +2549,15 @@ proxy. The operator of the environment decides this with the trust store.
 In such an environment the credential can be a placeholder that the proxy
 replaces on the way to Aha!. The server sends it as it is.
 
+Connections. The server keeps a connection to Aha! open after a request
+and uses it for later requests to the same host, also when the connection
+goes through the tunnel of a proxy. It does not open a new connection or a
+new tunnel for every request. No credential and nothing that was read
+from Aha! stays in an open connection: every request has its own headers, with
+the credential of its Account. The number of connections and of CONNECT
+requests therefore depends on timing, and an example counts the requests
+inside the tunnel, not the CONNECT requests.
+
 POSTCONDITIONS:
 - the request was for the account of the Account and for no other host
 - the server connected to that host or to the proxy of the environment, and to nothing else
@@ -2621,8 +2637,8 @@ Messages of the tool calls:
 | A02 | bad_args | `tool <tool> has one parameter: <parameter> (one AQL statement). It does not accept: <names>.<parameter hint>` |
 | A03 | bad_args | `statement parameter is required: one INSERT, UPDATE or DELETE statement` |
 
-In A02, `<names>` are the unknown parameter names of the call, joined by a
-comma and a space. `<parameter hint>` is ` Name the product inside the
+In A02, `<names>` are the unknown parameter names of the call, sorted by
+their characters (code point order) and joined by a comma and a space. `<parameter hint>` is ` Name the product inside the
 statement: ... WHERE product = '<KEY>'` when the tool is `query` and one of
 the names is `product`. It is ` Pass the statement as <parameter>.` when one
 of the names is `query`, `statement`, `aql` or `sql`. Otherwise it is empty.
@@ -2998,6 +3014,7 @@ ERRORS:
 - [observable] an option takes precedence over its environment variable, and the key file over AHA_API_KEY
 - [observable] in http mode a request without a credential reaches no tool and no tool list, and the server uses no credential of its own
 - [observable] in http mode nothing that was read with the credential of one request is part of the answer to another request
+- [observable] in http mode the server keeps no MCP session: no answer has the header `Mcp-Session-Id`, and a request is handled in the same way with or without it
 - [observable] one statement reads the product list, the custom field definitions, the options of one definition, and the record and the workflows of one product at most once each; the server keeps none of them after the statement, in stdio mode and in http mode, and the ExampleKey is the one value that it keeps between statements
 - [observable] a read statement or a write statement whose field words are all catalog names causes no request for custom field definitions, and its list requests do not ask for custom fields; the one exception is a read statement with `*` that selects one record by its id field, which reads the definitions when it has found the record
 - [observable] a result has a custom field only when the statement names it, or when the statement has `*` and selects one record by its id field: then the row also has the custom fields that have a value in that record; in every other statement `*` stands for catalog fields only
@@ -3009,6 +3026,7 @@ ERRORS:
 - [implementation] the server has no direct dependency other than the MCP framework that the deployment template selects
 - [implementation] the entity-catalog is the single source for name resolution, DESCRIBE, the parameter fields, record conversion, value checks, request bodies and the lists in messages; the server has no second list of entities or fields, and it has no built-in list of custom fields: these come from the definitions of the account
 - [implementation] no list is read with one request per record
+- [implementation] a connection to Aha!, direct or through the tunnel of a proxy, stays open and is used for later requests; the server does not open one connection per request
 
 ## EXAMPLES
 
@@ -3497,6 +3515,23 @@ THEN:
   `Aha! refused the request (status 403): the API key is not valid for the account example, or it has no permission for this record. Repeating the statement does not help.`
   FakeAha recorded an ApiList call on /products for each of the two requests
 
+### EXAMPLE: http_mode_keeps_no_session (of: request-account)
+GIVEN:
+  the fixture account
+  the server runs in http mode with the setting subdomain = `example`
+WHEN:
+  an MCP client sends `initialize` with the header `Aha-Api-Key: fixture-key`
+THEN:
+  the answer has no header `Mcp-Session-Id`
+WHEN:
+  the client calls the tool query with query = `SELECT key FROM products`,
+  with the header `Aha-Api-Key: fixture-key` and the header
+  `Mcp-Session-Id: not-a-session`
+THEN:
+  the tool result is
+  `{"entity":"products","scope":"all products","count":2,"records":[{"key":"DEMO"},{"key":"OTHER"}]}`
+  the answer has no header `Mcp-Session-Id`
+
 ### EXAMPLE: count_per_status (of: read-statement)
 GIVEN:
   the fixture account
@@ -3917,6 +3952,20 @@ WHEN:
 THEN:
   the tool result is an error with the same message
   FakeAha recorded no ApiCreate call
+
+### EXAMPLE: dry_run_of_an_insert (of: insert-statement)
+GIVEN:
+  the fixture account
+  the environment has AHA_SUBDOMAIN = `example` and AHA_API_KEY = `fixture-key`
+WHEN:
+  manual-mode runs for the command line
+  `mcp-server-aha-aql execute dry-run=true statement="INSERT INTO features (parent, name) VALUES ('demo-r-3', 'Export to PDF')"`
+THEN:
+  stdout is the line
+  `{"name":"Export to PDF","message":"would create feature under DEMO-R-3"}`
+  stderr is empty
+  exit_code = 0
+  FakeAha recorded no request
 
 ### EXAMPLE: update_status_in_any_case (of: update-statement)
 GIVEN:
@@ -5791,9 +5840,10 @@ WHEN:
   the tool query is called with query = `SELECT id FROM features WHERE id = 'DEMO-3'`
   and aha-request sends the request
 THEN:
-  FakeAha recorded one CONNECT request, for `example.aha.io:443`
-  no header of the CONNECT request has `fixture-key`
-  FakeAha recorded exactly one request inside the tunnel:
+  FakeAha recorded at least one CONNECT request, and every one is for
+  `example.aha.io:443`
+  no header of a CONNECT request has `fixture-key`
+  FakeAha recorded exactly one request inside a tunnel:
   GET https://example.aha.io/api/v1/features/DEMO-3
   the tool result is
   `{"entity":"features","scope":"feature DEMO-3","count":1,"records":[{"id":"DEMO-3"}]}`
