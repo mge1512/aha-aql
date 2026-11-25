@@ -1,71 +1,91 @@
-// generated from spec: aha-aql.spec.md sha256:9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262
+// generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
 
 package main
-
-// The tools query and execute, and tool-registration.
 
 import (
 	"context"
 	"fmt"
-	"os"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
-func queryDescription() string {
-	return "Read from Aha! with one AQL statement.\n" +
-		"SELECT fields FROM entity [WHERE field = 'value' [AND ...]] [GROUP BY field] [ORDER BY field [DESC]] [LIMIT n]\n" +
-		"DESCRIBE entity\n" +
-		"Entities: " + strings.Join(entityNames(), ", ") + ".\n" +
-		"id is the reference number of a record, for example '{KEY}-23'.\n" +
-		"Filter by parent: product = '{KEY}', release = '{KEY}-R-3', feature = '{KEY}-23', initiative = '{KEY}-S-1'.\n" +
-		"Other conditions: !=, <, >, CONTAINS 'text', IS NULL. Count with COUNT(*).\n" +
-		"Custom fields are written custom.key. DESCRIBE entity lists them.\n" +
-		"Text goes in single quotes. Write an apostrophe inside text twice: 'Year''s end'.\n" +
-		"Examples:\n" +
-		"SELECT id, name, status FROM features WHERE release = '{KEY}-R-3'\n" +
-		"SELECT status, COUNT(*) FROM features WHERE product = '{KEY}' GROUP BY status\n" +
-		"SELECT id, name, release_date FROM releases WHERE product = '{KEY}' AND parking_lot = false ORDER BY release_date\n" +
-		"SELECT name FROM statuses WHERE product = '{KEY}' AND entity = 'features'\n" +
-		"SELECT email FROM me\n"
+const queryDescription = `Read from Aha! with one AQL statement.
+SELECT fields FROM entity [WHERE field = 'value' [AND ...]] [GROUP BY field] [ORDER BY field [DESC]] [LIMIT n]
+DESCRIBE entity
+Entities: {ENTITIES}.
+id is the reference number of a record, for example '{KEY}-23'.
+Filter by parent: product = '{KEY}', release = '{KEY}-R-3', feature = '{KEY}-23', initiative = '{KEY}-S-1'.
+Other conditions: !=, <, >, CONTAINS 'text', IS NULL. Count with COUNT(*).
+Custom fields are written custom.key. DESCRIBE entity lists them.
+Text goes in single quotes. Write an apostrophe inside text twice: 'Year''s end'.
+Examples:
+SELECT id, name, status FROM features WHERE release = '{KEY}-R-3'
+SELECT status, COUNT(*) FROM features WHERE product = '{KEY}' GROUP BY status
+SELECT id, name, release_date FROM releases WHERE product = '{KEY}' AND parking_lot = false ORDER BY release_date
+SELECT name FROM statuses WHERE product = '{KEY}' AND entity = 'features'
+SELECT email FROM me
+`
+
+const executeDescription = `Change ONE record in Aha! with one AQL statement. Three forms:
+INSERT INTO entity (parent, field, ...) VALUES ('parent id', 'value', ...)
+UPDATE entity SET field = 'value', ... WHERE id = 'id'
+DELETE FROM entity WHERE id = 'id'
+parent is the record the new one belongs to: a release for features and epics, a product for releases, initiatives, goals and ideas, a feature for requirements, any record for comments.
+Text and apostrophes as in query. DESCRIBE entity in query lists the field names.
+Examples:
+INSERT INTO features (parent, name) VALUES ('{KEY}-R-3', 'Export to CSV')
+UPDATE features SET status = 'In design', assigned_to = 'me' WHERE id = '{KEY}-23'
+INSERT INTO comments (parent, body) VALUES ('{KEY}-23', 'It''s ready.')
+`
+
+// app is the server process.
+type app struct {
+	mode     string
+	settings Settings
+	acct     *Account    // stdio and manual mode
+	ek       *exampleKey // stdio and manual mode
+	client   *ahaClient
+	errMu    sync.Mutex
 }
 
-const executeDescription = "Change ONE record in Aha! with one AQL statement. Three forms:\n" +
-	"INSERT INTO entity (parent, field, ...) VALUES ('parent id', 'value', ...)\n" +
-	"UPDATE entity SET field = 'value', ... WHERE id = 'id'\n" +
-	"DELETE FROM entity WHERE id = 'id'\n" +
-	"parent is the record the new one belongs to: a release for features and epics, a product for releases, initiatives, goals and ideas, a feature for requirements, any record for comments.\n" +
-	"Text and apostrophes as in query. DESCRIBE entity in query lists the field names.\n" +
-	"Examples:\n" +
-	"INSERT INTO features (parent, name) VALUES ('{KEY}-R-3', 'Export to CSV')\n" +
-	"UPDATE features SET status = 'In design', assigned_to = 'me' WHERE id = '{KEY}-23'\n" +
-	"INSERT INTO comments (parent, body) VALUES ('{KEY}-23', 'It''s ready.')\n"
+func (a *app) diag(line string) {
+	a.errMu.Lock()
+	defer a.errMu.Unlock()
+	fmt.Fprintln(stderr, line)
+}
 
-// errA02 is the message for parameters that the tool does not declare.
-func errA02(tool, param string, unknown []string) *AqlError {
-	sort.Strings(unknown)
-	hint := ""
-	has := func(n ...string) bool {
-		for _, u := range unknown {
-			for _, x := range n {
-				if u == x {
-					return true
-				}
-			}
-		}
-		return false
+type ctxKey struct{}
+
+// reqState is the Account and the ExampleKey of one HTTP request.
+type reqState struct {
+	acct Account
+	ek   *exampleKey
+}
+
+func (a *app) newExampleKey() *exampleKey {
+	return &exampleKey{defaultProduct: a.settings.DefaultProduct, warn: a.diag}
+}
+
+// state is request-account: the Account that the call runs with.
+func (a *app) state(ctx context.Context) (Account, *exampleKey) {
+	if rs, ok := ctx.Value(ctxKey{}).(*reqState); ok {
+		return rs.acct, rs.ek
 	}
-	switch {
-	case tool == "query" && has("product"):
-		hint = " Name the product inside the statement: ... WHERE product = '" + keyMark + "'"
-	case has("query", "statement", "aql", "sql"):
-		hint = " Pass the statement as " + param + "."
+	return *a.acct, a.ek
+}
+
+func (a *app) stmt(ctx context.Context) *stmtCtx {
+	acct, ek := a.state(ctx)
+	if a.mode != "http" {
+		ctx = context.WithoutCancel(ctx)
 	}
-	return aqlErr("bad_args", "tool %s has one parameter: %s (one AQL statement). It does not accept: %s.%s", tool, param, strings.Join(unknown, ", "), hint)
+	return newStmt(ctx, acct, a.client, ek)
 }
 
 func unknownParams(args map[string]any, param string) []string {
@@ -75,178 +95,163 @@ func unknownParams(args map[string]any, param string) []string {
 			out = append(out, k)
 		}
 	}
+	sort.Strings(out)
 	return out
 }
 
-// runQuery is the tool query. The text is the result object or the message.
-func (s *session) runQuery(args map[string]any) (string, bool) {
-	r := newRun(s)
-	obj, err := r.query(args)
-	if err != nil {
-		return r.show(err.Message), false
-	}
-	return r.show(toJSON(obj)), true
-}
-
-func (r *run) query(args map[string]any) (Obj, *AqlError) {
+// queryTool is the tool query. It gives the JSON text of the result, or
+// the message of an AqlError.
+func (a *app) queryTool(ctx context.Context, args map[string]any) (string, *AqlError) {
+	sc := a.stmt(ctx)
 	if u := unknownParams(args, "query"); len(u) > 0 {
-		return nil, errA02("query", "query", u)
+		return "", sc.errA02("query", "query", u)
 	}
 	q, ok := args["query"].(string)
 	if !ok || strings.TrimSpace(q) == "" {
-		return nil, aqlErr("bad_args", "query parameter is required: one AQL statement. Example: %s", exampleOf(entityByName("features")))
+		return "", sc.errA01()
 	}
-	st, err := r.parseStatement(q, true)
+	st, err := sc.parseStatement(q, true, false)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
+	var out omap
 	switch x := st.(type) {
 	case *DescribeStmt:
-		return r.describe(x)
+		out, err = sc.runDescribe(x)
 	case *ReadStmt:
-		return r.readStatement(x)
+		out, err = sc.runRead(x)
 	}
-	return nil, aqlErr("syntax", "query only reads. Use the execute tool for INSERT, UPDATE and DELETE.")
-}
-
-// runExecute is the tool execute. It returns the text, whether it is a
-// result, and the parts of the log line.
-func (s *session) runExecute(args map[string]any, dryRun bool) (string, bool, writeOutcome, string) {
-	r := newRun(s)
-	out := writeOutcome{op: "none", entity: "none", id: "none"}
-	obj, err := r.execute(args, dryRun, &out)
 	if err != nil {
-		return r.show(err.Message), false, out, err.Kind
+		return "", err
 	}
-	return r.show(toJSON(obj)), true, out, "ok"
+	return encodeJSON(out), nil
 }
 
-func isRecordIDForm(s string) bool {
-	return isRefNum(s) || isNumericID(s) || reProdKey.MatchString(s)
+// executeTool is the tool execute.
+func (a *app) executeTool(ctx context.Context, args map[string]any, dryRun, logLine bool) (string, *AqlError) {
+	sc := a.stmt(ctx)
+	info := &writeInfo{op: "none", entity: "none", id: "none"}
+	text, err := func() (string, *AqlError) {
+		if u := unknownParams(args, "statement"); len(u) > 0 {
+			return "", sc.errA02("execute", "statement", u)
+		}
+		s, ok := args["statement"].(string)
+		if !ok || strings.TrimSpace(s) == "" {
+			return "", errA03()
+		}
+		st, err := sc.parseStatement(s, false, true)
+		if err != nil {
+			return "", err
+		}
+		ws := st.(*WriteStmt)
+		info = &writeInfo{op: ws.Kind, entity: ws.E.Name, id: "none"}
+		out, wi, err := sc.runWrite(ws, dryRun)
+		if wi != nil {
+			info = wi
+		}
+		if err != nil {
+			return "", err
+		}
+		return encodeJSON(out), nil
+	}()
+	if logLine {
+		result := "ok"
+		if err != nil {
+			result = err.Kind
+		}
+		a.diag(fmt.Sprintf("%s execute account=%s op=%s entity=%s id=%s result=%s",
+			time.Now().UTC().Format("2006-01-02T15:04:05Z"), sc.acct.Subdomain, info.op, info.entity, info.id, result))
+	}
+	return text, err
 }
 
-func (r *run) execute(args map[string]any, dryRun bool, out *writeOutcome) (Obj, *AqlError) {
-	if u := unknownParams(args, "statement"); len(u) > 0 {
-		return nil, errA02("execute", "statement", u)
-	}
-	q, ok := args["statement"].(string)
-	if !ok || strings.TrimSpace(q) == "" {
-		return nil, aqlErr("bad_args", "statement parameter is required: one INSERT, UPDATE or DELETE statement")
-	}
-	st, err := r.parseStatement(q, false)
+func toolResult(text string, err *AqlError) *mcp.CallToolResult {
 	if err != nil {
-		return nil, err
+		return mcp.NewToolResultError(err.Msg)
 	}
-	setID := func(id any) {
-		if s := strings.ToUpper(textOf(id)); isRecordIDForm(s) {
-			out.id = s
+	return mcp.NewToolResultText(text)
+}
+
+// newMCPServer is tool-registration.
+func (a *app) newMCPServer() *server.MCPServer {
+	hooks := &server.Hooks{}
+	hooks.AddAfterListTools(func(ctx context.Context, id any, msg *mcp.ListToolsRequest, res *mcp.ListToolsResult) {
+		sc := a.stmt(ctx)
+		key := sc.key()
+		for i := range res.Tools {
+			res.Tools[i].Description = strings.ReplaceAll(res.Tools[i].Description, "{KEY}", key)
 		}
-	}
-	switch x := st.(type) {
-	case *InsertStmt:
-		out.op, out.entity = "insert", x.Entity.Name
-		return r.insert(x, dryRun, out)
-	case *UpdateStmt:
-		out.op, out.entity = "update", x.Entity.Name
-		setID(x.ID)
-		return r.update(x, dryRun, out)
-	case *DeleteStmt:
-		out.op, out.entity = "delete", x.Entity.Name
-		setID(x.ID)
-		return r.delete(x, dryRun, out)
-	}
-	return nil, aqlErr("syntax", "execute only changes data. Use the query tool for SELECT and DESCRIBE.")
-}
-
-var logMu sync.Mutex
-
-func logExecute(acct Account, out writeOutcome, result string) {
-	logMu.Lock()
-	defer logMu.Unlock()
-	fmt.Fprintf(os.Stderr, "%s execute account=%s op=%s entity=%s id=%s result=%s\n",
-		clock.Now().UTC().Format("2006-01-02T15:04:05Z"), acct.Subdomain, out.op, out.entity, out.id, result)
-}
-
-// ---- tool-registration ----
-
-type ctxKey struct{}
-
-// sessionFrom gives the session of an MCP request: the one of the HTTP
-// request in http mode, the one of the process in stdio mode.
-func sessionFrom(ctx context.Context, fallback *session) *session {
-	if s, ok := ctx.Value(ctxKey{}).(*session); ok && s != nil {
-		return s
-	}
-	return fallback
-}
-
-func logInternal(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "%s internal error: %s\n", clock.Now().UTC().Format("2006-01-02T15:04:05Z"), fmt.Sprintf(format, args...))
-}
-
-func guarded(h server.ToolHandlerFunc) server.ToolHandlerFunc {
-	return func(ctx context.Context, req mcp.CallToolRequest) (res *mcp.CallToolResult, err error) {
-		defer func() {
-			if p := recover(); p != nil {
-				logInternal("tool %s: %v", req.Params.Name, p)
-				res, err = nil, fmt.Errorf("internal error of the server")
-			}
-		}()
-		return h(ctx, req)
-	}
-}
-
-func newMCPServer(process *session, settings *Settings) *server.MCPServer {
-	filter := func(ctx context.Context, tools []mcp.Tool) []mcp.Tool {
-		s := sessionFrom(ctx, process)
-		out := make([]mcp.Tool, 0, len(tools))
-		var key string
-		for _, t := range tools {
-			if strings.Contains(t.Description, "{KEY}") {
-				if key == "" {
-					key = s.exampleKey(nil)
-				}
-				t.Description = strings.ReplaceAll(t.Description, "{KEY}", key)
-			}
-			out = append(out, t)
-		}
-		return out
-	}
-	srv := server.NewMCPServer("mcp-server-aha-aql", serverVersion,
+	})
+	s := server.NewMCPServer("mcp-server-aha-aql", serverVersion,
 		server.WithToolCapabilities(false),
-		server.WithToolFilter(filter),
+		server.WithHooks(hooks),
+		server.WithRecovery(),
 	)
-	srv.AddTool(mcp.NewTool("query",
-		mcp.WithDescription(queryDescription()),
+	qd := strings.ReplaceAll(queryDescription, "{ENTITIES}", strings.Join(entityNames(), ", "))
+	s.AddTool(mcp.NewTool("query",
+		mcp.WithDescription(qd),
 		mcp.WithString("query", mcp.Required(), mcp.Description("One AQL statement")),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
 		mcp.WithOpenWorldHintAnnotation(true),
-	), guarded(func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		s := sessionFrom(ctx, process)
-		text, ok := s.runQuery(req.GetArguments())
-		if !ok {
-			return mcp.NewToolResultError(text), nil
-		}
-		return mcp.NewToolResultText(text), nil
-	}))
-	if !settings.ReadOnly {
-		srv.AddTool(mcp.NewTool("execute",
+	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return toolResult(a.queryTool(ctx, req.GetArguments())), nil
+	})
+	if !a.settings.ReadOnly {
+		s.AddTool(mcp.NewTool("execute",
 			mcp.WithDescription(executeDescription),
 			mcp.WithString("statement", mcp.Required(), mcp.Description("One AQL statement")),
 			mcp.WithReadOnlyHintAnnotation(false),
 			mcp.WithDestructiveHintAnnotation(true),
 			mcp.WithIdempotentHintAnnotation(false),
 			mcp.WithOpenWorldHintAnnotation(true),
-		), guarded(func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			s := sessionFrom(ctx, process)
-			text, ok, out, result := s.runExecute(req.GetArguments(), false)
-			logExecute(s.acct, out, result)
-			if !ok {
-				return mcp.NewToolResultError(text), nil
-			}
-			return mcp.NewToolResultText(text), nil
-		}))
+		), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return toolResult(a.executeTool(ctx, req.GetArguments(), false, true)), nil
+		})
 	}
-	return srv
+	return s
+}
+
+// refuse writes the answer of request-account for a refused request.
+func refuse(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	fmt.Fprint(w, encodeJSON(omap{{"jsonrpc", "2.0"}, {"id", nil}, {"error", omap{{"code", -32600}, {"message", msg}}}}))
+}
+
+// accountMiddleware is request-account in http mode.
+func (a *app) accountMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := r.Header["Origin"]; ok {
+			refuse(w, http.StatusForbidden, "requests from a web page are not accepted")
+			return
+		}
+		key := r.Header.Get("Aha-Api-Key")
+		if !reCredential.MatchString(key) {
+			refuse(w, http.StatusBadRequest, "no credential. Send the header Aha-Api-Key with an Aha! API key")
+			return
+		}
+		sub := ""
+		if _, ok := r.Header["Aha-Subdomain"]; ok {
+			sub = strings.ToLower(r.Header.Get("Aha-Subdomain"))
+			if !reSubdomain.MatchString(sub) {
+				refuse(w, http.StatusBadRequest, "Aha-Subdomain must be the account name before .aha.io")
+				return
+			}
+		}
+		if a.settings.Subdomain != "" && sub != "" && sub != a.settings.Subdomain {
+			refuse(w, http.StatusForbidden, "this server works with one Aha! account only")
+			return
+		}
+		if sub == "" {
+			sub = a.settings.Subdomain
+		}
+		if sub == "" {
+			refuse(w, http.StatusBadRequest, "no Aha! account. Send the header Aha-Subdomain")
+			return
+		}
+		rs := &reqState{acct: Account{Subdomain: sub, Credential: key}, ek: a.newExampleKey()}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, rs)))
+	})
 }

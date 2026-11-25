@@ -1,707 +1,820 @@
-// generated from spec: aha-aql.spec.md sha256:9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262
+// generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
 
 package main
 
-// parse-statement and resolve-names.
-
 import (
-	"fmt"
 	"strconv"
 	"strings"
 )
 
-// ---- statements ----
+type valKind int
 
+const (
+	vText valKind = iota
+	vNumber
+	vBool
+	vNull
+)
+
+// Value is a value of a statement (TYPES: Value).
+type Value struct {
+	kind valKind
+	s    string // text, or the number as written
+	n    float64
+	b    bool
+}
+
+func (v Value) raw() any {
+	switch v.kind {
+	case vText:
+		return v.s
+	case vNumber:
+		return v.n
+	case vBool:
+		return v.b
+	}
+	return nil
+}
+
+// written gives the value as the statement writes it, without quotes.
+func (v Value) written() string {
+	switch v.kind {
+	case vBool:
+		if v.b {
+			return "TRUE"
+		}
+		return "FALSE"
+	case vNull:
+		return "NULL"
+	}
+	return v.s
+}
+
+// Conditions (TYPES: Condition).
 type Cond interface{}
 
 type Cmp struct {
 	Field string
 	Op    string // = != < <= > >= contains like
-	Value any    // string, Num, bool
+	Val   Value
 }
 type NullTest struct {
 	Field   string
 	Negated bool
 }
 type InList struct {
-	Field  string
-	Values []any
-}
-type AllOf struct{ Members []Cond }
-type AnyOf struct{ Members []Cond }
-type Negation struct{ Member Cond }
-
-type SelectItem struct {
-	Star     bool
-	Field    string // "" for COUNT(*)
-	Label    string
-	Fn       string // COUNT SUM AVG MIN MAX, or ""
-	Distinct bool
-}
-
-type OrderKey struct {
 	Field string
-	Label string
-	Agg   *SelectItem
+	Vals  []Value
+}
+type AllOf struct{ M []Cond }
+type AnyOf struct{ M []Cond }
+type Negation struct{ M Cond }
+
+// Item is a select item (TYPES: SelectItem).
+type Item struct {
+	Star      bool
+	Field     string
+	Label     string
+	Func      string // COUNT, SUM, AVG, MIN, MAX; "" for a field item
+	Distinct  bool
+	CountStar bool
+	word      string
+	hasAS     bool
+	pos       int
+}
+
+func (it *Item) aggregate() bool { return it.Func != "" }
+
+func (it *Item) content() string {
+	switch {
+	case it.Star:
+		return "*"
+	case it.CountStar:
+		return "COUNT(*)"
+	case it.Func != "":
+		d := ""
+		if it.Distinct {
+			d = "DISTINCT "
+		}
+		return it.Func + "(" + d + it.Field + ")"
+	}
+	return "field:" + it.Field
+}
+
+// OrderKey is a key of ORDER BY.
+type OrderKey struct {
+	Item  *Item // a label or an aggregate
+	Field string
 	Desc  bool
 }
 
 type ReadStmt struct {
-	Entity   *EntityDef
-	Items    []SelectItem
+	E        *EntityDef
+	Items    []*Item
 	Distinct bool
 	Where    Cond
 	GroupBy  []string
 	OrderBy  []OrderKey
-	Limit    *int
+	Limit    int
+	HasLimit bool
 }
 
-type DescribeStmt struct{ Entity *EntityDef }
+type DescribeStmt struct{ E *EntityDef }
 
 type Assign struct {
 	Field string
-	Value any
+	Val   Value
 	Word  string
 }
 
-type InsertStmt struct {
-	Entity *EntityDef
-	Parent any
+type WriteStmt struct {
+	Kind   string // insert | update | delete
+	E      *EntityDef
+	Parent *Value
 	Fields []Assign
-}
-
-type UpdateStmt struct {
-	Entity *EntityDef
-	ID     any
-	Fields []Assign
+	ID     string
 	Guards []Assign
 }
-
-type DeleteStmt struct {
-	Entity *EntityDef
-	ID     any
-	Guards []Assign
-}
-
-// ---- raw syntax ----
-
-type rawItem struct {
-	star     bool
-	word     Token
-	fn       string
-	fnStar   bool
-	fnArg    Token
-	distinct bool
-	label    string
-	hasLabel bool
-}
-
-type rawCmp struct {
-	field Token
-	op    string
-	value any
-}
-type rawNull struct {
-	field   Token
-	negated bool
-}
-type rawIn struct {
-	field  Token
-	values []any
-}
-type rawAll struct{ members []any }
-type rawAny struct{ members []any }
-type rawNot struct{ member any }
-
-type rawOrder struct {
-	word   Token
-	fn     string
-	fnStar bool
-	fnArg  Token
-	isFn   bool
-	desc   bool
-}
-
-type rawSelect struct {
-	items    []rawItem
-	distinct bool
-	entity   *EntityDef
-	where    any
-	groupBy  []Token
-	orderBy  []rawOrder
-	limit    *int
-}
-
-type rawAssign struct {
-	word  Token
-	value any
-}
-
-type rawWrite struct {
-	kind    string
-	entity  *EntityDef
-	columns []rawAssign // insert: column words with values
-	assigns []rawAssign
-	idWord  Token
-	id      any
-	guards  []rawAssign
-}
-
-type nullValue struct{}
 
 var keywords = map[string]bool{}
 
 func init() {
-	for _, k := range strings.Fields(`SELECT FROM WHERE AND OR NOT IN IS NULL TRUE FALSE LIKE CONTAINS BETWEEN GROUP ORDER BY
-		ASC DESC LIMIT OFFSET AS DISTINCT JOIN INNER LEFT RIGHT FULL CROSS OUTER NATURAL ON HAVING INSERT INTO VALUES UPDATE SET
-		DELETE DESCRIBE`) {
+	for _, k := range strings.Fields("SELECT FROM WHERE AND OR NOT IN IS NULL LIKE CONTAINS BETWEEN GROUP BY ORDER ASC DESC LIMIT OFFSET AS DISTINCT TRUE FALSE JOIN INNER LEFT RIGHT FULL CROSS OUTER NATURAL ON HAVING INSERT INTO VALUES UPDATE SET DELETE DESCRIBE") {
 		keywords[k] = true
 	}
 }
 
-func isKeyword(t Token) bool { return t.Kind == tkWord && keywords[strings.ToUpper(t.Value)] }
+func isKeyword(w string) bool { return keywords[strings.ToUpper(w)] }
 
-var functions = map[string]bool{"COUNT": true, "SUM": true, "AVG": true, "MIN": true, "MAX": true}
-
-const readFormText = "SELECT fields FROM entity [WHERE field = 'value' [AND ...]] [GROUP BY field] [ORDER BY field [DESC]] [LIMIT n]"
-const writeFormsText = "INSERT INTO entity (parent, field, ...) VALUES ('parent id', 'value', ...) | UPDATE entity SET field = 'value', ... WHERE id = 'id' | DELETE FROM entity WHERE id = 'id'"
+func isFunc(w string) bool {
+	switch strings.ToUpper(w) {
+	case "COUNT", "SUM", "AVG", "MIN", "MAX":
+		return true
+	}
+	return false
+}
 
 type parser struct {
-	toks []Token
+	sc   *stmtCtx
+	src  []rune
+	toks []token
 	i    int
-	text []rune
-	src  string
 }
 
-func (p *parser) peek() Token { return p.toks[p.i] }
-func (p *parser) peekN(n int) Token {
-	if p.i+n < len(p.toks) {
-		return p.toks[p.i+n]
+func (p *parser) peek() token { return p.toks[p.i] }
+func (p *parser) at(k int) token {
+	if p.i+k < len(p.toks) {
+		return p.toks[p.i+k]
 	}
-	return p.toks[len(p.toks)-1]
+	return token{kind: tkEOF}
 }
-func (p *parser) next() Token {
+func (p *parser) next() token {
 	t := p.toks[p.i]
-	if t.Kind != tkEOF {
+	if t.kind != tkEOF {
 		p.i++
 	}
 	return t
 }
+func (p *parser) s03(t token, what string) *AqlError { return p.sc.errS03(p.src, t.pos, what) }
 
-func (p *parser) where(t Token) string {
-	if t.Kind == tkEOF {
-		return "the end of the statement"
-	}
-	start := t.Pos - 1
-	end := start + 24
-	if end > len(p.text) {
-		end = len(p.text)
-	}
-	return fmt.Sprintf("position %d (%s)", t.Pos, strings.TrimSpace(string(p.text[start:end])))
-}
-
-func (p *parser) hint() string { return apostropheHint(p.src) }
-
-func exampleOf(e *EntityDef) string { return withKey(e.Example) }
-
-func (p *parser) s03(t Token, what string) *AqlError {
-	if e := p.special(t); e != nil {
-		return e
-	}
-	return aqlErr("syntax", "cannot read the statement at %s: expected %s.%s Form: %s. Example: %s",
-		p.where(t), what, p.hint(), readFormText, exampleOf(entityByName("features")))
-}
-
-// special gives the messages for constructs outside the forms.
-func (p *parser) special(t Token) *AqlError {
-	switch {
-	case t.isWord("JOIN") || ((t.isWord("INNER") || t.isWord("LEFT") || t.isWord("RIGHT") || t.isWord("FULL") || t.isWord("CROSS") || t.isWord("OUTER") || t.isWord("NATURAL")) && p.hasJoinAfter()):
-		return aqlErr("syntax", "JOIN is not supported. Read one entity per statement and filter by its parent, for example: %s", exampleOf(entityByName("features")))
-	case t.isWord("HAVING"):
-		return aqlErr("syntax", "HAVING is not supported. Use WHERE, GROUP BY, ORDER BY and LIMIT. Example: SELECT status, COUNT(*) FROM features WHERE product = '%s' GROUP BY status", keyMark)
-	case t.isWord("OFFSET"):
-		return errS10()
-	case t.isPunct("(") && p.selectAfter(t):
-		return errS11()
-	}
-	return nil
-}
-
-func (p *parser) hasJoinAfter() bool {
-	for k := p.i; k < len(p.toks) && k < p.i+4; k++ {
-		if p.toks[k].isWord("JOIN") {
-			return true
-		}
-	}
-	return false
-}
-
-func (p *parser) selectAfter(t Token) bool {
-	for k := range p.toks {
-		if p.toks[k].Pos == t.Pos && k+1 < len(p.toks) {
-			return p.toks[k+1].isWord("SELECT")
-		}
-	}
-	return false
-}
-
-func errS10() *AqlError {
-	return aqlErr("syntax", "OFFSET is not supported. Use WHERE to narrow the result and LIMIT to shorten it.")
-}
-
-func errS11() *AqlError {
-	return aqlErr("syntax", "subqueries are not supported. Send one statement per call. Form: %s", readFormText)
-}
-
-func (p *parser) w03(problem string) *AqlError {
-	return aqlErr("syntax", "%s%s Forms: %s", problem, p.hint(), writeFormsText)
-}
-
-func (p *parser) w03at(format string, t Token) *AqlError {
-	return p.w03(fmt.Sprintf(format, p.where(t)))
-}
-
-func errW05() *AqlError {
-	return aqlErr("syntax", "one statement changes one record: the WHERE must start with id = '...'. Further conditions are joined with AND and have the form field = 'value'. To change several records, find their ids with the query tool and send one statement per record.")
-}
-
-func errS13(w string) *AqlError {
-	return aqlErr("syntax", "text goes in single quotes: write '%s' instead of %s", w, w)
-}
-
-func changeable() []string {
-	var out []string
-	for _, e := range catalog {
-		if e.HasOperation() {
-			out = append(out, e.Name)
-		}
-	}
-	return out
-}
-
-// ---- parse-statement ----
-
-type Statement interface{}
-
-func (r *run) parseStatement(text string, allowRead bool) (Statement, *AqlError) {
-	if allowRead {
+// parseStatement is parse-statement.
+func (sc *stmtCtx) parseStatement(text string, reads, writes bool) (any, *AqlError) {
+	src := []rune(text)
+	if reads {
 		t := strings.Trim(text, " \t\r\n'\";")
 		if k := refKind(t); k != "" {
-			return nil, aqlErr("syntax", "%s is an id, not a statement. To read that record: SELECT * FROM %s WHERE id = '%s'", t, entityOfKind(k).Name, t)
+			id := strings.ToUpper(t)
+			return nil, aqlErr("syntax", "%s is an id, not a statement. To read that record: SELECT * FROM %s WHERE id = '%s'", id, entityOfKind(k).Name, id)
 		}
 	}
-	raw, err := parseSyntax(text, allowRead, false)
-	if err != nil && err.Kind == "syntax" && hasInnerApostrophe(text) {
-		if raw2, err2 := parseSyntax(text, allowRead, true); err2 == nil {
-			raw, err = raw2, nil
+	st, err := sc.parseOnce(src, false, reads, writes)
+	if err == nil {
+		return st, nil
+	}
+	if err.Kind == "syntax" && hasInnerApostrophe(src) {
+		if st2, err2 := sc.parseOnce(src, true, reads, writes); err2 == nil {
+			return st2, nil
 		}
 	}
-	if err != nil {
-		return nil, err
-	}
-	switch x := raw.(type) {
-	case *rawSelect:
-		return r.resolveSelect(x)
-	case *DescribeStmt:
-		return x, nil
-	case *rawWrite:
-		return r.resolveWrite(x)
-	}
-	return nil, aqlErr("syntax", "cannot read the statement")
+	return nil, err
 }
 
-func parseSyntax(text string, allowRead, lenient bool) (any, *AqlError) {
-	toks, err := tokenize(text, lenient)
+func (sc *stmtCtx) parseOnce(src []rune, lenient, reads, writes bool) (any, *AqlError) {
+	toks, err := tokenize(src, lenient)
 	if err != nil {
 		return nil, err
 	}
-	p := &parser{toks: toks, text: []rune(text), src: text}
+	p := &parser{sc: sc, src: src, toks: toks}
 	t := p.peek()
 	kind := ""
 	switch {
-	case t.isWord("SELECT") || t.isWord("FROM"):
+	case t.is("SELECT") || t.is("FROM"):
 		kind = "select"
-	case t.Kind == tkWord && functions[strings.ToUpper(t.Value)] && p.peekN(1).isPunct("("):
+	case t.punct("*") || (t.kind == tkWord && isFunc(t.val) && p.at(1).punct("(")):
 		kind = "select"
-	case t.isPunct("*"):
-		kind = "select"
-	case t.isWord("DESCRIBE"):
+	case t.is("DESCRIBE"):
 		kind = "describe"
-	case t.isWord("INSERT"):
+	case t.is("INSERT"):
 		kind = "insert"
-	case t.isWord("UPDATE"):
+	case t.is("UPDATE"):
 		kind = "update"
-	case t.isWord("DELETE"):
+	case t.is("DELETE"):
 		kind = "delete"
 	}
-	isRead := kind == "select" || kind == "describe"
-	if kind != "" && allowRead && !isRead {
+	write := kind == "insert" || kind == "update" || kind == "delete"
+	if kind != "" && write && !writes {
 		return nil, aqlErr("syntax", "query only reads. Use the execute tool for INSERT, UPDATE and DELETE.")
 	}
-	if kind != "" && !allowRead && isRead {
-		return nil, aqlErr("syntax", "execute only changes data. Use the query tool for SELECT and DESCRIBE.")
+	if kind != "" && !write && !reads {
+		return nil, errW01()
 	}
 	if kind == "" {
-		if allowRead {
-			if t.Kind == tkWord && (p.peekN(1).Kind == tkEOF || (p.peekN(1).isPunct(";") && p.peekN(2).Kind == tkEOF)) {
-				if e := entityWord(t.Value); e != nil {
-					return nil, aqlErr("syntax", "%s is an entity, not a statement. To list its records: %s. To see its fields: DESCRIBE %s", t.Value, exampleOf(e), e.Name)
+		if reads {
+			if t.kind == tkWord && (p.at(1).kind == tkEOF || (p.at(1).punct(";") && p.at(2).kind == tkEOF)) {
+				if e := resolveEntity(t.val); e != nil {
+					return nil, aqlErr("syntax", "%s is an entity, not a statement. To list its records: %s. To see its fields: DESCRIBE %s", t.val, sc.exampleOf(e), e.Name)
 				}
 			}
-			if e := p.special(t); e != nil {
-				return nil, e
-			}
-			return nil, aqlErr("syntax", "a statement starts with SELECT or DESCRIBE.%s Form: %s. Example: %s", p.hint(), readFormText, exampleOf(entityByName("features")))
+			return nil, sc.errS04(src)
 		}
-		return nil, aqlErr("syntax", "a statement starts with INSERT, UPDATE or DELETE.%s Forms: %s", p.hint(), writeFormsText)
+		return nil, aqlErr("syntax", "a statement starts with INSERT, UPDATE or DELETE.%s Forms: %s", apostropheHint(src), writeFormText)
 	}
 	switch kind {
 	case "select":
-		return p.parseSelect()
+		return p.parseRead()
 	case "describe":
 		return p.parseDescribe()
 	}
 	return p.parseWrite(kind)
 }
 
-func (p *parser) endOrSemicolon() bool {
-	if p.peek().isPunct(";") {
-		p.next()
+// ---- resolve-names ----
+
+func resolveEntity(word string) *EntityDef {
+	for _, e := range catalog {
+		if strings.EqualFold(e.Name, word) || strings.EqualFold(e.Singular, word) {
+			return e
+		}
+		for _, o := range e.OtherNames {
+			if strings.EqualFold(o, word) {
+				return e
+			}
+		}
 	}
-	return p.peek().Kind == tkEOF
+	return nil
 }
 
-func (p *parser) parseDescribe() (any, *AqlError) {
-	p.next()
-	t := p.peek()
-	if t.Kind == tkEOF || (t.isPunct(";") && p.peekN(1).Kind == tkEOF) {
-		return &DescribeStmt{}, nil
+// splitWord gives the name of a field word, whether it is a custom field
+// word, and its label (the word without a qualifier).
+func splitWord(word string) (name string, custom bool, label string) {
+	parts := strings.Split(word, ".")
+	name = parts[len(parts)-1]
+	label = name
+	if len(parts) >= 2 && strings.EqualFold(parts[len(parts)-2], "custom") {
+		custom = true
+		label = parts[len(parts)-2] + "." + name
 	}
-	if t.Kind != tkWord {
-		return nil, p.s03(t, "an entity ("+strings.Join(entityNames(), ", ")+")")
-	}
-	e := entityWord(t.Value)
-	if e == nil {
-		return nil, errN01(t.Value)
-	}
-	p.next()
-	if !p.endOrSemicolon() {
-		return nil, aqlErr("syntax", "DESCRIBE %s lists the fields of %s and takes nothing else. To read records: %s", e.Name, e.Name, exampleOf(e))
-	}
-	return &DescribeStmt{Entity: e}, nil
+	return
 }
 
-func errN01(w string) *AqlError {
-	return aqlErr("bad_name", "unknown entity %s. Entities: %s. Example: %s", quoteVal(w), strings.Join(entityNames(), ", "), exampleOf(entityByName("features")))
+// catalogField runs steps 4 a to 4 d of resolve-names.
+func catalogField(e *EntityDef, name string) string {
+	lw := strings.ToLower(name)
+	if fd := e.field(lw); fd != nil {
+		return fd.Name
+	}
+	for k, v := range e.OtherFieldNames {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	if e.Name != "products" {
+		if v, ok := commonOtherNames[lw]; ok && e.field(v) != nil {
+			return v
+		}
+	}
+	sing := strings.ToLower(e.Singular)
+	if id := e.idField(); id != "" && (lw == sing || lw == sing+"_id") {
+		return id
+	}
+	if lw == sing+"_name" && e.field("name") != nil {
+		return "name"
+	}
+	return ""
 }
 
-func (p *parser) parseSelect() (any, *AqlError) {
-	st := &rawSelect{}
+// resolveField is resolve-names for a field word. With writing true an
+// unknown word gives "" and no error.
+func (sc *stmtCtx) resolveField(e *EntityDef, word string, writing bool) (string, *AqlError) {
+	name, custom, _ := splitWord(word)
+	if custom {
+		cf, err := sc.customLookup(e, name, true)
+		if err != nil {
+			return "", err
+		}
+		return cf.Name, nil
+	}
+	if n := catalogField(e, name); n != "" {
+		return n, nil
+	}
+	if name != "" {
+		cf, err := sc.customLookup(e, name, false)
+		if err != nil {
+			return "", err
+		}
+		if cf != nil {
+			return cf.Name, nil
+		}
+	}
+	if writing {
+		return "", nil
+	}
+	if e.Name == "users" {
+		lw := strings.ToLower(name)
+		if lw == "product" || commonOtherNames[lw] == "product" {
+			return "", sc.errN03()
+		}
+	}
+	return "", sc.errN02(name, e)
+}
+
+// ---- read statements ----
+
+func specialWord(t token) bool {
+	return t.is("JOIN") || t.is("INNER") || t.is("LEFT") || t.is("RIGHT") || t.is("FULL") || t.is("CROSS") || t.is("OUTER") || t.is("NATURAL") || t.is("HAVING") || t.is("OFFSET")
+}
+
+func (p *parser) special(t token) *AqlError {
+	switch {
+	case t.is("HAVING"):
+		return p.sc.errS09()
+	case t.is("OFFSET"):
+		return errS10()
+	}
+	return p.sc.errS08()
+}
+
+func (p *parser) parseRead() (any, *AqlError) {
+	st := &ReadStmt{}
+	var items []*Item
+	var err *AqlError
 	t := p.peek()
 	switch {
-	case t.isWord("SELECT"):
+	case t.is("SELECT"):
 		p.next()
-		if p.peek().isWord("DISTINCT") {
+		if p.peek().is("DISTINCT") {
+			st.Distinct = true
 			p.next()
-			st.distinct = true
 		}
-		items, err := p.parseItems()
-		if err != nil {
-			return nil, err
-		}
-		st.items = items
-	case t.isWord("FROM"):
-		st.items = []rawItem{{star: true}}
+		items, err = p.parseItems(true)
+	case t.is("FROM"):
+		items = []*Item{{Star: true, pos: t.pos}}
 	default:
-		items, err := p.parseItems()
-		if err != nil {
-			return nil, err
-		}
-		st.items = items
+		items, err = p.parseItems(false)
 	}
-	if !p.peek().isWord("FROM") {
+	if err != nil {
+		return nil, err
+	}
+	if !p.peek().is("FROM") {
+		if specialWord(p.peek()) {
+			return nil, p.special(p.peek())
+		}
 		return nil, p.s03(p.peek(), "FROM and an entity")
 	}
 	p.next()
 	et := p.peek()
-	if et.isPunct("(") && p.peekN(1).isWord("SELECT") {
+	if et.punct("(") && p.at(1).is("SELECT") {
 		return nil, errS11()
 	}
-	if et.Kind != tkWord || isKeyword(et) {
+	if et.kind != tkWord || isKeyword(et.val) {
 		return nil, p.s03(et, "an entity ("+strings.Join(entityNames(), ", ")+")")
 	}
-	p.next()
-	st.entity = entityWord(et.Value)
-	if st.entity == nil {
-		return nil, errN01(et.Value)
+	e := resolveEntity(et.val)
+	if e == nil {
+		return nil, p.sc.errN01(et.val)
 	}
-	// alias
-	if p.peek().isWord("AS") {
+	st.E = e
+	p.next()
+	if p.peek().is("AS") {
 		p.next()
-		if p.peek().Kind != tkWord || isKeyword(p.peek()) {
-			return nil, p.s03(p.peek(), "a name after AS")
+		if a := p.peek(); a.kind != tkWord || isKeyword(a.val) {
+			return nil, p.s03(a, "a name after AS")
 		}
 		p.next()
-	} else if p.peek().Kind == tkWord && !isKeyword(p.peek()) {
+	} else if a := p.peek(); a.kind == tkWord && !isKeyword(a.val) {
 		p.next()
 	}
-	if p.peek().isPunct(",") {
-		return nil, aqlErr("syntax", "JOIN is not supported. Read one entity per statement and filter by its parent, for example: %s", exampleOf(entityByName("features")))
-	}
-	if e := p.special(p.peek()); e != nil {
-		return nil, e
-	}
-	if p.peek().isWord("WHERE") {
-		p.next()
-		c, err := p.parseOr(st.entity)
+	for _, it := range items {
+		if it.Star || it.CountStar {
+			continue
+		}
+		f, err := p.sc.resolveField(e, it.word, false)
 		if err != nil {
 			return nil, err
 		}
-		st.where = c
+		it.Field = f
 	}
-	if p.peek().isWord("GROUP") {
+	if p.peek().is("WHERE") {
 		p.next()
-		if !p.peek().isWord("BY") {
+		c, err := p.parseOr(e)
+		if err != nil {
+			return nil, err
+		}
+		st.Where = c
+	}
+	type gkey struct {
+		field string
+		pos   int
+	}
+	if p.peek().is("GROUP") {
+		p.next()
+		if !p.peek().is("BY") {
 			return nil, p.s03(p.peek(), "BY after GROUP")
 		}
 		p.next()
 		for {
-			t := p.peek()
-			if t.Kind != tkWord || isKeyword(t) {
-				return nil, p.s03(t, "a field name")
+			g := p.peek()
+			if g.kind != tkWord || isKeyword(g.val) {
+				return nil, p.s03(g, "a field name ("+strings.Join(fieldNames(e), ", ")+")")
+			}
+			f, err := p.sc.resolveField(e, g.val, false)
+			if err != nil {
+				return nil, err
 			}
 			p.next()
-			st.groupBy = append(st.groupBy, t)
-			if !p.peek().isPunct(",") {
+			dup := false
+			for _, x := range st.GroupBy {
+				if x == f {
+					dup = true
+				}
+			}
+			if !dup {
+				st.GroupBy = append(st.GroupBy, f)
+			}
+			if !p.peek().punct(",") {
 				break
 			}
 			p.next()
 		}
 	}
-	if p.peek().isWord("HAVING") {
-		return nil, p.special(p.peek())
+	if p.peek().is("HAVING") {
+		return nil, p.sc.errS09()
 	}
-	if p.peek().isWord("ORDER") {
+	// items: leave out repeated items; S15 and S16.
+	var kept []*Item
+	for _, it := range items {
+		drop := false
+		for _, k := range kept {
+			if k.Label == it.Label && !it.Star && !k.Star {
+				if k.content() == it.content() {
+					drop = true
+					break
+				}
+				return nil, errS15(it.Label)
+			}
+		}
+		if !drop {
+			kept = append(kept, it)
+		}
+	}
+	items = kept
+	hasStar := false
+	for _, it := range items {
+		if it.Star {
+			hasStar = true
+		}
+	}
+	selected := map[string]bool{}
+	for _, it := range items {
+		if !it.Star && it.Func == "" {
+			selected[it.Field] = true
+		}
+	}
+	for _, it := range items {
+		if !it.hasAS {
+			continue
+		}
+		for _, g := range st.GroupBy {
+			if g == it.Label && !selected[g] {
+				return nil, errS16(it.Label, e)
+			}
+		}
+		if hasStar && e.field(it.Label) != nil && !(it.Func == "" && it.Field == it.Label) {
+			return nil, errS16(it.Label, e)
+		}
+	}
+	st.Items = items
+	grouped := len(st.GroupBy) > 0
+	for _, it := range items {
+		if it.aggregate() {
+			grouped = true
+		}
+	}
+	if p.peek().is("ORDER") {
 		p.next()
-		if !p.peek().isWord("BY") {
+		if !p.peek().is("BY") {
 			return nil, p.s03(p.peek(), "BY after ORDER")
 		}
 		p.next()
 		for {
-			t := p.peek()
-			if t.Kind != tkWord || isKeyword(t) {
-				return nil, p.s03(t, "a field name")
-			}
-			p.next()
-			ok := rawOrder{word: t}
-			if p.peek().isPunct("(") {
-				fn := strings.ToUpper(t.Value)
-				if !functions[fn] {
-					return nil, errS12(t.Value)
+			k := p.peek()
+			var key OrderKey
+			switch {
+			case k.kind == tkWord && isFunc(k.val) && p.at(1).punct("("):
+				it, err := p.parseFunc()
+				if err != nil {
+					return nil, err
+				}
+				if !it.CountStar {
+					f, err := p.sc.resolveField(e, it.word, false)
+					if err != nil {
+						return nil, err
+					}
+					it.Field = f
+				}
+				if !grouped {
+					return nil, p.s03(k, "a field name")
+				}
+				key.Item = it
+			case k.kind == tkWord && !isKeyword(k.val):
+				var byLabel *Item
+				for _, it := range items {
+					if !it.Star && it.Label == k.val {
+						byLabel = it
+						break
+					}
 				}
 				p.next()
-				ok.isFn, ok.fn = true, fn
-				a := p.peek()
-				switch {
-				case a.isPunct("*"):
-					ok.fnStar = true
-				case a.Kind == tkWord && !isKeyword(a):
-					ok.fnArg = a
-				case a.Kind == tkNumber && a.Value == "1" && fn == "COUNT":
-					ok.fnStar = true
-				default:
-					return nil, p.s03(a, "a field or * inside "+fn+"( )")
+				if byLabel != nil {
+					key.Item = byLabel
+				} else {
+					f, err := p.sc.resolveField(e, k.val, false)
+					if err != nil {
+						return nil, err
+					}
+					if grouped {
+						ok := selected[f]
+						for _, g := range st.GroupBy {
+							if g == f {
+								ok = true
+							}
+						}
+						if !ok {
+							return nil, p.s03(k, "a field of GROUP BY, a selected field or an aggregate after ORDER BY")
+						}
+					}
+					key.Field = f
 				}
+			default:
+				return nil, p.s03(k, "a field name")
+			}
+			if p.peek().is("DESC") {
+				key.Desc = true
 				p.next()
-				if !p.peek().isPunct(")") {
-					return nil, p.s03(p.peek(), "')'")
-				}
+			} else if p.peek().is("ASC") {
 				p.next()
 			}
-			if p.peek().isWord("ASC") {
-				p.next()
-			} else if p.peek().isWord("DESC") {
-				p.next()
-				ok.desc = true
-			}
-			st.orderBy = append(st.orderBy, ok)
-			if !p.peek().isPunct(",") {
+			st.OrderBy = append(st.OrderBy, key)
+			if !p.peek().punct(",") {
 				break
 			}
 			p.next()
 		}
 	}
-	if p.peek().isWord("LIMIT") {
+	if p.peek().is("LIMIT") {
 		p.next()
-		t := p.peek()
-		n, err := strconv.Atoi(t.Value)
-		if t.Kind != tkNumber || err != nil || n < 0 || strings.ContainsAny(t.Value, ".-") {
-			return nil, p.s03(t, "a number after LIMIT")
+		n := p.peek()
+		if n.kind != tkNumber || strings.ContainsAny(n.val, ".-") {
+			return nil, p.s03(n, "a number after LIMIT")
 		}
+		v, convErr := strconv.Atoi(n.val)
+		if convErr != nil {
+			v = 1 << 30
+		}
+		st.Limit, st.HasLimit = v, true
 		p.next()
-		st.limit = &n
-		if p.peek().isWord("OFFSET") || p.peek().Kind == tkNumber || (p.peek().isPunct(",") && p.peekN(1).Kind == tkNumber) {
+		if p.peek().punct(",") || p.peek().is("OFFSET") {
 			return nil, errS10()
 		}
 	}
-	if !p.endOrSemicolon() {
-		return nil, p.s03(p.peek(), "the end of the statement, or WHERE, GROUP BY, ORDER BY, LIMIT in this order")
+	if p.peek().is("OFFSET") {
+		return nil, errS10()
+	}
+	if p.peek().punct(";") {
+		p.next()
+	}
+	if t := p.peek(); t.kind != tkEOF {
+		if specialWord(t) {
+			return nil, p.special(t)
+		}
+		return nil, p.s03(t, "the end of the statement, or WHERE, GROUP BY, ORDER BY, LIMIT in this order")
 	}
 	return st, nil
 }
 
-func errS12(name string) *AqlError {
-	return aqlErr("syntax", "unknown function %s. Functions: COUNT, SUM, AVG, MIN, MAX. Example: SELECT COUNT(*) FROM features WHERE product = '%s'", strings.ToUpper(name), keyMark)
-}
+func fieldLabel(word string) string { _, _, l := splitWord(word); return l }
 
-func (p *parser) parseItems() ([]rawItem, *AqlError) {
-	var items []rawItem
+func (p *parser) parseItems(afterSelect bool) ([]*Item, *AqlError) {
+	var items []*Item
 	first := true
 	for {
-		it, err := p.parseItem(first)
-		if err != nil {
-			return nil, err
+		t := p.peek()
+		var it *Item
+		switch {
+		case t.punct("*"):
+			p.next()
+			it = &Item{Star: true, pos: t.pos}
+		case t.kind == tkWord && strings.HasSuffix(t.val, ".") && p.at(1).punct("*"):
+			p.next()
+			p.next()
+			it = &Item{Star: true, pos: t.pos}
+		case t.kind == tkWord && p.at(1).punct("("):
+			if !isFunc(t.val) {
+				return nil, p.sc.errS12(t.val)
+			}
+			var err *AqlError
+			it, err = p.parseFunc()
+			if err != nil {
+				return nil, err
+			}
+		case t.kind == tkWord && !isKeyword(t.val):
+			p.next()
+			it = &Item{word: t.val, Label: fieldLabel(t.val), pos: t.pos}
+		case t.punct("(") && p.at(1).is("SELECT"):
+			return nil, errS11()
+		default:
+			what := "a field, * or COUNT(*)"
+			if first && afterSelect {
+				what += " after SELECT"
+			}
+			return nil, p.s03(t, what)
+		}
+		first = false
+		if p.peek().is("AS") {
+			p.next()
+			l := p.peek()
+			switch {
+			case l.kind == tkWord && !isKeyword(l.val):
+				it.Label = l.val
+			case l.kind == tkText && l.val != "":
+				it.Label = l.val
+			default:
+				return nil, p.s03(l, "a name after AS")
+			}
+			it.hasAS = true
+			p.next()
 		}
 		items = append(items, it)
-		first = false
-		if !p.peek().isPunct(",") {
+		if !p.peek().punct(",") {
 			return items, nil
 		}
 		p.next()
 	}
 }
 
-func (p *parser) parseItem(first bool) (rawItem, *AqlError) {
-	t := p.peek()
-	what := "a field, * or COUNT(*)"
-	if first {
-		what = "a field, * or COUNT(*) after SELECT"
-	}
-	var it rawItem
+// parseFunc reads function ( * | [DISTINCT] field ).
+func (p *parser) parseFunc() (*Item, *AqlError) {
+	ft := p.next()
+	name := strings.ToUpper(ft.val)
+	p.next() // (
+	it := &Item{Func: name, pos: ft.pos}
+	a := p.peek()
 	switch {
-	case t.isPunct("*"):
+	case a.punct("*"):
+		if name != "COUNT" {
+			return nil, p.s03(a, "a field inside "+name+"( )")
+		}
+		it.CountStar = true
 		p.next()
-		it.star = true
-		return it, nil
-	case t.Kind == tkWord && strings.HasSuffix(t.Value, ".") && p.peekN(1).isPunct("*"):
+	case a.kind == tkNumber && a.val == "1" && name == "COUNT":
+		it.CountStar = true
 		p.next()
+	case a.is("DISTINCT"):
 		p.next()
-		it.star = true
-		return it, nil
-	case t.Kind == tkWord && p.peekN(1).isPunct("("):
-		fn := strings.ToUpper(t.Value)
-		if !functions[fn] {
-			return it, errS12(t.Value)
+		b := p.peek()
+		if b.punct("*") {
+			return nil, p.s03(b, "a field after DISTINCT")
+		}
+		if b.kind != tkWord || isKeyword(b.val) {
+			return nil, p.s03(b, "a field after DISTINCT")
+		}
+		it.Distinct = true
+		it.word = b.val
+		p.next()
+	case a.kind == tkWord && !isKeyword(a.val):
+		if name == "COUNT" && entityByName(strings.ToLower(a.val)) != nil {
+			it.CountStar = true
+		} else {
+			it.word = a.val
 		}
 		p.next()
-		p.next()
-		it.fn = fn
-		a := p.peek()
-		if a.isWord("SELECT") {
-			return it, errS11()
-		}
-		if a.isWord("DISTINCT") {
-			p.next()
-			it.distinct = true
-			a = p.peek()
-		}
-		switch {
-		case a.isPunct("*") && !it.distinct && fn == "COUNT":
-			it.fnStar = true
-		case a.Kind == tkNumber && a.Value == "1" && fn == "COUNT" && !it.distinct:
-			it.fnStar = true
-		case a.Kind == tkWord && !isKeyword(a):
-			it.fnArg = a
-		default:
-			return it, p.s03(a, "a field or * inside "+fn+"( )")
-		}
-		p.next()
-		if !p.peek().isPunct(")") {
-			return it, p.s03(p.peek(), "')'")
-		}
-		p.next()
-	case t.Kind == tkWord && !isKeyword(t):
-		p.next()
-		it.word = t
 	default:
-		return it, p.s03(t, what)
-	}
-	if p.peek().isWord("AS") {
-		p.next()
-		l := p.peek()
-		if (l.Kind != tkWord && l.Kind != tkText) || isKeyword(l) {
-			return it, p.s03(l, "a name after AS")
+		if name == "COUNT" {
+			return nil, p.s03(a, "a field or * inside COUNT( )")
 		}
-		p.next()
-		it.label, it.hasLabel = l.Value, true
+		return nil, p.s03(a, "a field inside "+name+"( )")
+	}
+	if !p.peek().punct(")") {
+		return nil, p.s03(p.peek(), "')'")
+	}
+	p.next()
+	if it.CountStar {
+		it.Func = "COUNT"
+		it.Label = "COUNT(*)"
+	} else {
+		d := ""
+		if it.Distinct {
+			d = "DISTINCT "
+		}
+		it.Label = name + "(" + d + it.word + ")"
 	}
 	return it, nil
 }
 
-func (p *parser) parseOr(e *EntityDef) (any, *AqlError) {
-	c, err := p.parseAnd(e)
+func (p *parser) parseValue() (Value, *AqlError) {
+	t := p.peek()
+	switch {
+	case t.kind == tkText:
+		p.next()
+		return Value{kind: vText, s: t.val}, nil
+	case t.kind == tkNumber:
+		p.next()
+		f, _ := strconv.ParseFloat(t.val, 64)
+		return Value{kind: vNumber, s: t.val, n: f}, nil
+	case t.is("TRUE"):
+		p.next()
+		return Value{kind: vBool, b: true}, nil
+	case t.is("FALSE"):
+		p.next()
+		return Value{kind: vBool, b: false}, nil
+	case t.is("NULL"):
+		p.next()
+		return Value{kind: vNull}, nil
+	case t.kind == tkWord && !isKeyword(t.val):
+		return Value{}, errS13(t.val)
+	}
+	return Value{}, p.s03(t, "a value in single quotes")
+}
+
+func (p *parser) parseOr(e *EntityDef) (Cond, *AqlError) {
+	left, err := p.parseAnd(e)
 	if err != nil {
 		return nil, err
 	}
-	members := []any{c}
-	for p.peek().isWord("OR") {
+	if !p.peek().is("OR") {
+		return left, nil
+	}
+	any := &AnyOf{M: []Cond{left}}
+	for p.peek().is("OR") {
 		p.next()
-		c, err := p.parseAnd(e)
+		r, err := p.parseAnd(e)
 		if err != nil {
 			return nil, err
 		}
-		members = append(members, c)
+		any.M = append(any.M, r)
 	}
-	if len(members) == 1 {
-		return c, nil
-	}
-	return &rawAny{members}, nil
+	return any, nil
 }
 
-func (p *parser) parseAnd(e *EntityDef) (any, *AqlError) {
-	var members []any
-	for {
-		c, err := p.parseNot(e)
-		if err != nil {
-			return nil, err
-		}
-		if a, ok := c.(*rawAll); ok && a.members != nil && isBetween(a) {
-			members = append(members, a.members...)
+func (p *parser) parseAnd(e *EntityDef) (Cond, *AqlError) {
+	left, err := p.parseNot(e)
+	if err != nil {
+		return nil, err
+	}
+	if !p.peek().is("AND") {
+		return left, nil
+	}
+	all := &AllOf{}
+	add := func(c Cond) {
+		if a, ok := c.(*AllOf); ok {
+			all.M = append(all.M, a.M...)
 		} else {
-			members = append(members, c)
+			all.M = append(all.M, c)
 		}
-		if !p.peek().isWord("AND") {
-			break
-		}
+	}
+	add(left)
+	for p.peek().is("AND") {
 		p.next()
-	}
-	if len(members) == 1 {
-		return members[0], nil
-	}
-	return &rawAll{members}, nil
-}
-
-// a BETWEEN is an AllOf of two comparisons, marked by its operators.
-func isBetween(a *rawAll) bool {
-	if len(a.members) != 2 {
-		return false
-	}
-	c1, ok1 := a.members[0].(*rawCmp)
-	c2, ok2 := a.members[1].(*rawCmp)
-	return ok1 && ok2 && c1.op == ">=" && c2.op == "<=" && c1.field.Pos == c2.field.Pos
-}
-
-func (p *parser) parseNot(e *EntityDef) (any, *AqlError) {
-	if p.peek().isWord("NOT") {
-		p.next()
-		c, err := p.parseNot(e)
+		r, err := p.parseNot(e)
 		if err != nil {
 			return nil, err
 		}
-		return &rawNot{c}, nil
+		add(r)
 	}
-	if p.peek().isPunct("(") {
-		if p.peekN(1).isWord("SELECT") {
+	return all, nil
+}
+
+func (p *parser) parseNot(e *EntityDef) (Cond, *AqlError) {
+	if p.peek().is("NOT") {
+		p.next()
+		m, err := p.parseNot(e)
+		if err != nil {
+			return nil, err
+		}
+		return &Negation{M: m}, nil
+	}
+	if p.peek().punct("(") {
+		if p.at(1).is("SELECT") {
 			return nil, errS11()
 		}
 		p.next()
@@ -709,7 +822,7 @@ func (p *parser) parseNot(e *EntityDef) (any, *AqlError) {
 		if err != nil {
 			return nil, err
 		}
-		if !p.peek().isPunct(")") {
+		if !p.peek().punct(")") {
 			return nil, p.s03(p.peek(), "')'")
 		}
 		p.next()
@@ -718,792 +831,511 @@ func (p *parser) parseNot(e *EntityDef) (any, *AqlError) {
 	return p.parseComparison(e)
 }
 
-func (p *parser) readValue() (any, *AqlError) {
-	t := p.peek()
-	switch {
-	case t.Kind == tkText:
-		p.next()
-		return t.Value, nil
-	case t.Kind == tkNumber:
-		p.next()
-		return Num(t.Value), nil
-	case t.isWord("TRUE"):
-		p.next()
-		return true, nil
-	case t.isWord("FALSE"):
-		p.next()
-		return false, nil
-	case t.isWord("NULL"):
-		p.next()
-		return nullValue{}, nil
-	case t.isPunct("(") && p.peekN(1).isWord("SELECT"):
-		return nil, errS11()
-	case t.Kind == tkWord && !isKeyword(t):
-		return nil, errS13(t.Value)
-	}
-	return nil, p.s03(t, "a value in single quotes")
-}
-
-func (p *parser) parseComparison(e *EntityDef) (any, *AqlError) {
+func (p *parser) parseComparison(e *EntityDef) (Cond, *AqlError) {
 	ft := p.peek()
-	if ft.Kind != tkWord || isKeyword(ft) {
-		return nil, p.s03(ft, "a field name ("+fieldList(e)+")")
+	if ft.kind != tkWord || isKeyword(ft.val) {
+		return nil, p.s03(ft, "a field name ("+strings.Join(fieldNames(e), ", ")+")")
+	}
+	field, err := p.sc.resolveField(e, ft.val, false)
+	if err != nil {
+		return nil, err
 	}
 	p.next()
-	t := p.peek()
-	negated := false
-	if t.isWord("NOT") {
-		n := p.peekN(1)
-		if n.isWord("IN") || n.isWord("CONTAINS") || n.isWord("LIKE") || n.isWord("BETWEEN") {
-			p.next()
-			negated = true
-			t = p.peek()
-		}
-	}
-	var c any
-	switch {
-	case t.Kind == tkOp && !negated:
+	ftype := p.sc.fieldType(e, field)
+	op := p.peek()
+	negate := false
+	if op.is("NOT") && (p.at(1).is("IN") || p.at(1).is("CONTAINS") || p.at(1).is("LIKE") || p.at(1).is("BETWEEN")) {
+		negate = true
 		p.next()
-		v, err := p.readValue()
+		op = p.peek()
+	}
+	wrap := func(c Cond) Cond {
+		if negate {
+			return &Negation{M: c}
+		}
+		return c
+	}
+	switch {
+	case op.kind == tkOp && !negate:
+		p.next()
+		v, err := p.parseValue()
 		if err != nil {
 			return nil, err
 		}
-		if _, isNull := v.(nullValue); isNull {
-			switch t.Value {
-			case "=":
-				return &rawNull{field: ft}, nil
-			case "!=":
-				return &rawNull{field: ft, negated: true}, nil
+		if v.kind == vNull || (v.kind == vText && v.s == "") {
+			if op.val == "=" {
+				return &NullTest{Field: field}, nil
 			}
-			return nil, p.s03(p.toks[p.i-1], "a value in single quotes")
+			if op.val == "!=" {
+				return &NullTest{Field: field, Negated: true}, nil
+			}
 		}
-		return &rawCmp{field: ft, op: t.Value, value: v}, nil
-	case t.isWord("IS") && !negated:
+		if err := checkCondValue(field, ftype, op.val, v); err != nil {
+			return nil, err
+		}
+		return &Cmp{Field: field, Op: op.val, Val: v}, nil
+	case op.is("IS") && !negate:
 		p.next()
 		neg := false
-		if p.peek().isWord("NOT") {
-			p.next()
+		if p.peek().is("NOT") {
 			neg = true
+			p.next()
 		}
-		if !p.peek().isWord("NULL") {
+		if !p.peek().is("NULL") {
 			return nil, p.s03(p.peek(), "NULL after IS")
 		}
 		p.next()
-		return &rawNull{field: ft, negated: neg}, nil
-	case t.isWord("IN"):
+		return &NullTest{Field: field, Negated: neg}, nil
+	case op.is("IN"):
 		p.next()
-		if !p.peek().isPunct("(") {
+		if !p.peek().punct("(") {
 			return nil, p.s03(p.peek(), "'(' after IN")
 		}
 		p.next()
-		if p.peek().isWord("SELECT") {
+		if p.peek().is("SELECT") {
 			return nil, errS11()
 		}
-		var vals []any
+		in := &InList{Field: field}
 		for {
-			v, err := p.readValue()
+			v, err := p.parseValue()
 			if err != nil {
 				return nil, err
 			}
-			if _, isNull := v.(nullValue); isNull {
-				v = nil
+			if err := checkCondValue(field, ftype, "=", v); err != nil {
+				return nil, err
 			}
-			vals = append(vals, v)
-			if p.peek().isPunct(",") {
-				p.next()
-				continue
+			in.Vals = append(in.Vals, v)
+			if !p.peek().punct(",") {
+				break
 			}
-			break
+			p.next()
 		}
-		if !p.peek().isPunct(")") {
+		if !p.peek().punct(")") {
 			return nil, p.s03(p.peek(), "')'")
 		}
 		p.next()
-		c = &rawIn{field: ft, values: vals}
-	case t.isWord("CONTAINS") || t.isWord("LIKE"):
+		return wrap(in), nil
+	case op.is("CONTAINS") || op.is("LIKE"):
 		p.next()
-		v, err := p.readValue()
+		v, err := p.parseValue()
 		if err != nil {
 			return nil, err
 		}
-		if _, isNull := v.(nullValue); isNull {
-			return nil, p.s03(p.toks[p.i-1], "a value in single quotes")
-		}
-		c = &rawCmp{field: ft, op: strings.ToLower(t.Value), value: v}
-	case t.isWord("BETWEEN"):
+		return wrap(&Cmp{Field: field, Op: strings.ToLower(op.val), Val: v}), nil
+	case op.is("BETWEEN"):
 		p.next()
-		a, err := p.readValue()
+		a, err := p.parseValue()
 		if err != nil {
 			return nil, err
 		}
-		if !p.peek().isWord("AND") {
+		if !p.peek().is("AND") {
 			return nil, p.s03(p.peek(), "AND in BETWEEN")
 		}
 		p.next()
-		b, err := p.readValue()
+		b, err := p.parseValue()
 		if err != nil {
 			return nil, err
 		}
-		_, an := a.(nullValue)
-		_, bn := b.(nullValue)
-		if an || bn {
-			return nil, p.s03(p.toks[p.i-1], "a value in single quotes")
+		if err := checkCondValue(field, ftype, ">=", a); err != nil {
+			return nil, err
 		}
-		c = &rawAll{[]any{&rawCmp{field: ft, op: ">=", value: a}, &rawCmp{field: ft, op: "<=", value: b}}}
-	default:
-		return nil, p.s03(t, "a comparison after the field "+ft.Value+" (=, !=, <, >, CONTAINS, LIKE, IN, IS NULL)")
+		if err := checkCondValue(field, ftype, "<=", b); err != nil {
+			return nil, err
+		}
+		return wrap(&AllOf{M: []Cond{&Cmp{Field: field, Op: ">=", Val: a}, &Cmp{Field: field, Op: "<=", Val: b}}}), nil
 	}
-	if negated {
-		return &rawNot{c}, nil
-	}
-	return c, nil
+	return nil, p.s03(op, "a comparison after the field "+ft.val+" (=, !=, <, >, CONTAINS, LIKE, IN, IS NULL)")
 }
 
-// ---- write forms ----
-
-func (p *parser) writeValue() (any, *AqlError) {
-	t := p.peek()
-	switch {
-	case t.Kind == tkText:
-		p.next()
-		return t.Value, nil
-	case t.Kind == tkNumber:
-		p.next()
-		return Num(t.Value), nil
-	case t.isWord("TRUE"):
-		p.next()
-		return true, nil
-	case t.isWord("FALSE"):
-		p.next()
-		return false, nil
-	case t.isWord("NULL"):
-		return nil, aqlErr("syntax", "NULL cannot be written. Leave the field out.")
-	case t.Kind == tkWord && !isKeyword(t):
-		return nil, errS13(t.Value)
+// checkCondValue checks a value against the type of its field (table of
+// values in a condition).
+func checkCondValue(field string, t FieldType, op string, v Value) *AqlError {
+	if t == tBoolean && (op == "<" || op == "<=" || op == ">" || op == ">=") {
+		return errV02(field)
 	}
-	return nil, p.w03at("expected a value in single quotes at %s.", t)
-}
-
-func (p *parser) writeEntity(kind string) (*EntityDef, *AqlError) {
-	t := p.peek()
-	if t.Kind != tkWord || isKeyword(t) {
-		switch kind {
-		case "insert":
-			return nil, p.w03at("expected a field name at %s.", t)
-		}
-		return nil, p.w03at("unexpected text at %s. One statement, one record.", t)
+	if v.kind == vNull {
+		return nil
 	}
-	p.next()
-	e := entityWord(t.Value)
-	if e == nil {
-		return nil, aqlErr("bad_name", "unknown entity %s. Entities that can be changed: %s", quoteVal(t.Value), strings.Join(changeable(), ", "))
-	}
-	if !e.HasOperation() {
-		return nil, aqlErr("bad_name", "%s cannot be changed. Entities that can be changed: %s", e.Name, strings.Join(changeable(), ", "))
-	}
-	ok, done := e.CanCreate, "created"
-	switch kind {
-	case "update":
-		ok, done = e.CanUpdate, "changed"
-	case "delete":
-		ok, done = e.CanDelete, "deleted"
-	}
-	if !ok {
-		var l []string
-		for _, x := range catalog {
-			if (kind == "insert" && x.CanCreate) || (kind == "update" && x.CanUpdate) || (kind == "delete" && x.CanDelete) {
-				l = append(l, x.Name)
-			}
+	switch t {
+	case tNumber:
+		if _, ok := toNumber(v.raw()); !ok || v.kind == vBool {
+			return errV01(field, t, v.written())
 		}
-		return nil, aqlErr("bad_name", "%s cannot be %s. Entities that can be %s: %s", e.Name, done, done, strings.Join(l, ", "))
-	}
-	return e, nil
-}
-
-func (p *parser) parseWrite(kind string) (any, *AqlError) {
-	w := &rawWrite{kind: kind}
-	p.next()
-	switch kind {
-	case "insert":
-		if !p.peek().isWord("INTO") {
-			return nil, p.w03("expected INTO after INSERT.")
+	case tBoolean:
+		if _, ok := truth(v.raw()); !ok {
+			return errV01(field, t, v.written())
 		}
-		p.next()
-		e, err := p.writeEntity(kind)
-		if err != nil {
-			return nil, err
-		}
-		w.entity = e
-		if !p.peek().isPunct("(") {
-			return nil, p.w03("expected ( and the field names after the entity.")
-		}
-		p.next()
-		var cols []Token
-		for {
-			t := p.peek()
-			if t.Kind != tkWord || isKeyword(t) {
-				return nil, p.w03at("expected a field name at %s.", t)
-			}
-			p.next()
-			cols = append(cols, t)
-			if p.peek().isPunct(",") {
-				p.next()
-				continue
-			}
-			break
-		}
-		if !p.peek().isPunct(")") {
-			return nil, p.w03at("expected ) after the field names at %s.", p.peek())
-		}
-		p.next()
-		if !p.peek().isWord("VALUES") {
-			return nil, p.w03at("expected VALUES at %s.", p.peek())
-		}
-		p.next()
-		if !p.peek().isPunct("(") {
-			return nil, p.w03("expected ( after VALUES.")
-		}
-		p.next()
-		var vals []any
-		for {
-			v, err := p.writeValue()
-			if err != nil {
-				return nil, err
-			}
-			vals = append(vals, v)
-			if p.peek().isPunct(",") {
-				p.next()
-				continue
-			}
-			break
-		}
-		if !p.peek().isPunct(")") {
-			return nil, p.w03at("expected ) after the values at %s.", p.peek())
-		}
-		p.next()
-		if p.peek().isPunct(",") && p.peekN(1).isPunct("(") {
-			return nil, aqlErr("syntax", "one INSERT creates one record. Send one statement per record.")
-		}
-		if !p.endOrSemicolon() {
-			return nil, p.w03at("unexpected text at %s. One statement, one record.", p.peek())
-		}
-		if len(cols) != len(vals) {
-			return nil, aqlErr("syntax", "%d fields but %d values", len(cols), len(vals))
-		}
-		for i := range cols {
-			w.columns = append(w.columns, rawAssign{word: cols[i], value: vals[i]})
-		}
-		return w, nil
-	case "update":
-		e, err := p.writeEntity(kind)
-		if err != nil {
-			return nil, err
-		}
-		w.entity = e
-		if !p.peek().isWord("SET") {
-			return nil, p.w03("expected SET after the entity.")
-		}
-		p.next()
-		for {
-			t := p.peek()
-			if t.Kind != tkWord || isKeyword(t) {
-				return nil, p.w03at("expected a field name at %s.", t)
-			}
-			p.next()
-			if !(p.peek().Kind == tkOp && p.peek().Value == "=") {
-				return nil, p.w03(fmt.Sprintf("expected = after the field %s.", t.Value))
-			}
-			p.next()
-			v, err := p.writeValue()
-			if err != nil {
-				return nil, err
-			}
-			w.assigns = append(w.assigns, rawAssign{word: t, value: v})
-			n := p.peek()
-			if n.isPunct(",") {
-				p.next()
-				continue
-			}
-			if n.isWord("WHERE") || n.Kind == tkEOF || n.isPunct(";") {
-				break
-			}
-			return nil, aqlErr("syntax", "a field can only be set to a value, not to an expression")
-		}
-	case "delete":
-		if !p.peek().isWord("FROM") {
-			return nil, p.w03("expected FROM after DELETE.")
-		}
-		p.next()
-		e, err := p.writeEntity(kind)
-		if err != nil {
-			return nil, err
-		}
-		w.entity = e
-	}
-	if !p.peek().isWord("WHERE") {
-		if p.peek().Kind == tkEOF || p.peek().isPunct(";") {
-			return nil, aqlErr("syntax", "%s needs WHERE id = '...' with the id of the one record to change.%s Forms: %s", strings.ToUpper(kind), p.hint(), writeFormsText)
-		}
-		return nil, p.w03at("unexpected text at %s. One statement, one record.", p.peek())
-	}
-	p.next()
-	// first condition: the id field with =
-	t := p.peek()
-	if t.Kind != tkWord || isKeyword(t) || catalogName(w.entity, t.Value) != w.entity.IDField() || w.entity.IDField() == "" {
-		return nil, errW05()
-	}
-	p.next()
-	if !(p.peek().Kind == tkOp && p.peek().Value == "=") {
-		return nil, errW05()
-	}
-	p.next()
-	v := p.peek()
-	switch {
-	case v.Kind == tkText:
-		w.id = v.Value
-	case v.Kind == tkNumber:
-		w.id = v.Value
-	case v.isWord("NULL"):
-		return nil, aqlErr("syntax", "NULL cannot be written. Leave the field out.")
-	case v.Kind == tkWord && !isKeyword(v):
-		return nil, errS13(v.Value)
-	default:
-		return nil, p.w03("WHERE id = needs the id in single quotes.")
-	}
-	p.next()
-	for {
-		n := p.peek()
-		if n.isWord("OR") {
-			return nil, errW05()
-		}
-		if !n.isWord("AND") {
-			break
-		}
-		p.next()
-		g := p.peek()
-		if g.isWord("NOT") || g.isPunct("(") {
-			return nil, errW05()
-		}
-		if g.Kind != tkWord || isKeyword(g) {
-			return nil, p.w03at("expected a field name at %s.", g)
-		}
-		p.next()
-		op := p.peek()
-		if !(op.Kind == tkOp && op.Value == "=") {
-			if op.Kind == tkOp || op.isWord("IS") || op.isWord("IN") || op.isWord("LIKE") || op.isWord("CONTAINS") || op.isWord("BETWEEN") || op.isWord("NOT") {
-				return nil, aqlErr("syntax", "after WHERE id = '...', further conditions must have the form AND field = 'value'")
-			}
-			return nil, p.w03(fmt.Sprintf("expected = after the field %s.", g.Value))
-		}
-		p.next()
-		val, err := p.writeValue()
-		if err != nil {
-			return nil, err
-		}
-		w.guards = append(w.guards, rawAssign{word: g, value: val})
-	}
-	if !p.endOrSemicolon() {
-		return nil, p.w03at("unexpected text at %s. One statement, one record.", p.peek())
-	}
-	return w, nil
-}
-
-// ---- resolve-names ----
-
-func entityWord(w string) *EntityDef {
-	for _, e := range catalog {
-		if strings.EqualFold(e.Name, w) || strings.EqualFold(e.Singular, w) {
-			return e
-		}
-		for _, o := range e.OtherNames {
-			if strings.EqualFold(o, w) {
-				return e
-			}
+	case tDate, tDatetime:
+		if v.kind != vText || !(validDay(v.s) || isTimestamp(v.s)) {
+			return errV01(field, t, v.written())
 		}
 	}
 	return nil
 }
 
-// splitWord gives the name part of a field word and whether it is a custom
-// field word.
-func splitWord(word string) (string, bool) {
-	i := strings.LastIndex(word, ".")
-	if i < 0 {
-		return word, false
+// ---- describe ----
+
+func (p *parser) parseDescribe() (any, *AqlError) {
+	p.next()
+	t := p.peek()
+	if t.kind == tkEOF || (t.punct(";") && p.at(1).kind == tkEOF) {
+		return &DescribeStmt{}, nil
 	}
-	name, before := word[i+1:], strings.ToLower(word[:i])
-	return name, before == "custom" || strings.HasSuffix(before, ".custom")
+	if t.kind != tkWord {
+		return nil, p.s03(t, "an entity ("+strings.Join(entityNames(), ", ")+")")
+	}
+	e := resolveEntity(t.val)
+	if e == nil {
+		return nil, p.sc.errN01(t.val)
+	}
+	p.next()
+	if p.peek().punct(";") {
+		p.next()
+	}
+	if p.peek().kind != tkEOF {
+		return nil, p.sc.errS14(e)
+	}
+	return &DescribeStmt{E: e}, nil
 }
 
-// labelOf is the word without a qualifier; custom. belongs to the word.
-func labelOf(word string) string {
-	name, custom := splitWord(word)
-	if custom {
-		i := strings.LastIndex(word, ".")
-		j := strings.LastIndex(word[:i], ".")
-		return word[j+1:]
-	}
-	return name
-}
+// ---- write statements ----
 
-// catalogName resolves a field word by the steps 4 a to 4 d: no request.
-func catalogName(e *EntityDef, word string) string {
-	name, custom := splitWord(word)
-	if custom {
-		return ""
-	}
-	l := strings.ToLower(name)
-	if e.HasField(l) {
-		return l
-	}
-	for k, v := range e.OtherFieldNames {
-		if strings.EqualFold(k, l) {
-			return v
-		}
-	}
-	if e.Name != "products" {
-		if v, ok := commonOtherNames[l]; ok && e.HasField(v) {
-			return v
-		}
-	}
-	s := strings.ToLower(e.Singular)
-	if (l == s || l == s+"_id") && e.IDField() != "" {
-		return e.IDField()
-	}
-	if l == s+"_name" && e.HasField("name") {
-		return "name"
-	}
-	return ""
-}
-
-// resolveField is resolve-names for a field word. "" without an error means
-// none (only when writing).
-func (r *run) resolveField(e *EntityDef, word string, writing bool) (string, *AqlError) {
-	name, custom := splitWord(word)
-	if custom {
-		cf, err := r.customField(e, name, labelOf(word), true)
-		if err != nil {
-			return "", err
-		}
-		return cf.Name, nil
-	}
-	if n := catalogName(e, word); n != "" {
-		return n, nil
-	}
-	cf, err := r.customField(e, name, name, false)
-	if err != nil {
-		return "", err
-	}
-	if cf != nil {
-		return cf.Name, nil
-	}
-	if writing {
-		return "", nil
-	}
-	if e.Name == "users" {
-		for _, w := range productWords {
-			if strings.EqualFold(w, name) {
-				return "", aqlErr("bad_name", "users cannot be filtered by product. Fields of users: %s. Example: %s", fieldList(e), exampleOf(e))
-			}
-		}
-	}
-	hint := ""
-	if e.Name == "features" && (strings.EqualFold(name, "goal") || strings.EqualFold(name, "goal_id")) {
-		hint = " Features cannot be filtered by goal."
-	}
-	return "", aqlErr("bad_name", "unknown field %s on %s.%s Fields of %s: %s.%s Example: %s", quoteVal(name), e.Name, hint, e.Name, fieldList(e), r.customHint(e), exampleOf(e))
-}
-
-// ---- resolution of a read statement ----
-
-func (r *run) resolveSelect(raw *rawSelect) (*ReadStmt, *AqlError) {
-	e := raw.entity
-	st := &ReadStmt{Entity: e, Distinct: raw.distinct, Limit: raw.limit}
-	for _, it := range raw.items {
-		switch {
-		case it.star:
-			st.Items = append(st.Items, SelectItem{Star: true})
-		case it.fn != "":
-			si := SelectItem{Fn: it.fn, Distinct: it.distinct}
-			argText := "*"
-			if !it.fnStar {
-				argText = it.fnArg.Value
-				if it.fn == "COUNT" && !it.distinct && catalogName(e, it.fnArg.Value) == "" && entityWord(it.fnArg.Value) != nil {
-					argText = "*"
-				} else {
-					f, err := r.resolveField(e, it.fnArg.Value, false)
-					if err != nil {
-						return nil, err
-					}
-					si.Field = f
-				}
-			}
-			if it.distinct {
-				argText = "DISTINCT " + argText
-			}
-			si.Label = it.fn + "(" + argText + ")"
-			if it.hasLabel {
-				si.Label = it.label
-			}
-			st.Items = append(st.Items, si)
-		default:
-			f, err := r.resolveField(e, it.word.Value, false)
-			if err != nil {
-				return nil, err
-			}
-			si := SelectItem{Field: f, Label: labelOf(it.word.Value)}
-			if it.hasLabel {
-				si.Label = it.label
-			}
-			st.Items = append(st.Items, si)
-		}
-	}
-	if raw.where != nil {
-		c, err := r.resolveCond(e, raw.where)
-		if err != nil {
-			return nil, err
-		}
-		st.Where = c
-	}
-	for _, g := range raw.groupBy {
-		f, err := r.resolveField(e, g.Value, false)
-		if err != nil {
-			return nil, err
-		}
-		st.GroupBy = append(st.GroupBy, f)
-	}
-	for _, o := range raw.orderBy {
-		k := OrderKey{Desc: o.desc}
-		if o.isFn {
-			agg := &SelectItem{Fn: o.fn}
-			if !o.fnStar {
-				f, err := r.resolveField(e, o.fnArg.Value, false)
-				if err != nil {
-					return nil, err
-				}
-				agg.Field = f
-			}
-			k.Agg = agg
-			for i := range st.Items {
-				it := st.Items[i]
-				if it.Fn == agg.Fn && it.Field == agg.Field && !it.Distinct {
-					k.Label = it.Label
-				}
-			}
-		} else {
-			found := false
-			for _, it := range st.Items {
-				if !it.Star && it.Label != "" && strings.EqualFold(it.Label, o.word.Value) && (it.Fn != "" || it.Label != labelOf(it.Field)) {
-					if it.Fn != "" {
-						k.Label = it.Label
-						cp := it
-						k.Agg = &cp
-					} else {
-						k.Field = it.Field
-					}
-					found = true
-					break
-				}
-			}
-			if !found {
-				f, err := r.resolveField(e, o.word.Value, false)
-				if err != nil {
-					return nil, err
-				}
-				k.Field = f
-			}
-		}
-		st.OrderBy = append(st.OrderBy, k)
-	}
-	return st, nil
-}
-
-func (r *run) resolveCond(e *EntityDef, c any) (Cond, *AqlError) {
-	switch x := c.(type) {
-	case *rawCmp:
-		f, err := r.resolveField(e, x.field.Value, false)
-		if err != nil {
-			return nil, err
-		}
-		return &Cmp{Field: f, Op: x.op, Value: x.value}, nil
-	case *rawNull:
-		f, err := r.resolveField(e, x.field.Value, false)
-		if err != nil {
-			return nil, err
-		}
-		return &NullTest{Field: f, Negated: x.negated}, nil
-	case *rawIn:
-		f, err := r.resolveField(e, x.field.Value, false)
-		if err != nil {
-			return nil, err
-		}
-		return &InList{Field: f, Values: x.values}, nil
-	case *rawAll:
-		out := &AllOf{}
-		for _, m := range x.members {
-			rc, err := r.resolveCond(e, m)
-			if err != nil {
-				return nil, err
-			}
-			out.Members = append(out.Members, rc)
-		}
-		return out, nil
-	case *rawAny:
-		out := &AnyOf{}
-		for _, m := range x.members {
-			rc, err := r.resolveCond(e, m)
-			if err != nil {
-				return nil, err
-			}
-			out.Members = append(out.Members, rc)
-		}
-		return out, nil
-	case *rawNot:
-		rc, err := r.resolveCond(e, x.member)
-		if err != nil {
-			return nil, err
-		}
-		return &Negation{rc}, nil
-	}
-	return nil, aqlErr("syntax", "cannot read the condition")
-}
-
-// ---- resolution of a write statement ----
-
-func writableList(e *EntityDef) string {
-	var l []string
-	for _, f := range e.Fields {
-		switch f.Writable {
-		case wYes:
-			l = append(l, f.Name)
-		case wInsertOnly:
-			l = append(l, f.Name+" (INSERT only)")
-		}
-	}
-	return strings.Join(l, ", ")
-}
-
-func (r *run) errW16(e *EntityDef, opening string) *AqlError {
-	note := ""
-	if e.CanCreate {
-		note = ", and parent in INSERT"
-	}
-	hint := ""
-	if l := r.customNames(e, true); len(l) > 0 {
-		hint = ". Custom fields, with UPDATE only: " + listMax(l)
-	}
-	return aqlErr("bad_name", "%s Fields of %s that can be set: %s%s%s", opening, e.Name, writableList(e), note, hint)
-}
-
-func errW15(e *EntityDef) *AqlError {
-	return aqlErr("bad_name", "the id of a record cannot be set. Fields of %s that can be set: %s", e.Name, writableList(e))
-}
-
-// assignedField checks one column of INSERT or one assignment of UPDATE.
-func (r *run) assignedField(e *EntityDef, word string, insert bool) (string, *AqlError) {
-	f, err := r.resolveField(e, word, true)
-	if err != nil {
-		return "", err
-	}
-	if f == "" {
-		return "", r.errW16(e, fmt.Sprintf("unknown field %s on %s.", quoteVal(labelOf(word)), e.Name))
-	}
-	if f == e.IDField() {
-		return "", errW15(e)
-	}
-	if cf := r.custom[f]; cf != nil && strings.HasPrefix(f, "custom.") {
-		if cf.Kind == "scorecard" {
-			return "", r.errW16(e, fmt.Sprintf("the field %s of %s cannot be set.", f, e.Name))
-		}
-		if insert {
-			return "", aqlErr("bad_name", "custom fields cannot be set in INSERT. Leave out %s, create the record, and then send: UPDATE %s SET %s = '...' WHERE id = '...'", f, e.Name, f)
-		}
-		return f, nil
-	}
-	fd := e.Field(f)
+func (p *parser) writeValue() (Value, *AqlError) {
+	t := p.peek()
 	switch {
-	case fd == nil || fd.Writable == wNo:
-		return "", r.errW16(e, fmt.Sprintf("the field %s of %s cannot be set.", f, e.Name))
-	case fd.Writable == wInsertOnly && !insert:
-		return "", r.errW16(e, fmt.Sprintf("the field %s of %s can be set in INSERT only.", f, e.Name))
+	case t.is("NULL"):
+		return Value{}, aqlErr("syntax", "NULL cannot be written. Leave the field out.")
+	case t.kind == tkText || t.kind == tkNumber || t.is("TRUE") || t.is("FALSE"):
+		return p.parseValue()
+	case t.kind == tkWord && !isKeyword(t.val):
+		return Value{}, errS13(t.val)
 	}
-	return f, nil
+	return Value{}, errW03("expected a value in single quotes at "+whereText(p.src, t.pos)+".", p.src)
 }
 
-func (r *run) isParentColumn(e *EntityDef, word string) bool {
-	name, custom := splitWord(word)
-	if custom {
-		return false
+func (p *parser) writeEntity(kind string) (*EntityDef, *AqlError) {
+	t := p.peek()
+	if t.kind != tkWord || isKeyword(t.val) {
+		return nil, errW03("expected a field name at "+whereText(p.src, t.pos)+".", p.src)
 	}
-	l := strings.ToLower(name)
-	if l == "parent" || (e.ParentKind != "any" && l == e.ParentKind) {
-		return true
+	e := resolveEntity(t.val)
+	if e == nil {
+		return nil, aqlErr("bad_name", "unknown entity '%s'. Entities that can be changed: %s", t.val, changeableList())
 	}
-	return catalogName(e, word) == e.ParentField
+	if !e.hasOps() {
+		return nil, errW13(e)
+	}
+	if (kind == "insert" && !e.CanCreate) || (kind == "update" && !e.CanUpdate) || (kind == "delete" && !e.CanDelete) {
+		return nil, errW14(e, kind)
+	}
+	p.next()
+	return e, nil
 }
 
-func (r *run) resolveWrite(w *rawWrite) (Statement, *AqlError) {
-	e := w.entity
-	switch w.kind {
+func (p *parser) parseWrite(kind string) (any, *AqlError) {
+	sc := p.sc
+	p.next()
+	st := &WriteStmt{Kind: kind}
+	type col struct {
+		word string
+		pos  int
+	}
+	switch kind {
 	case "insert":
-		st := &InsertStmt{Entity: e}
-		hasParent := false
-		for _, c := range w.columns {
-			if r.isParentColumn(e, c.word.Value) {
-				if hasParent && !strings.EqualFold(textOf(st.Parent), textOf(c.value)) {
+		if !p.peek().is("INTO") {
+			return nil, errW03("expected INTO after INSERT.", p.src)
+		}
+		p.next()
+		e, err := p.writeEntity(kind)
+		if err != nil {
+			return nil, err
+		}
+		st.E = e
+		if !p.peek().punct("(") {
+			return nil, errW03("expected ( and the field names after the entity.", p.src)
+		}
+		p.next()
+		var cols []col
+		for {
+			t := p.peek()
+			if t.kind != tkWord || isKeyword(t.val) {
+				return nil, errW03("expected a field name at "+whereText(p.src, t.pos)+".", p.src)
+			}
+			cols = append(cols, col{t.val, t.pos})
+			p.next()
+			if !p.peek().punct(",") {
+				break
+			}
+			p.next()
+		}
+		if !p.peek().punct(")") {
+			return nil, errW03("expected ) after the field names at "+whereText(p.src, p.peek().pos)+".", p.src)
+		}
+		p.next()
+		if !p.peek().is("VALUES") {
+			return nil, errW03("expected VALUES at "+whereText(p.src, p.peek().pos)+".", p.src)
+		}
+		p.next()
+		if !p.peek().punct("(") {
+			return nil, errW03("expected ( after VALUES.", p.src)
+		}
+		p.next()
+		var vals []Value
+		for {
+			v, err := p.writeValue()
+			if err != nil {
+				return nil, err
+			}
+			vals = append(vals, v)
+			if !p.peek().punct(",") {
+				break
+			}
+			p.next()
+		}
+		if !p.peek().punct(")") {
+			return nil, errW03("expected ) after the values at "+whereText(p.src, p.peek().pos)+".", p.src)
+		}
+		p.next()
+		if p.peek().punct(",") {
+			return nil, aqlErr("syntax", "one INSERT creates one record. Send one statement per record.")
+		}
+		if err := p.endOfWrite(); err != nil {
+			return nil, err
+		}
+		if len(cols) != len(vals) {
+			return nil, aqlErr("syntax", "%d fields but %d values", len(cols), len(vals))
+		}
+		seen := map[string]bool{}
+		for i, c := range cols {
+			v := vals[i]
+			name, isCustom, _ := splitWord(c.word)
+			isParent := false
+			if !isCustom {
+				if strings.EqualFold(name, "parent") || strings.EqualFold(name, e.ParentKind) || catalogField(e, name) == e.ParentField {
+					isParent = true
+				}
+			}
+			if isParent {
+				if st.Parent != nil && !textEq(st.Parent.written(), v.written()) {
 					return nil, aqlErr("syntax", "the parent is given twice with different values")
 				}
-				hasParent = true
-				st.Parent = c.value
+				vv := v
+				st.Parent = &vv
 				continue
 			}
-			f, err := r.assignedField(e, c.word.Value, true)
+			f, err := sc.resolveField(e, c.word, true)
 			if err != nil {
 				return nil, err
 			}
-			st.Fields = append(st.Fields, Assign{Field: f, Value: c.value, Word: c.word.Value})
+			if err := sc.checkAssignable(e, f, c.word, true); err != nil {
+				return nil, err
+			}
+			if seen[f] {
+				return nil, aqlErr("syntax", "the field %s is given twice. A statement sets each field once.", f)
+			}
+			seen[f] = true
+			st.Fields = append(st.Fields, Assign{Field: f, Val: v, Word: c.word})
 		}
 		return st, nil
 	case "update":
-		st := &UpdateStmt{Entity: e, ID: w.id}
-		for _, a := range w.assigns {
-			f, err := r.assignedField(e, a.word.Value, false)
+		e, err := p.writeEntity(kind)
+		if err != nil {
+			return nil, err
+		}
+		st.E = e
+		if !p.peek().is("SET") {
+			return nil, errW03("expected SET after the entity.", p.src)
+		}
+		p.next()
+		var assigns []Assign
+		for {
+			t := p.peek()
+			if t.kind != tkWord || isKeyword(t.val) {
+				return nil, errW03("expected a field name at "+whereText(p.src, t.pos)+".", p.src)
+			}
+			p.next()
+			if !(p.peek().kind == tkOp && p.peek().val == "=") {
+				return nil, errW03("expected = after the field "+t.val+".", p.src)
+			}
+			p.next()
+			v, err := p.writeValue()
 			if err != nil {
 				return nil, err
 			}
-			st.Fields = append(st.Fields, Assign{Field: f, Value: a.value, Word: a.word.Value})
+			assigns = append(assigns, Assign{Word: t.val, Val: v})
+			if p.peek().punct(",") {
+				p.next()
+				continue
+			}
+			if p.peek().is("WHERE") || p.peek().kind == tkEOF || p.peek().punct(";") {
+				break
+			}
+			return nil, aqlErr("syntax", "a field can only be set to a value, not to an expression")
 		}
-		gs, err := r.resolveGuards(e, w.guards)
-		if err != nil {
+		if err := p.parseWhereID(st); err != nil {
 			return nil, err
 		}
-		st.Guards = gs
+		seen := map[string]bool{}
+		for _, a := range assigns {
+			f, err := sc.resolveField(e, a.Word, true)
+			if err != nil {
+				return nil, err
+			}
+			if err := sc.checkAssignable(e, f, a.Word, false); err != nil {
+				return nil, err
+			}
+			if seen[f] {
+				return nil, aqlErr("syntax", "the field %s is given twice. A statement sets each field once.", f)
+			}
+			seen[f] = true
+			a.Field = f
+			st.Fields = append(st.Fields, a)
+		}
+		if err := sc.resolveGuards(st); err != nil {
+			return nil, err
+		}
 		return st, nil
 	}
-	st := &DeleteStmt{Entity: e, ID: w.id}
-	gs, err := r.resolveGuards(e, w.guards)
+	// delete
+	if !p.peek().is("FROM") {
+		return nil, errW03("expected FROM after DELETE.", p.src)
+	}
+	p.next()
+	e, err := p.writeEntity(kind)
 	if err != nil {
 		return nil, err
 	}
-	st.Guards = gs
+	st.E = e
+	if err := p.parseWhereID(st); err != nil {
+		return nil, err
+	}
+	if err := sc.resolveGuards(st); err != nil {
+		return nil, err
+	}
 	return st, nil
 }
 
-func (r *run) resolveGuards(e *EntityDef, raw []rawAssign) ([]Assign, *AqlError) {
-	var out []Assign
-	for _, g := range raw {
-		f, err := r.resolveField(e, g.word.Value, true)
+func (p *parser) endOfWrite() *AqlError {
+	if p.peek().punct(";") {
+		p.next()
+	}
+	if t := p.peek(); t.kind != tkEOF {
+		return errW03("unexpected text at "+whereText(p.src, t.pos)+". One statement, one record.", p.src)
+	}
+	return nil
+}
+
+// parseWhereID reads WHERE id = value {AND field = value}.
+func (p *parser) parseWhereID(st *WriteStmt) *AqlError {
+	if !p.peek().is("WHERE") {
+		if t := p.peek(); t.kind != tkEOF && !t.punct(";") {
+			return errW03("unexpected text at "+whereText(p.src, t.pos)+". One statement, one record.", p.src)
+		}
+		return errW04(strings.ToUpper(st.Kind), p.src)
+	}
+	p.next()
+	t := p.peek()
+	if t.kind != tkWord || isKeyword(t.val) || catalogField(st.E, fieldLabelName(t.val)) != st.E.idField() || st.E.idField() == "" {
+		return errW05()
+	}
+	p.next()
+	if !(p.peek().kind == tkOp && p.peek().val == "=") {
+		return errW05()
+	}
+	p.next()
+	v := p.peek()
+	switch {
+	case v.kind == tkText || v.kind == tkNumber:
+		st.ID = v.val
+		p.next()
+	case v.is("NULL"):
+		return aqlErr("syntax", "NULL cannot be written. Leave the field out.")
+	case v.kind == tkWord && !isKeyword(v.val):
+		return errS13(v.val)
+	default:
+		return errW03("WHERE id = needs the id in single quotes.", p.src)
+	}
+	for {
+		n := p.peek()
+		if n.is("OR") || n.is("NOT") || n.punct("(") || n.punct(")") {
+			return errW05()
+		}
+		if !n.is("AND") {
+			break
+		}
+		p.next()
+		g := p.peek()
+		if g.is("NOT") || g.punct("(") {
+			return errW05()
+		}
+		if g.kind != tkWord || isKeyword(g.val) {
+			return errW03("expected a field name at "+whereText(p.src, g.pos)+".", p.src)
+		}
+		p.next()
+		op := p.peek()
+		if !(op.kind == tkOp && op.val == "=") {
+			return errW06()
+		}
+		p.next()
+		val, err := p.parseValue()
 		if err != nil {
-			return nil, err
+			return err
+		}
+		st.Guards = append(st.Guards, Assign{Word: g.val, Val: val})
+	}
+	return p.endOfWrite()
+}
+
+func fieldLabelName(word string) string { n, _, _ := splitWord(word); return n }
+
+// resolveGuards resolves the fields of the guards and checks their values.
+func (sc *stmtCtx) resolveGuards(st *WriteStmt) *AqlError {
+	for i, g := range st.Guards {
+		f, err := sc.resolveField(st.E, g.Word, true)
+		if err != nil {
+			return err
 		}
 		if f == "" {
-			hint := ""
-			if l := r.customNames(e, false); len(l) > 0 {
-				hint = ". Custom fields of " + e.Name + ": " + listMax(l)
-			}
-			return nil, aqlErr("bad_name", "unknown field %s on %s. Fields of %s: %s%s", quoteVal(labelOf(g.word.Value)), e.Name, e.Name, fieldList(e), hint)
+			return sc.errW17(fieldLabelName(g.Word), st.E)
 		}
-		out = append(out, Assign{Field: f, Value: g.value, Word: g.word.Value})
+		st.Guards[i].Field = f
+		if g.Val.kind == vNull {
+			continue
+		}
+		if g.Val.kind == vText && g.Val.s == "" {
+			continue
+		}
+		if err := checkCondValue(f, sc.fieldType(st.E, f), "=", g.Val); err != nil {
+			return err
+		}
 	}
-	return out, nil
+	return nil
+}
+
+// checkAssignable applies the write rules for a column or an assigned field.
+func (sc *stmtCtx) checkAssignable(e *EntityDef, f, word string, insert bool) *AqlError {
+	if f == "" {
+		return sc.errW16("unknown field '"+fieldLabelName(word)+"' on "+e.Name+".", e)
+	}
+	if f == e.idField() {
+		return aqlErr("bad_name", "the id of a record cannot be set. Fields of %s that can be set: %s", e.Name, writableList(e))
+	}
+	if strings.HasPrefix(f, "custom.") {
+		cf := sc.custom[f]
+		if cf == nil || !kindTable[cf.TypeKey].settable {
+			return sc.errW16("the field "+f+" of "+e.Name+" cannot be set.", e)
+		}
+		if insert {
+			return aqlErr("bad_name", "custom fields cannot be set in INSERT. Leave out %s, create the record, and then send: UPDATE %s SET %s = '...' WHERE id = '...'", f, e.Name, f)
+		}
+		return nil
+	}
+	fd := e.field(f)
+	switch {
+	case fd == nil || fd.Writable == wNo:
+		return sc.errW16("the field "+f+" of "+e.Name+" cannot be set.", e)
+	case fd.Writable == wInsertOnly && !insert:
+		return sc.errW16("the field "+f+" of "+e.Name+" can be set in INSERT only.", e)
+	}
+	return nil
 }

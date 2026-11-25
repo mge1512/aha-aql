@@ -1,459 +1,405 @@
-// generated from spec: aha-aql.spec.md sha256:9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262
+// generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
 
 package main
 
-// entity-catalog: the single table of entities, fields, types, API sources,
-// routes, parents and operations. Every other part of the server takes these
-// facts from here.
-
 import "strings"
 
+// FieldType is the type of a catalog field (TYPES: FieldType).
 type FieldType int
 
 const (
-	ftString FieldType = iota
-	ftText
-	ftNumber
-	ftBoolean
-	ftDate
-	ftDatetime
-	ftStatus
-	ftUser
-	ftKey
-	ftReference
+	tString FieldType = iota
+	tText
+	tNumber
+	tBoolean
+	tDate
+	tDatetime
+	tStatus
+	tUser
+	tKey
+	tReference
 )
 
-type Writable int
-
+// Writable states of a catalog field.
 const (
-	wNo Writable = iota
+	wNo = iota
 	wYes
 	wInsertOnly
 )
 
+// FieldDef is one field of the catalog (TYPES: FieldDef).
 type FieldDef struct {
-	Name            string
-	Type            FieldType
-	RefKind         string // record kind, for type reference
-	Source          string // member of the API record; a.b is member b of member a
-	Heavy           bool
-	Writable        Writable
-	RequestMember   string
-	FalseWhenAbsent bool
-	UserAsName      bool
-	NoSource        bool // statuses: product of the statement
+	Name         string
+	Type         FieldType
+	RefKind      string // for reference fields
+	Source       string // member of the API record; "a.b" is member b of member a
+	Heavy        bool
+	Writable     int
+	FalseDefault bool // false when the API record has no value
+	AsName       bool // a user field that is read as a name
 }
 
+// Route is one read route of an entity.
 type Route struct {
 	Field string
-	Path  string // with one parameter {v}
+	Path  string // "{v}" is replaced by the value, "{product}" by a product id
 }
 
+// EntityDef is one entity of the catalog (TYPES: EntityDef).
 type EntityDef struct {
-	Name              string
-	Singular          string
-	OtherNames        []string
-	Kind              string
-	About             string
-	Fields            []FieldDef
-	DefaultFields     []string
-	OtherFieldNames   map[string]string
-	ReadRoutes        []Route
-	AccountList       string
-	NameSearch        bool
-	ParentFilters     []string
-	ParentKind        string // "product", a record kind, "any", or ""
-	ParentField       string
-	CanCreate         bool
-	CanUpdate         bool
-	CanDelete         bool
-	CreateRoute       string // {v} is the parent
-	UpdateRoute       string // {id}
-	DeleteRoute       string // {id} and {product}
-	CustomRecordTypes []string
-	Example           string
-	Fixed             string // products, users, statuses, me: read from a fixed source
+	Name            string
+	Singular        string
+	OtherNames      []string
+	Kind            string
+	About           string
+	Fields          []*FieldDef
+	DefaultFields   []string
+	OtherFieldNames map[string]string
+	ReadRoutes      []Route
+	FixedSource     string // products, users, statuses, me
+	AccountList     string
+	NameSearch      bool
+	ParentFilters   []string
+	ParentKind      string // product | release | feature | any | ""
+	ParentField     string // the field that INSERT takes as the parent
+	CanCreate       bool
+	CanUpdate       bool
+	CanDelete       bool
+	CreateRoute     string
+	UpdateRoute     string
+	DeleteRoute     string
+	CustomTypes     []string
+	Example         string
 }
 
-func (e *EntityDef) Field(name string) *FieldDef {
-	for i := range e.Fields {
-		if e.Fields[i].Name == name {
-			return &e.Fields[i]
+func f(name string, t FieldType, src string, w int) *FieldDef {
+	return &FieldDef{Name: name, Type: t, Source: src, Writable: w}
+}
+
+func ref(name, kind, src string, w int) *FieldDef {
+	return &FieldDef{Name: name, Type: tReference, RefKind: kind, Source: src, Writable: w}
+}
+
+func heavy(d *FieldDef) *FieldDef    { d.Heavy = true; return d }
+func falseDef(d *FieldDef) *FieldDef { d.FalseDefault = true; return d }
+func asName(d *FieldDef) *FieldDef   { d.AsName = true; return d }
+func names(s string) []string        { return strings.Split(s, ", ") }
+func means(pairs ...string) map[string]string {
+	m := map[string]string{}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		for _, w := range strings.Split(pairs[i], ", ") {
+			m[w] = pairs[i+1]
 		}
 	}
-	return nil
+	return m
 }
 
-func (e *EntityDef) HasField(name string) bool { return e.Field(name) != nil }
+// commonOtherNames is the table "Common other names for fields".
+var commonOtherNames = means(
+	"reference_num, ref_num, ref, reference, reference_number, ref_number, refnum", "id",
+	"product_id, product_key, key, project, project_id, workspace, product_name", "product",
+	"workflow_status, state", "status",
+	"title", "name",
+	"created", "created_at",
+	"updated", "updated_at",
+	"assignee, assigned_to_user, assigned_user, owner, assigned", "assigned_to",
+)
 
-// IDField is key for products, id for every other entity that has a field
-// id, and none for statuses.
-func (e *EntityDef) IDField() string {
-	if e.Name == "products" {
-		return "key"
-	}
-	if e.HasField("id") {
-		return "id"
-	}
-	return ""
-}
-
-func (e *EntityDef) HasOperation() bool { return e.CanCreate || e.CanUpdate || e.CanDelete }
-
-func (e *EntityDef) RouteFor(field string) string {
-	for _, r := range e.ReadRoutes {
-		if r.Field == field {
-			return r.Path
-		}
-	}
-	return ""
-}
-
-func (e *EntityDef) HasParentFilter(f string) bool {
-	for _, p := range e.ParentFilters {
-		if p == f {
-			return true
-		}
-	}
-	return false
-}
-
-func fd(name string, t FieldType, source string, w Writable) FieldDef {
-	return FieldDef{Name: name, Type: t, Source: source, Writable: w}
-}
-
-func ref(name, kind, source string, w Writable) FieldDef {
-	return FieldDef{Name: name, Type: ftReference, RefKind: kind, Source: source, Writable: w}
-}
-
-func heavy(f FieldDef) FieldDef { f.Heavy = true; return f }
-
-func falseAbsent(f FieldDef) FieldDef { f.FalseWhenAbsent = true; return f }
-
-func member(f FieldDef, m string) FieldDef { f.RequestMember = m; return f }
-
-func names(pairs string) map[string]string {
-	// "a b c=x; d=y": every word before = means the name after it
-	out := map[string]string{}
-	for _, part := range strings.Split(pairs, ";") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		eq := strings.LastIndex(part, "=")
-		target := strings.TrimSpace(part[eq+1:])
-		for _, w := range strings.Fields(part[:eq]) {
-			out[w] = target
-		}
-	}
-	return out
-}
-
-// commonOtherNames apply to every entity except products, when the entity
-// has the field in the right column.
-var commonOtherNames = names(`reference_num ref_num ref reference reference_number ref_number refnum=id;
-	product_id product_key key project project_id workspace product_name=product;
-	workflow_status state=status; title=name; created=created_at; updated=updated_at;
-	assignee assigned_to_user assigned_user owner assigned=assigned_to`)
-
-// productWords are the words that mean product on other entities (N03).
-var productWords = []string{"product", "product_id", "product_key", "key", "project", "project_id", "workspace", "product_name"}
-
+// catalog is the single table of entities (entity-catalog).
 var catalog = []*EntityDef{
 	{
-		Name: "products", Singular: "product", OtherNames: []string{"project", "projects", "workspace", "workspaces"},
-		Kind:          "product",
+		Name: "products", Singular: "product", OtherNames: names("project, projects, workspace, workspaces"), Kind: "product",
 		About:         "Products (workspaces). The key of a product, for example {KEY}, starts the id of its records.",
-		DefaultFields: []string{"key", "name"},
-		OtherFieldNames: names(`id reference_prefix prefix reference_num ref_num ref product product_key product_id=key;
-			parent_id=parent; title=name`),
-		Fields: []FieldDef{
-			fd("key", ftKey, "reference_prefix", wNo),
-			fd("name", ftString, "name", wNo),
-			falseAbsent(fd("product_line", ftBoolean, "product_line", wNo)),
-			fd("parent", ftKey, "parent_id", wNo),
-			fd("description", ftText, "description", wNo),
-			fd("created_at", ftDatetime, "created_at", wNo),
-			fd("url", ftString, "url", wNo),
+		DefaultFields: names("key, name"),
+		OtherFieldNames: means("id, reference_prefix, prefix, reference_num, ref_num, ref, product, product_key, product_id", "key",
+			"parent_id", "parent", "title", "name"),
+		FixedSource: "products",
+		CustomTypes: []string{"Project"},
+		Example:     "SELECT key, name FROM products",
+		Fields: []*FieldDef{
+			f("key", tKey, "reference_prefix", wNo),
+			f("name", tString, "name", wNo),
+			falseDef(f("product_line", tBoolean, "product_line", wNo)),
+			f("parent", tKey, "parent_id", wNo),
+			heavy(f("description", tText, "description", wNo)),
+			f("created_at", tDatetime, "created_at", wNo),
+			f("url", tString, "url", wNo),
 		},
-		CustomRecordTypes: []string{"Project"},
-		Example:           "SELECT key, name FROM products",
-		Fixed:             "products",
 	},
 	{
-		Name: "releases", Singular: "release", OtherNames: []string{"versions"}, Kind: "release",
+		Name: "releases", Singular: "release", OtherNames: names("versions"), Kind: "release",
 		About:           "Releases of a product. The parking lot is a release with parking_lot = true and no date.",
-		DefaultFields:   []string{"id", "name", "release_date", "parking_lot"},
-		OtherFieldNames: names(`parent parent_id=product; theme=description; date ship_date=release_date`),
+		DefaultFields:   names("id, name, release_date, parking_lot"),
+		OtherFieldNames: means("parent, parent_id", "product", "theme", "description", "date, ship_date", "release_date"),
 		ReadRoutes:      []Route{{"id", "/releases/{v}"}, {"product", "/products/{v}/releases"}},
-		ParentFilters:   []string{"product"},
-		ParentKind:      "product", ParentField: "product",
-		CanCreate: true, CanUpdate: true, CanDelete: true,
-		CreateRoute: "/products/{v}/releases", UpdateRoute: "/releases/{id}", DeleteRoute: "/products/{product}/releases/{id}",
-		CustomRecordTypes: []string{"Release"},
-		Example:           "SELECT id, name, release_date FROM releases WHERE product = '{KEY}'",
-		Fields: []FieldDef{
-			fd("id", ftString, "reference_num", wNo),
-			fd("name", ftString, "name", wYes),
-			fd("release_date", ftDate, "release_date", wYes),
-			fd("start_date", ftDate, "start_date", wYes),
-			fd("status", ftStatus, "workflow_status.name", wNo),
-			falseAbsent(fd("parking_lot", ftBoolean, "parking_lot", wYes)),
-			falseAbsent(fd("released", ftBoolean, "released", wNo)),
-			fd("product", ftKey, "product_id", wNo),
-			fd("progress", ftNumber, "progress", wNo),
-			member(heavy(fd("description", ftText, "theme", wYes)), "theme"),
-			fd("created_at", ftDatetime, "created_at", wNo),
-			fd("url", ftString, "url", wNo),
+		ParentFilters:   names("product"), ParentKind: "product", ParentField: "product",
+		CustomTypes: []string{"Release"},
+		CanCreate:   true, CreateRoute: "/products/{product}/releases",
+		CanUpdate: true, UpdateRoute: "/releases/{id}",
+		CanDelete: true, DeleteRoute: "/products/{product}/releases/{id}",
+		Example: "SELECT id, name, release_date FROM releases WHERE product = '{KEY}'",
+		Fields: []*FieldDef{
+			f("id", tString, "reference_num", wNo),
+			f("name", tString, "name", wYes),
+			f("release_date", tDate, "release_date", wYes),
+			f("start_date", tDate, "start_date", wYes),
+			f("status", tStatus, "workflow_status.name", wNo),
+			falseDef(f("parking_lot", tBoolean, "parking_lot", wYes)),
+			falseDef(f("released", tBoolean, "released", wNo)),
+			f("product", tKey, "product_id", wNo),
+			f("progress", tNumber, "progress", wNo),
+			heavy(f("description", tText, "theme", wYes)),
+			f("created_at", tDatetime, "created_at", wNo),
+			f("url", tString, "url", wNo),
 		},
 	},
 	{
 		Name: "features", Singular: "feature", Kind: "feature",
 		About:         "Features. Each feature is in one release.",
-		DefaultFields: []string{"id", "name", "status", "release"},
-		OtherFieldNames: names(`release_id release_ref release_reference_num parent parent_id=release;
-			initiative_id=initiative; epic_id=epic`),
+		DefaultFields: names("id, name, status, release"),
+		OtherFieldNames: means("release_id, release_ref, release_reference_num, parent, parent_id", "release",
+			"initiative_id", "initiative", "epic_id", "epic"),
 		ReadRoutes: []Route{{"id", "/features/{v}"}, {"release", "/releases/{v}/features"}, {"epic", "/epics/{v}/features"},
 			{"initiative", "/initiatives/{v}/features"}, {"product", "/products/{v}/features"}},
 		AccountList: "/features", NameSearch: true,
-		ParentFilters: []string{"product", "release", "initiative", "epic"},
-		ParentKind:    "release", ParentField: "release",
-		CanCreate: true, CanUpdate: true, CanDelete: true,
-		CreateRoute: "/releases/{v}/features", UpdateRoute: "/features/{id}", DeleteRoute: "/features/{id}",
-		CustomRecordTypes: []string{"Feature"},
-		Example:           "SELECT id, name, status FROM features WHERE release = '{KEY}-R-3'",
-		Fields: []FieldDef{
-			fd("id", ftString, "reference_num", wNo),
-			fd("name", ftString, "name", wYes),
-			member(fd("status", ftStatus, "workflow_status.name", wYes), "workflow_status"),
+		ParentFilters: names("product, release, initiative, epic"), ParentKind: "release", ParentField: "release",
+		CustomTypes: []string{"Feature"},
+		CanCreate:   true, CreateRoute: "/releases/{parent}/features",
+		CanUpdate: true, UpdateRoute: "/features/{id}",
+		CanDelete: true, DeleteRoute: "/features/{id}",
+		Example: "SELECT id, name, status FROM features WHERE release = '{KEY}-R-3'",
+		Fields: []*FieldDef{
+			f("id", tString, "reference_num", wNo),
+			f("name", tString, "name", wYes),
+			f("status", tStatus, "workflow_status.name", wYes),
 			ref("release", "release", "release_reference_num", wYes),
 			ref("initiative", "initiative", "initiative_reference_num", wYes),
 			ref("epic", "epic", "epic_reference_num", wNo),
-			member(fd("assigned_to", ftUser, "assigned_to_user.email", wYes), "assigned_to_user"),
-			fd("product", ftKey, "product_id", wNo),
-			fd("start_date", ftDate, "start_date", wYes),
-			fd("due_date", ftDate, "due_date", wYes),
-			fd("tags", ftString, "tags", wYes),
-			fd("score", ftNumber, "score", wNo),
-			fd("progress", ftNumber, "progress", wNo),
-			heavy(fd("description", ftText, "description", wYes)),
-			fd("created_at", ftDatetime, "created_at", wNo),
-			fd("updated_at", ftDatetime, "updated_at", wNo),
-			fd("url", ftString, "url", wNo),
+			f("assigned_to", tUser, "assigned_to_user.email", wYes),
+			f("product", tKey, "product_id", wNo),
+			f("start_date", tDate, "start_date", wYes),
+			f("due_date", tDate, "due_date", wYes),
+			f("tags", tString, "tags", wYes),
+			f("score", tNumber, "score", wNo),
+			f("progress", tNumber, "progress", wNo),
+			heavy(f("description", tText, "description", wYes)),
+			f("created_at", tDatetime, "created_at", wNo),
+			f("updated_at", tDatetime, "updated_at", wNo),
+			f("url", tString, "url", wNo),
 		},
 	},
 	{
-		Name: "epics", Singular: "epic", OtherNames: []string{"master_features"}, Kind: "epic",
+		Name: "epics", Singular: "epic", OtherNames: names("master_features"), Kind: "epic",
 		About:           "Epics. An epic is in one release and groups features.",
-		DefaultFields:   []string{"id", "name", "status", "release"},
-		OtherFieldNames: names(`release_id parent parent_id=release; initiative_id=initiative`),
+		DefaultFields:   names("id, name, status, release"),
+		OtherFieldNames: means("release_id, parent, parent_id", "release", "initiative_id", "initiative"),
 		ReadRoutes: []Route{{"id", "/epics/{v}"}, {"release", "/releases/{v}/epics"}, {"initiative", "/initiatives/{v}/epics"},
 			{"product", "/products/{v}/epics"}},
 		AccountList: "/epics", NameSearch: true,
-		ParentFilters: []string{"product", "release", "initiative"},
-		ParentKind:    "release", ParentField: "release",
-		CanCreate: true, CanUpdate: true, CanDelete: true,
-		CreateRoute: "/releases/{v}/epics", UpdateRoute: "/epics/{id}", DeleteRoute: "/epics/{id}",
-		CustomRecordTypes: []string{"Epic", "MasterFeature"},
-		Example:           "SELECT id, name, status FROM epics WHERE product = '{KEY}'",
-		Fields: []FieldDef{
-			fd("id", ftString, "reference_num", wNo),
-			fd("name", ftString, "name", wYes),
-			member(fd("status", ftStatus, "workflow_status.name", wYes), "workflow_status"),
+		ParentFilters: names("product, release, initiative"), ParentKind: "release", ParentField: "release",
+		CustomTypes: []string{"Epic", "MasterFeature"},
+		CanCreate:   true, CreateRoute: "/releases/{parent}/epics",
+		CanUpdate: true, UpdateRoute: "/epics/{id}",
+		CanDelete: true, DeleteRoute: "/epics/{id}",
+		Example: "SELECT id, name, status FROM epics WHERE product = '{KEY}'",
+		Fields: []*FieldDef{
+			f("id", tString, "reference_num", wNo),
+			f("name", tString, "name", wYes),
+			f("status", tStatus, "workflow_status.name", wYes),
 			ref("release", "release", "release.reference_num", wNo),
 			ref("initiative", "initiative", "initiative_reference_num", wYes),
-			member(fd("assigned_to", ftUser, "assigned_to_user.email", wNo), "assigned_to_user"),
-			fd("product", ftKey, "product_id", wNo),
-			fd("start_date", ftDate, "start_date", wYes),
-			fd("due_date", ftDate, "due_date", wYes),
-			fd("progress", ftNumber, "progress", wYes),
-			heavy(fd("description", ftText, "description", wYes)),
-			fd("created_at", ftDatetime, "created_at", wNo),
-			fd("updated_at", ftDatetime, "updated_at", wNo),
-			fd("url", ftString, "url", wNo),
+			f("assigned_to", tUser, "assigned_to_user.email", wNo),
+			f("product", tKey, "product_id", wNo),
+			f("start_date", tDate, "start_date", wYes),
+			f("due_date", tDate, "due_date", wYes),
+			f("progress", tNumber, "progress", wYes),
+			heavy(f("description", tText, "description", wYes)),
+			f("created_at", tDatetime, "created_at", wNo),
+			f("updated_at", tDatetime, "updated_at", wNo),
+			f("url", tString, "url", wNo),
 		},
 	},
 	{
 		Name: "requirements", Singular: "requirement", Kind: "requirement",
 		About:           "Requirements of a feature.",
-		DefaultFields:   []string{"id", "name", "status", "feature"},
-		OtherFieldNames: names(`feature_id parent parent_id=feature`),
+		DefaultFields:   names("id, name, status, feature"),
+		OtherFieldNames: means("feature_id, parent, parent_id", "feature"),
 		ReadRoutes:      []Route{{"id", "/requirements/{v}"}, {"feature", "/features/{v}/requirements"}},
-		ParentFilters:   []string{"feature"},
-		ParentKind:      "feature", ParentField: "feature",
-		CanCreate: true, CanUpdate: true, CanDelete: true,
-		CreateRoute: "/features/{v}/requirements", UpdateRoute: "/requirements/{id}", DeleteRoute: "/requirements/{id}",
-		CustomRecordTypes: []string{"Requirement"},
-		Example:           "SELECT id, name, status FROM requirements WHERE feature = '{KEY}-23'",
-		Fields: []FieldDef{
-			fd("id", ftString, "reference_num", wNo),
-			fd("name", ftString, "name", wYes),
-			member(fd("status", ftStatus, "workflow_status.name", wYes), "workflow_status"),
+		ParentFilters:   names("feature"), ParentKind: "feature", ParentField: "feature",
+		CustomTypes: []string{"Requirement"},
+		CanCreate:   true, CreateRoute: "/features/{parent}/requirements",
+		CanUpdate: true, UpdateRoute: "/requirements/{id}",
+		CanDelete: true, DeleteRoute: "/requirements/{id}",
+		Example: "SELECT id, name, status FROM requirements WHERE feature = '{KEY}-23'",
+		Fields: []*FieldDef{
+			f("id", tString, "reference_num", wNo),
+			f("name", tString, "name", wYes),
+			f("status", tStatus, "workflow_status.name", wYes),
 			ref("feature", "feature", "feature.reference_num", wNo),
-			member(fd("assigned_to", ftUser, "assigned_to_user.email", wYes), "assigned_to_user"),
-			fd("original_estimate", ftNumber, "original_estimate", wYes),
-			fd("work_done", ftNumber, "work_done", wYes),
-			heavy(fd("description", ftText, "description", wYes)),
-			fd("created_at", ftDatetime, "created_at", wNo),
-			fd("url", ftString, "url", wNo),
+			f("assigned_to", tUser, "assigned_to_user.email", wYes),
+			f("original_estimate", tNumber, "original_estimate", wYes),
+			f("work_done", tNumber, "work_done", wYes),
+			heavy(f("description", tText, "description", wYes)),
+			f("created_at", tDatetime, "created_at", wNo),
+			f("url", tString, "url", wNo),
 		},
 	},
 	{
 		Name: "initiatives", Singular: "initiative", Kind: "initiative",
 		About:           "Initiatives of a product. Features can be linked to an initiative.",
-		DefaultFields:   []string{"id", "name", "status"},
-		OtherFieldNames: names(`parent parent_id=product`),
+		DefaultFields:   names("id, name, status"),
+		OtherFieldNames: means("parent, parent_id", "product"),
 		ReadRoutes:      []Route{{"id", "/initiatives/{v}"}, {"product", "/products/{v}/initiatives"}},
 		AccountList:     "/initiatives", NameSearch: true,
-		ParentFilters: []string{"product"},
-		ParentKind:    "product", ParentField: "product",
-		CanCreate: true, CanUpdate: true, CanDelete: true,
-		CreateRoute: "/products/{v}/initiatives", UpdateRoute: "/initiatives/{id}", DeleteRoute: "/products/{product}/initiatives/{id}",
-		CustomRecordTypes: []string{"Initiative"},
-		Example:           "SELECT id, name, status FROM initiatives WHERE product = '{KEY}'",
-		Fields: []FieldDef{
-			fd("id", ftString, "reference_num", wNo),
-			fd("name", ftString, "name", wYes),
-			member(fd("status", ftStatus, "workflow_status.name", wYes), "workflow_status"),
-			fd("product", ftKey, "product_id", wNo),
-			fd("start_date", ftDate, "start_date", wYes),
-			fd("end_date", ftDate, "end_date", wYes),
-			fd("progress", ftNumber, "progress", wNo),
-			fd("value", ftNumber, "value", wYes),
-			fd("effort", ftNumber, "effort", wYes),
-			fd("color", ftString, "color", wYes),
-			fd("presented", ftBoolean, "presented", wYes),
-			heavy(fd("description", ftText, "description", wYes)),
-			fd("created_at", ftDatetime, "created_at", wNo),
-			fd("updated_at", ftDatetime, "updated_at", wNo),
-			fd("url", ftString, "url", wNo),
+		ParentFilters: names("product"), ParentKind: "product", ParentField: "product",
+		CustomTypes: []string{"Initiative"},
+		CanCreate:   true, CreateRoute: "/products/{product}/initiatives",
+		CanUpdate: true, UpdateRoute: "/initiatives/{id}",
+		CanDelete: true, DeleteRoute: "/products/{product}/initiatives/{id}",
+		Example: "SELECT id, name, status FROM initiatives WHERE product = '{KEY}'",
+		Fields: []*FieldDef{
+			f("id", tString, "reference_num", wNo),
+			f("name", tString, "name", wYes),
+			f("status", tStatus, "workflow_status.name", wYes),
+			f("product", tKey, "product_id", wNo),
+			f("start_date", tDate, "start_date", wYes),
+			f("end_date", tDate, "end_date", wYes),
+			f("progress", tNumber, "progress", wNo),
+			f("value", tNumber, "value", wYes),
+			f("effort", tNumber, "effort", wYes),
+			f("color", tString, "color", wYes),
+			f("presented", tBoolean, "presented", wYes),
+			heavy(f("description", tText, "description", wYes)),
+			f("created_at", tDatetime, "created_at", wNo),
+			f("updated_at", tDatetime, "updated_at", wNo),
+			f("url", tString, "url", wNo),
 		},
 	},
 	{
-		Name: "goals", Singular: "goal", OtherNames: []string{"strategic_imperatives"}, Kind: "goal",
+		Name: "goals", Singular: "goal", OtherNames: names("strategic_imperatives"), Kind: "goal",
 		About:           "Goals of a product. A new goal needs a success metric.",
-		DefaultFields:   []string{"id", "name"},
-		OtherFieldNames: names(`parent parent_id=product`),
+		DefaultFields:   names("id, name"),
+		OtherFieldNames: means("parent, parent_id", "product"),
 		ReadRoutes:      []Route{{"id", "/goals/{v}"}, {"product", "/products/{v}/goals"}},
 		AccountList:     "/goals", NameSearch: true,
-		ParentFilters: []string{"product"},
-		ParentKind:    "product", ParentField: "product",
-		CanCreate: true, CanUpdate: true, CanDelete: true,
-		CreateRoute: "/products/{v}/goals", UpdateRoute: "/goals/{id}", DeleteRoute: "/products/{product}/goals/{id}",
-		CustomRecordTypes: []string{"StrategicImperative", "Goal"},
-		Example:           "SELECT id, name FROM goals WHERE product = '{KEY}'",
-		Fields: []FieldDef{
-			fd("id", ftString, "reference_num", wNo),
-			fd("name", ftString, "name", wYes),
-			member(fd("success_metric", ftString, "success_metric.name", wInsertOnly), "success_metric"),
-			member(fd("status", ftStatus, "success_metric.workflow_status.name", wYes), "workflow_status"),
-			fd("product", ftKey, "product_id", wNo),
-			fd("progress", ftNumber, "progress", wYes),
-			fd("value", ftNumber, "value", wNo),
-			fd("effort", ftNumber, "effort", wNo),
-			heavy(fd("description", ftText, "description", wYes)),
-			fd("created_at", ftDatetime, "created_at", wNo),
-			fd("updated_at", ftDatetime, "updated_at", wNo),
-			fd("url", ftString, "url", wNo),
+		ParentFilters: names("product"), ParentKind: "product", ParentField: "product",
+		CustomTypes: []string{"StrategicImperative", "Goal"},
+		CanCreate:   true, CreateRoute: "/products/{product}/goals",
+		CanUpdate: true, UpdateRoute: "/goals/{id}",
+		CanDelete: true, DeleteRoute: "/products/{product}/goals/{id}",
+		Example: "SELECT id, name FROM goals WHERE product = '{KEY}'",
+		Fields: []*FieldDef{
+			f("id", tString, "reference_num", wNo),
+			f("name", tString, "name", wYes),
+			f("success_metric", tString, "success_metric.name", wInsertOnly),
+			f("status", tStatus, "success_metric.workflow_status.name", wYes),
+			f("product", tKey, "product_id", wNo),
+			f("progress", tNumber, "progress", wYes),
+			f("value", tNumber, "value", wNo),
+			f("effort", tNumber, "effort", wNo),
+			heavy(f("description", tText, "description", wYes)),
+			f("created_at", tDatetime, "created_at", wNo),
+			f("updated_at", tDatetime, "updated_at", wNo),
+			f("url", tString, "url", wNo),
 		},
 	},
 	{
 		Name: "ideas", Singular: "idea", Kind: "idea",
 		About:           "Ideas submitted for a product. feature is the feature an idea was promoted to.",
-		DefaultFields:   []string{"id", "name", "status", "votes"},
-		OtherFieldNames: names(`parent parent_id=product; votes_count=votes; feature_id=feature`),
+		DefaultFields:   names("id, name, status, votes"),
+		OtherFieldNames: means("parent, parent_id", "product", "votes_count", "votes", "feature_id", "feature"),
 		ReadRoutes:      []Route{{"id", "/ideas/{v}"}, {"product", "/products/{v}/ideas"}},
 		AccountList:     "/ideas", NameSearch: true,
-		ParentFilters: []string{"product"},
-		ParentKind:    "product", ParentField: "product",
-		CanCreate: true, CanUpdate: true, CanDelete: true,
-		CreateRoute: "/products/{v}/ideas", UpdateRoute: "/ideas/{id}", DeleteRoute: "/ideas/{id}",
-		CustomRecordTypes: []string{"Idea"},
-		Example:           "SELECT id, name, votes FROM ideas WHERE product = '{KEY}' ORDER BY votes DESC LIMIT 5",
-		Fields: []FieldDef{
-			fd("id", ftString, "reference_num", wNo),
-			fd("name", ftString, "name", wYes),
-			member(fd("status", ftStatus, "workflow_status.name", wYes), "workflow_status"),
-			fd("votes", ftNumber, "votes", wNo),
-			fd("product", ftKey, "product_id", wNo),
+		ParentFilters: names("product"), ParentKind: "product", ParentField: "product",
+		CustomTypes: []string{"Idea"},
+		CanCreate:   true, CreateRoute: "/products/{product}/ideas",
+		CanUpdate: true, UpdateRoute: "/ideas/{id}",
+		CanDelete: true, DeleteRoute: "/ideas/{id}",
+		Example: "SELECT id, name, votes FROM ideas WHERE product = '{KEY}' ORDER BY votes DESC LIMIT 5",
+		Fields: []*FieldDef{
+			f("id", tString, "reference_num", wNo),
+			f("name", tString, "name", wYes),
+			f("status", tStatus, "workflow_status.name", wYes),
+			f("votes", tNumber, "votes", wNo),
+			f("product", tKey, "product_id", wNo),
 			ref("feature", "feature", "feature.reference_num", wNo),
-			fd("visibility", ftString, "visibility", wYes),
-			heavy(fd("description", ftText, "description", wYes)),
-			fd("created_at", ftDatetime, "created_at", wNo),
-			fd("updated_at", ftDatetime, "updated_at", wNo),
-			fd("url", ftString, "url", wNo),
+			f("visibility", tString, "visibility", wYes),
+			heavy(f("description", tText, "description", wYes)),
+			f("created_at", tDatetime, "created_at", wNo),
+			f("updated_at", tDatetime, "updated_at", wNo),
+			f("url", tString, "url", wNo),
 		},
 	},
 	{
 		Name: "comments", Singular: "comment", Kind: "comment",
 		About:         "Comments on a record. parent is the id of the commented record.",
-		DefaultFields: []string{"id", "body", "user", "parent", "created_at"},
-		OtherFieldNames: names(`content text comment message description=body; author created_by author_name user_name=user;
-			feature feature_id epic epic_id idea idea_id release release_id initiative initiative_id goal goal_id
-			requirement requirement_id record record_id parent_id commentable product product_id product_key=parent`),
+		DefaultFields: names("id, body, user, parent, created_at"),
+		OtherFieldNames: means("content, text, comment, message, description", "body",
+			"author, created_by, author_name, user_name", "user",
+			"feature, feature_id, epic, epic_id, idea, idea_id, release, release_id, initiative, initiative_id, goal, goal_id, requirement, requirement_id, record, record_id, parent_id, commentable, product, product_id, product_key", "parent"),
 		ReadRoutes:    []Route{{"id", "/comments/{v}"}, {"parent", ""}},
-		ParentFilters: []string{"parent"},
-		ParentKind:    "any", ParentField: "parent",
-		CanCreate: true, CanUpdate: true, CanDelete: true,
-		UpdateRoute: "/comments/{id}", DeleteRoute: "/comments/{id}",
+		ParentFilters: names("parent"), ParentKind: "any", ParentField: "parent",
+		CanCreate: true, CreateRoute: "",
+		CanUpdate: true, UpdateRoute: "/comments/{id}",
+		CanDelete: true, DeleteRoute: "/comments/{id}",
 		Example: "SELECT body, user, created_at FROM comments WHERE parent = '{KEY}-23'",
-		Fields: []FieldDef{
-			fd("id", ftString, "id", wNo),
-			fd("body", ftText, "body", wYes),
-			{Name: "user", Type: ftUser, Source: "user.name", UserAsName: true},
-			fd("parent", ftString, "commentable.url", wNo),
-			fd("created_at", ftDatetime, "created_at", wNo),
-			fd("url", ftString, "url", wNo),
+		Fields: []*FieldDef{
+			f("id", tString, "id", wNo),
+			f("body", tText, "body", wYes),
+			asName(f("user", tUser, "user.name", wNo)),
+			f("parent", tString, "commentable.url", wNo),
+			f("created_at", tDatetime, "created_at", wNo),
+			f("url", tString, "url", wNo),
 		},
 	},
 	{
 		Name: "users", Singular: "user", Kind: "user",
 		About:           "Users of the account. For the user you are working as, use: SELECT name, email FROM me",
-		DefaultFields:   []string{"id", "name", "email"},
-		OtherFieldNames: names(`mail e_mail=email; user_id=id`),
+		DefaultFields:   names("id, name, email"),
+		OtherFieldNames: means("mail, e_mail", "email", "user_id", "id"),
+		FixedSource:     "users",
 		Example:         "SELECT name, email FROM users",
-		Fixed:           "users",
-		Fields: []FieldDef{
-			fd("id", ftString, "id", wNo),
-			fd("name", ftString, "name", wNo),
-			fd("email", ftString, "email", wNo),
-			fd("created_at", ftDatetime, "created_at", wNo),
+		Fields: []*FieldDef{
+			f("id", tString, "id", wNo),
+			f("name", tString, "name", wNo),
+			f("email", tString, "email", wNo),
+			f("created_at", tDatetime, "created_at", wNo),
 		},
 	},
 	{
-		Name: "statuses", Singular: "status", OtherNames: []string{"workflow_statuses", "workflows", "workflow"},
+		Name: "statuses", Singular: "status", OtherNames: names("workflow_statuses, workflows, workflow"),
 		About:           "The workflow statuses a record can have, per product and entity.",
-		DefaultFields:   []string{"name", "entity"},
-		OtherFieldNames: names(`status id title=name; type entity_type kind=entity`),
-		ParentFilters:   []string{"product", "entity"},
+		DefaultFields:   names("name, entity"),
+		OtherFieldNames: means("status, id, title", "name", "type, entity_type, kind", "entity"),
+		FixedSource:     "statuses",
+		ParentFilters:   names("product, entity"),
 		Example:         "SELECT name FROM statuses WHERE product = '{KEY}' AND entity = 'features'",
-		Fixed:           "statuses",
-		Fields: []FieldDef{
-			fd("name", ftString, "name", wNo),
-			fd("entity", ftString, "entity", wNo),
-			fd("position", ftNumber, "position", wNo),
-			falseAbsent(fd("complete", ftBoolean, "complete", wNo)),
-			{Name: "product", Type: ftKey, NoSource: true},
+		Fields: []*FieldDef{
+			f("name", tString, "name", wNo),
+			f("entity", tString, "", wNo),
+			f("position", tNumber, "position", wNo),
+			falseDef(f("complete", tBoolean, "complete", wNo)),
+			f("product", tKey, "", wNo),
 		},
 	},
 	{
-		Name: "me", Singular: "me", OtherNames: []string{"current_user", "myself", "whoami"},
+		Name: "me", Singular: "me", OtherNames: names("current_user, myself, whoami"),
 		About:           "The user you are working as. One record.",
-		DefaultFields:   []string{"name", "email"},
-		OtherFieldNames: names(`mail=email; user=name; user_id=id`),
+		DefaultFields:   names("name, email"),
+		OtherFieldNames: means("mail", "email", "user", "name", "user_id", "id"),
+		FixedSource:     "me",
 		Example:         "SELECT name, email FROM me",
-		Fixed:           "me",
-		Fields: []FieldDef{
-			fd("id", ftString, "id", wNo),
-			fd("name", ftString, "name", wNo),
-			fd("email", ftString, "email", wNo),
+		Fields: []*FieldDef{
+			f("id", tString, "id", wNo),
+			f("name", tString, "name", wNo),
+			f("email", tString, "email", wNo),
 		},
 	},
 }
 
-// statusWorkflowMembers: the member of a product record that names the
-// workflow of a record kind, and the value of the field entity.
-var statusWorkflowMembers = []struct{ Member, Entity string }{
+// workflowMembers is the table of members of a product that name a
+// workflow, in the order of the entity statuses.
+var workflowMembers = []struct{ member, entity string }{
 	{"release_workflow", "releases"},
 	{"feature_workflow", "features"},
 	{"epic_workflow", "epics"},
@@ -474,6 +420,7 @@ func entityByName(name string) *EntityDef {
 	return nil
 }
 
+// entityOfKind gives the entity whose records have the kind.
 func entityOfKind(kind string) *EntityDef {
 	for _, e := range catalog {
 		if e.Kind == kind {
@@ -481,6 +428,47 @@ func entityOfKind(kind string) *EntityDef {
 		}
 	}
 	return nil
+}
+
+func (e *EntityDef) field(name string) *FieldDef {
+	for _, fd := range e.Fields {
+		if fd.Name == name {
+			return fd
+		}
+	}
+	return nil
+}
+
+// idField is "key" for products, "id" for every other entity that has a
+// field id, and "" for statuses.
+func (e *EntityDef) idField() string {
+	if e.Name == "products" {
+		return "key"
+	}
+	if e.field("id") != nil {
+		return "id"
+	}
+	return ""
+}
+
+func (e *EntityDef) hasOps() bool { return e.CanCreate || e.CanUpdate || e.CanDelete }
+
+func (e *EntityDef) route(field string) (Route, bool) {
+	for _, r := range e.ReadRoutes {
+		if r.Field == field {
+			return r, true
+		}
+	}
+	return Route{}, false
+}
+
+func (e *EntityDef) hasParentFilter(name string) bool {
+	for _, p := range e.ParentFilters {
+		if p == name {
+			return true
+		}
+	}
+	return false
 }
 
 func entityNames() []string {
@@ -491,15 +479,73 @@ func entityNames() []string {
 	return out
 }
 
-// commentRoute is the comment list of a record of the given kind.
-func commentRoute(kind string) string {
-	switch kind {
-	case "feature", "release", "epic", "idea", "initiative", "goal", "requirement":
-		return "/" + entityOfKind(kind).Name + "/{v}/comments"
-	case "product":
-		return "/products/{v}/comments"
+func fieldNames(e *EntityDef) []string {
+	var out []string
+	for _, fd := range e.Fields {
+		out = append(out, fd.Name)
 	}
-	return ""
+	return out
 }
 
-var commentableKinds = map[string]bool{"feature": true, "epic": true, "idea": true, "release": true, "initiative": true, "goal": true, "requirement": true}
+// writableList is <writable list> of error-messages.
+func writableList(e *EntityDef) string {
+	var out []string
+	for _, fd := range e.Fields {
+		switch fd.Writable {
+		case wYes:
+			out = append(out, fd.Name)
+		case wInsertOnly:
+			out = append(out, fd.Name+" (INSERT only)")
+		}
+	}
+	return strings.Join(out, ", ")
+}
+
+func changeableList() string {
+	var out []string
+	for _, e := range catalog {
+		if e.hasOps() {
+			out = append(out, e.Name)
+		}
+	}
+	return strings.Join(out, ", ")
+}
+
+// routeFields gives the fields of the read routes other than id, joined.
+func routeFields(e *EntityDef) []string {
+	var out []string
+	for _, r := range e.ReadRoutes {
+		if r.Field != "id" {
+			out = append(out, r.Field)
+		}
+	}
+	return out
+}
+
+// sourceMembers gives the top-level members of the API sources of the
+// fields that a list request names (MECHANISM of plan-fetch, step 8).
+func sourceMembers(e *EntityDef, used map[string]bool, custom bool) string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(s string) {
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	for _, fd := range e.Fields {
+		if fd.Heavy && !used[fd.Name] {
+			continue
+		}
+		src := fd.Source
+		if i := strings.Index(src, "."); i >= 0 {
+			src = src[:i]
+		}
+		add(src)
+	}
+	if custom {
+		add("custom_fields")
+	}
+	return strings.Join(out, ",")
+}

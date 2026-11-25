@@ -1,12 +1,11 @@
 #!/usr/bin/make -f
-# generated from spec: aha-aql.spec.md sha256:9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262
+# generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
 
-export CGO_ENABLED=0
-export GOFLAGS=-mod=vendor
-export GOCACHE=$(CURDIR)/debian/.gocache
-export DH_GOLANG_INSTALL_ALL=1
-
-PKG := debian/mcp-server-aha-aql
+export CGO_ENABLED = 0
+export GOFLAGS = -mod=vendor
+export GOCACHE = $(CURDIR)/debian/.gocache
+export HOME = $(CURDIR)/debian/.home
+VERSION := $(shell dpkg-parsechangelog -S Version | sed "s/-[^-]*$$//")
 
 %:
 	dh $@
@@ -15,16 +14,16 @@ override_dh_auto_configure:
 
 override_dh_auto_build:
 	pandoc mcp-server-aha-aql.1.md -s -t man -o mcp-server-aha-aql.1
-	go build -trimpath -ldflags="-X main.serverVersion=0.13.0" -o mcp-server-aha-aql .
+	go build -trimpath -ldflags="-X main.serverVersion=$(VERSION)" -o mcp-server-aha-aql .
 
 override_dh_auto_test:
-	go test -count=1 -timeout 15m ./independent_tests/...
+	go vet ./...
+	go test -count=1 -timeout 20m ./independent_tests/...
 
 override_dh_auto_install:
-	install -D -m 0755 mcp-server-aha-aql $(PKG)/usr/bin/mcp-server-aha-aql
-	install -D -m 0644 mcp-server-aha-aql.1 $(PKG)/usr/share/man/man1/mcp-server-aha-aql.1
-	install -D -m 0644 mcp-server-aha-aql.service $(PKG)/usr/lib/systemd/system/mcp-server-aha-aql.service
+	install -D -m 0755 mcp-server-aha-aql debian/mcp-server-aha-aql/usr/bin/mcp-server-aha-aql
+	install -D -m 0644 mcp-server-aha-aql.1 debian/mcp-server-aha-aql/usr/share/man/man1/mcp-server-aha-aql.1
+	install -D -m 0644 mcp-server-aha-aql.service debian/mcp-server-aha-aql/usr/lib/systemd/system/mcp-server-aha-aql.service
 
 override_dh_auto_clean:
-	rm -f mcp-server-aha-aql mcp-server-aha-aql.1
-	rm -rf debian/.gocache
+	rm -rf mcp-server-aha-aql debian/.gocache debian/.home

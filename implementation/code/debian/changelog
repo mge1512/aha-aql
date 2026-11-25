@@ -1,6 +1,6 @@
-mcp-server-aha-aql (0.13.0-1) unstable; urgency=medium
+mcp-server-aha-aql (0.20.1-1) unstable; urgency=medium
 
-  * Translation of the specification aha-aql 0.13.0
-    (spec sha256 9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262).
+  * Translation of the specification aha-aql 0.20.1
+    (spec sha256 b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30).
 
- -- Matthias G. Eckermann <mge@mailbox.org>  Tue, 24 Nov 2026 12:00:00 +0000
+ -- Matthias G. Eckermann <mge@mailbox.org>  Wed, 25 Nov 2026 08:00:00 +0000

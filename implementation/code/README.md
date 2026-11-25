@@ -1,59 +1,66 @@
-<!-- generated from spec: aha-aql.spec.md sha256:9f8c797a0d3d12f04a911db2be76d267e525060106645483faab751b2e587262 -->
-<!-- variant: us -->
+<!-- generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30 -->
 
 # mcp-server-aha-aql
 
-mcp-server-aha-aql is a small MCP (Model Context Protocol) server for the
-Aha! product management service. A language model works with Aha! through
-one query language, AQL (Aha Query Language), and two tools:
+mcp-server-aha-aql is an MCP server for the Aha! product management service.
+MCP (Model Context Protocol) is the protocol that a language model host uses
+to call tools. A language model works with Aha! through one query language,
+AQL (Aha Query Language), and two tools:
 
-- `query` reads with one `SELECT` or `DESCRIBE` statement.
-- `execute` changes one record with one `INSERT`, `UPDATE` or `DELETE`
-  statement.
+- `query` reads records.
+- `execute` creates, changes or deletes one record.
 
-The same two tools can also be called from a shell (manual mode). The
-server calls the Aha! REST API, version 1, directly. It has no OAuth flow:
-the credential is an Aha! API key, or an OAuth2 access token that was
-obtained in another way.
+You can also call the two tools from a shell, without a language model.
 
-AQL comes from the open source project aha-studio. This server implements a
-dialect of AQL and shares no code with aha-studio. The dialect differs from
-the original in four points:
-
-- `id` is the reference number of a record.
-- `=` on a name is equality.
-- A statement reads one entity.
-- A write statement changes one record, and it finds that record by its id.
+The server calls the Aha! REST API, version 1, at
+`https://<subdomain>.aha.io/api/v1`. It sends requests to no other host. The
+only other host that it connects to is an HTTPS proxy from the environment.
 
 ## Installation
 
-The packages are built on the Open Build Service (OBS). There is no
-installation with curl.
+The server is one static binary. Packages are built on the Open Build
+Service (OBS). There is no installation with `curl`.
+
+On openSUSE and SUSE Linux Enterprise:
 
 ```
-zypper install mcp-server-aha-aql      # openSUSE, SUSE Linux Enterprise
-dnf install mcp-server-aha-aql         # Fedora
-apt install mcp-server-aha-aql         # Debian, Ubuntu
+sudo zypper install mcp-server-aha-aql
 ```
 
-The package installs the binary `/usr/bin/mcp-server-aha-aql`, the man page
-`mcp-server-aha-aql(1)` and the systemd unit `mcp-server-aha-aql.service`
-for the http mode.
-
-To build from source (Go 1.24 or later, no network access needed, because
-the dependencies are in `vendor/`):
+On Fedora:
 
 ```
-make build        # the binary ./mcp-server-aha-aql
-make test         # the test suite in independent_tests/
-make man          # the man page from mcp-server-aha-aql.1.md (needs pandoc)
-make install DESTDIR=/tmp/root
+sudo dnf install mcp-server-aha-aql
 ```
 
-A container image is built from the `Containerfile`. It starts the http
-mode on port 8080.
+On Debian and Ubuntu:
+
+```
+sudo apt install mcp-server-aha-aql
+```
+
+To build from source, you need Go 1.25.5 or later and `pandoc`:
+
+```
+make build
+make man
+make test
+sudo make install
+```
+
+`make build` runs `go mod vendor` the first time. A package build uses the
+vendor tarball (`make vendor-tarball`) and needs no network.
 
 ## Invocation
+
+The first word of the command line selects the mode.
+
+| Word | Effect |
+|---|---|
+| `stdio` | MCP on standard input and standard output |
+| `http` | MCP on HTTP, endpoint `/mcp` |
+| `query` | One call of the tool `query`, then the program ends |
+| `execute` | One call of the tool `execute`, then the program ends |
 
 ```
 mcp-server-aha-aql stdio   [subdomain=NAME] [api-key-file=PATH] [default-product=PRODUCT] [read-only=true]
@@ -63,23 +70,17 @@ mcp-server-aha-aql execute statement=STATEMENT [dry-run=true] [subdomain=NAME] [
 mcp-server-aha-aql --version
 ```
 
-The first word selects the mode:
+An unknown first word gets this message, and the exit code is 2:
 
-| Word | Mode |
-|---|---|
-| `stdio` | MCP over standard input and standard output. An MCP host starts the server as a subprocess |
-| `http` | MCP over HTTP (Streamable HTTP) on the endpoint `/mcp`. The default address is `127.0.0.1:8080`; `listen=HOST:PORT` changes it |
-| `query` | Manual mode: one call of the tool `query`, then the process ends |
-| `execute` | Manual mode: one call of the tool `execute`, then the process ends |
-
-Any other first word gets the message
-`error: unknown transport '<word>'. Valid: stdio, http, query, execute`
-and the exit code 2.
+```
+error: unknown transport 'websocket'. Valid: stdio, http, query, execute
+```
 
 ### stdio mode
 
-An example for an MCP host configuration (here the host kit), with the
-credential in a file that only the user can read:
+An MCP host starts the server as a subprocess. The host gives the settings
+as arguments or as environment variables. An example for a host
+configuration, with the credential in a file that only you can read:
 
 ```yaml
 mcpServers:
@@ -88,63 +89,38 @@ mcpServers:
     command: ["mcp-server-aha-aql", "stdio", "subdomain=mycompany", "api-key-file=/home/me/.config/aha/api-key", "default-product=DEMO"]
 ```
 
-The same with the credential in the environment of the server process:
-
-```yaml
-mcpServers:
-  aha:
-    type: local
-    command: ["mcp-server-aha-aql", "stdio", "default-product=DEMO"]
-    environment:
-      AHA_SUBDOMAIN: mycompany
-      AHA_API_KEY: "<the API key>"
-```
-
-With the second form the configuration file of the host contains a secret.
-Protect that file as you would protect a key file.
-
-The key file must be readable by its owner only. Run `chmod 600` on it;
-otherwise the server does not start.
+The key file must not be readable by the group or by other users. If it is,
+the server does not start. Run `chmod 600` on the file.
 
 ### http mode
-
-The server starts without a credential:
 
 ```
 mcp-server-aha-aql http listen=127.0.0.1:8080 subdomain=mycompany
 ```
 
-Every MCP client sends its own credential in the header `Aha-Api-Key` with
-each request. Without the option `subdomain` (and without `AHA_SUBDOMAIN`)
-the client also sends the header `Aha-Subdomain`. The server keeps neither
-the credential nor any data that it read from Aha! after a request is
-answered.
+The default listen address is `127.0.0.1:8080`. In http mode the server has
+no credential of its own. Every HTTP request must have these headers:
 
-The server refuses a request before any MCP method runs:
-
-| Status | Case |
+| Header | Content |
 |---|---|
-| 403 | The request has an `Origin` header (a request from a web page) |
-| 400 | No `Aha-Api-Key` header, or a value of the wrong form |
-| 400 | An `Aha-Subdomain` header of the wrong form |
-| 403 | An `Aha-Subdomain` other than the subdomain of the server |
-| 400 | No subdomain in the settings and no `Aha-Subdomain` header |
+| `Aha-Api-Key` | The Aha! API key (or an OAuth2 access token) for this request |
+| `Aha-Subdomain` | The account name. Optional when the server has the setting subdomain |
 
-The body is a JSON-RPC error with the id `null` and the code `-32600`.
+The server refuses a request:
 
-The http transport speaks plain HTTP. On an address that is not a loopback
-address, put a TLS endpoint in front of the server, because every request
-carries a credential. The server writes a warning when `listen` is not a
-loopback address.
+- with status 403 when it has an `Origin` header (a request from a web page),
+- with status 400 when the credential is missing,
+- with status 400 when there is no account name, or the account name has the wrong form,
+- with status 403 when the account name is not the account of the server.
 
-The systemd unit of the package runs
-`/usr/bin/mcp-server-aha-aql http listen=127.0.0.1:8080`. To add a
-subdomain, override `ExecStart` with `systemctl edit mcp-server-aha-aql`.
+The http transport speaks plain HTTP. If the listen address is not a
+loopback address, put a TLS endpoint in front of the server. The server then
+writes a warning. The package has the systemd unit
+`mcp-server-aha-aql.service` for this mode.
 
 ### Manual mode
 
-The statement goes in double quotes, because AQL writes text in single
-quotes:
+The statement is in double quotes, because AQL writes text in single quotes:
 
 ```
 mcp-server-aha-aql query query="SELECT id, name, status FROM features WHERE release = 'DEMO-R-3'"
@@ -152,21 +128,25 @@ mcp-server-aha-aql query query=- < statement.aql
 mcp-server-aha-aql execute dry-run=true statement="UPDATE features SET status = 'Shipped' WHERE id = 'DEMO-23'"
 ```
 
-With `query=-` or `statement=-` the statement is read from standard input.
-The tool result goes to standard output as one line of JSON. An error goes
-to standard error as one line that starts with `error: `.
+With `query=-` or `statement=-` the server reads the statement from standard
+input. With `dry-run=true` the tool `execute` checks the statement
+completely and sends no write request.
 
-With `dry-run=true` the command `execute` checks the statement completely
-(the form, the names, the id, the guards and the values). It sends read
-requests for these checks and no write request, and it shows what the
-statement would do.
+The tool result goes to standard output. An error goes to standard error as
+one line that starts with `error: `.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | The tool returned a result. In stdio and http mode: the server ended normally |
+| 1 | The statement failed. In http mode: the listen address cannot be bound |
+| 2 | The command line or the configuration is wrong |
 
 ## Tools
 
 ### query
 
-Reads from Aha! with one AQL statement. Its only parameter is `query`
-(text, required): one AQL statement. It is marked as a tool that only reads.
+Reads from Aha! with one AQL statement. It has one parameter, `query`. It
+only reads (annotation readOnlyHint).
 
 ```
 SELECT fields FROM entity [WHERE field = 'value' [AND ...]] [GROUP BY field] [ORDER BY field [DESC]] [LIMIT n]
@@ -175,29 +155,27 @@ DESCRIBE entity
 
 Entities: products, releases, features, epics, requirements, initiatives,
 goals, ideas, comments, users, statuses, me. `DESCRIBE entity` lists the
-fields of an entity, including the custom fields of the account, which are
-written `custom.key`.
+fields of an entity, also the custom fields of your account. Custom fields
+are written `custom.key`.
 
 Examples:
 
 ```
 SELECT id, name, status FROM features WHERE release = 'DEMO-R-3'
 SELECT status, COUNT(*) FROM features WHERE product = 'DEMO' GROUP BY status
-SELECT id, name, release_date FROM releases WHERE product = 'DEMO' AND parking_lot = false ORDER BY release_date
 SELECT name FROM statuses WHERE product = 'DEMO' AND entity = 'features'
 SELECT email FROM me
 ```
 
-The result is a JSON object with the members `entity`, `scope`, `count`,
-`total` (when rows were cut), `truncated` (when the cut was not asked for),
-`records` and `note`. One call returns at most 200 rows, and 50 rows
-without `LIMIT`.
+A result is a JSON object with `entity`, `scope`, `count`, `total` (when
+rows were cut), `truncated` (when the cut was not asked for), `records` and
+`note`. A read returns at most 200 rows, and 50 without a LIMIT.
 
 ### execute
 
-Changes ONE record in Aha! with one AQL statement. Its only parameter is
-`statement` (text, required). It is marked as a tool that changes data and
-can delete. The tool is not offered when the setting read_only is true.
+Changes ONE record in Aha! with one AQL statement. It has one parameter,
+`statement`. It can delete data (annotation destructiveHint). With
+`read-only=true` the server does not offer this tool.
 
 ```
 INSERT INTO entity (parent, field, ...) VALUES ('parent id', 'value', ...)
@@ -205,77 +183,70 @@ UPDATE entity SET field = 'value', ... WHERE id = 'id'
 DELETE FROM entity WHERE id = 'id'
 ```
 
-`parent` is the record that the new one belongs to: a release for features
-and epics, a product for releases, initiatives, goals and ideas, a feature
-for requirements, and any record for comments. Further conditions after
-`WHERE id = '...'` are guards: when one of them is not true for the record,
-nothing is changed. Custom fields are set with `UPDATE` only.
+A condition after `WHERE id = '...'` is a guard: `AND status = 'In design'`.
+If a guard is not true, nothing is changed. Custom fields are set with
+UPDATE only.
 
-In stdio mode and in http mode every call of `execute` writes one log line
-to standard error:
+In stdio and http mode, every call of `execute` writes one log line to
+standard error:
 
 ```
-2026-11-13T09:30:00Z execute account=example op=update entity=features id=DEMO-1 result=ok
+2026-11-25T08:00:00Z execute account=mycompany op=update entity=features id=DEMO-1 result=ok
 ```
 
-The line has no field value, no text of the statement and no credential.
+The line has no value of a field, no text of the statement and no
+credential.
 
-A statement that fails is a normal tool result that is marked as an error
-(`isError`), with the message as its only text. Protocol errors and
-internal errors of the server are JSON-RPC error responses.
+A statement that fails is a normal tool result. The result is marked as an
+error (`isError`), and its text tells the language model what to write
+instead. Protocol errors are JSON-RPC errors.
 
 ## Configuration
 
-Options (key=value arguments):
+Every setting has an option. Some settings also have an environment
+variable. An option takes precedence over its variable.
 
-| Key | Value | Accepted for | Variable | Default |
-|---|---|---|---|---|
-| `subdomain` | The account name: the part of the address before `.aha.io` | stdio, http, query, execute | `AHA_SUBDOMAIN` | none |
-| `api-key-file` | The path of a file that contains the credential | stdio, query, execute | none; without the option the credential comes from `AHA_API_KEY` | none |
-| `default-product` | The key, the numeric id or the name of a product. Examples show it | stdio, http, query, execute | `AHA_DEFAULT_PRODUCT` | none |
-| `read-only` | `true` or `false`. With `true` the tool `execute` is not offered | stdio, http, query, execute | `AHA_READ_ONLY` | `false` |
-| `listen` | host:port for the http transport | http | none | `127.0.0.1:8080` |
-| `dry-run` | `true` or `false`, see manual mode | execute | none | `false` |
-| `query` | One read statement or describe statement, or `-` | query | none | required |
-| `statement` | One write statement, or `-` | execute | none | required |
+| Option | Variable | Value | Default |
+|---|---|---|---|
+| `subdomain` | `AHA_SUBDOMAIN` | The account name before `.aha.io` | none |
+| `api-key-file` | none | The path of a file with the credential (not in http mode) | none |
+| `default-product` | `AHA_DEFAULT_PRODUCT` | Key, numeric id or name of a product; examples use its key | none |
+| `read-only` | `AHA_READ_ONLY` | `true` or `false`. With `true` the tool `execute` is not offered | `false` |
+| `listen` | none | `host:port` for http mode | `127.0.0.1:8080` |
+| `dry-run` | none | `true` or `false`, word `execute` only | `false` |
+| `query` | none | The statement for the word `query`, or `-` | required |
+| `statement` | none | The statement for the word `execute`, or `-` | required |
 
-An option takes precedence over its environment variable, and the key file
-over `AHA_API_KEY`. No option takes the credential itself, because other
-users of the same system can see the arguments of a process.
+The credential comes from the key file. Without the option `api-key-file`,
+it comes from the variable `AHA_API_KEY` (stdio mode and manual mode only).
+No option takes the credential itself, because other users of the system can
+see the arguments of a process.
 
-Environment variables. The server reads these variables and no other:
+The server reads these environment variables and no others:
 
 | Variable | Use |
 |---|---|
-| `AHA_SUBDOMAIN` | The setting subdomain, when the option is absent |
-| `AHA_API_KEY` | The credential in stdio mode and manual mode, when the option `api-key-file` is absent. It is not read in http mode |
-| `AHA_DEFAULT_PRODUCT` | The setting default_product, when the option is absent |
-| `AHA_READ_ONLY` | The setting read_only, when the option is absent |
-| `HTTPS_PROXY`, `https_proxy` | The proxy for the connection to Aha! (HTTP CONNECT tunnel) |
-| `NO_PROXY`, `no_proxy` | The hosts that are reached without the proxy |
-| `SSL_CERT_FILE`, `SSL_CERT_DIR` | The trust store, on Linux |
+| `AHA_SUBDOMAIN` | The setting subdomain |
+| `AHA_API_KEY` | The credential in stdio mode and manual mode |
+| `AHA_DEFAULT_PRODUCT` | The setting default_product |
+| `AHA_READ_ONLY` | The setting read_only |
+| `HTTPS_PROXY`, `https_proxy` | The proxy for the connection to Aha! (read by the Go standard library) |
+| `NO_PROXY`, `no_proxy` | Hosts that are reached without the proxy (read by the Go standard library) |
+| `SSL_CERT_FILE`, `SSL_CERT_DIR` | The trust store on Linux (read by the Go standard library) |
 
-In a sandbox that gives a process its credentials as environment variables,
-the server needs no key file and no option. When the proxy of the sandbox
-ends the TLS connection itself, its certificate authority must be in the
-trust store, for example through `SSL_CERT_FILE`. The certificate check
-cannot be turned off.
+The server always checks the certificate of `<subdomain>.aha.io`, also inside
+the tunnel of a proxy. If a proxy ends the TLS connection itself, put the
+certificate authority of the proxy into the trust store, for example with
+`SSL_CERT_FILE`. No setting turns the check off.
 
-## Exit codes
+## Container image
 
-| Code | Meaning |
-|---|---|
-| 0 | Manual mode: the tool returned a result. stdio and http: the server ended normally (end of input, SIGTERM or SIGINT) |
-| 1 | Manual mode: the statement failed. http: the listen address cannot be bound |
-| 2 | The command line or the configuration is wrong |
-
-## External services
-
-| Service | Address | Use |
-|---|---|---|
-| Aha! REST API, version 1 | `https://<subdomain>.aha.io/api/v1`, port 443 | Every read and every write. The server sends requests to no other host and follows no redirect |
-| HTTPS proxy, only when the environment names one | The address in `HTTPS_PROXY` | The tunnel to Aha! |
+The `Containerfile` builds an image `FROM scratch`. The image has the
+certificate authorities of its build as its trust store. The server in the
+image runs in http mode on `127.0.0.1:8080`. To publish the port of the
+container, set `listen=0.0.0.0:8080` in the command, and put a TLS endpoint in
+front of the server.
 
 ## License
 
-MIT. See the file `LICENSE` and https://opensource.org/license/mit.
+MIT. See the file `LICENSE`.
