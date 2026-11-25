@@ -1,8 +1,9 @@
+- A row has each label once. A select item that has the label and the content of an earlier item is left out. The content of an item is its field, or its function with its argument: `SELECT id, id` is read as `SELECT id`, and `COUNT(1)` after `COUNT(*)` is left out. Labels are compared as they are written: `id` and `ID` are two labels. A field that GROUP BY names a second time, in any spelling, is left out in the same way.
 # aha-aql
 
 ## META
 Deployment:   mcp-server
-Version:      0.17.0
+Version:      0.18.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -994,12 +995,13 @@ STEPS:
 1. Replace a Star item by fields. They are catalog fields. Custom fields come to a Star item only in step 6 a, for one record that the statement selects by its id field.
    a. When the WHERE condition has a conjunct that compares the id field of the entity with `=`: all fields of the entity.
    b. Otherwise: the default fields of the entity, followed by the other fields that the statement selects by name. Add note H01. Here a custom field is in the result only when the statement names it.
+   c. After the replacement, a field item that has the label and the field of an earlier item is left out, as parse-statement says for two equal items: `SELECT *, name` shows `name` once.
 2. Collect the used fields: the fields of the select items, of the WHERE condition, of GROUP BY and of ORDER BY. Custom fields are among them.
 3. Run plan-fetch with the statement and the used fields; on failure → the error of plan-fetch. plan-fetch returns the API records, the scope and the applied conjuncts. It also returns the total of a list that was not read to its end, and the mark that page 1 was read for a count only.
 4. Run convert-record for every API record, with the custom fields among the used fields.
 5. Keep each record for which evaluate-condition is true for the WHERE condition. A conjunct that the route has applied counts as true.
 6. Run build-rows with the kept records, the star custom fields, and the total and the count-only mark of plan-fetch. It returns the rows, count, total and truncated.
-   a. Star custom fields. There are some only when all of this is true: step 1 a applied, the statement has no aggregate item and no GROUP BY, and one record is kept. Then run custom-fields for the entity without a key; on failure → the error of custom-fields. The star custom fields are the custom fields of its result that the statement does not select by name. Their values are taken as step 4 of convert-record says, from the API record that step b names.
+   a. Star custom fields. There are some only when all of this is true: step 1 a applied, the statement has no aggregate item and no GROUP BY, and one record is kept. Then run custom-fields for the entity without a key; on failure → the error of custom-fields. The star custom fields are the custom fields of its result that the statement does not select by name and whose name is not a label of the statement. Their values are taken as step 4 of convert-record says, from the API record that step b names.
    b. The API record for these values. For a record that plan-fetch read by its id route, it is the API record of the kept record. A product comes from the product list, which has no custom fields. When the list of star custom fields is not empty, read the kept product with one ApiGet on /products/{product}, with its NumericId. Its answer is the API record. NotFound → no star custom field has a value. Any other failure → the error that step 10 of plan-fetch gives for it.
    c. In every other case there are no star custom fields, and a Star item causes no request for custom field definitions.
 7. If truncated: add note H02.
@@ -1163,7 +1165,7 @@ STEPS:
 5. Run check-write-values for the assigned fields with the product of the record; on failure → the error of check-write-values.
 6. If dry_run: return a WriteResult with the id, the assigned fields with their checked values, and the message "would update <singular> <id>". A checked value that is a TextList is shown as text, joined by a comma and a space. No write request is sent.
 7. Run write-request for the entity and the checked fields. Call ApiUpdate on the update route with that body. NotAuthorized → not_authorized, message X04. RateLimited → rate_limited, message X01. Unreachable → network, message X02. NotFound, when the statement assigns exactly one reference → not_found, message W25 for that reference. Any other failure → api_error, message W30.
-8. Return the WriteResult. `id` is the id of the record. `values` has `name`, or `parent` for a comment, followed by each assigned field with the value that the record has after the write. A custom field is in `values` under its name, `custom.` and the key, with the value that convert-record gives for the answer of the write request. `message` is "<Singular> <id> status changed to '<status>'" when `status` is the only assigned field, and "<Singular> <id> updated" in every other case.
+8. Return the WriteResult. `id` is the id of the record. `values` has `name`, or `parent` for a comment, and then each assigned field that is not yet in it. Each one has the value that the record has after the write, so a statement that assigns `name` shows `name` once. A custom field is in `values` under its name, `custom.` and the key, with the value that convert-record gives for the answer of the write request. `message` is "<Singular> <id> status changed to '<status>'" when `status` is the only assigned field, and "<Singular> <id> updated" in every other case.
 
 POSTCONDITIONS:
 - exactly one record was changed, in every assigned field and in no other field
@@ -1339,6 +1341,8 @@ Rules for a read statement:
 - `COUNT(1)` and COUNT with the name of an entity as its argument are read as `COUNT(*)`. Their label is `COUNT(*)`.
 - `*` is the argument of COUNT only, and it does not follow DISTINCT. `*` in SUM, AVG, MIN or MAX → syntax, message S03. What was expected is `a field inside <FUNCTION>( )`. `*` after DISTINCT → syntax, message S03. What was expected is `a field after DISTINCT`.
 - A label after AS is a word that is not a keyword, or a text that is not empty. It is used as the statement writes it.
+- Two select items with the same label and different content → syntax, message S15.
+- A label after AS must not be the name of another field that the row can show. There are two cases, and both → syntax, message S16. First: the label is the name of a field of GROUP BY that the statement does not select; build-rows shows that field under its name. Second: the statement has a Star item, and the label is the name of a field of the entity that is not the field of its own item.
 - A key of ORDER BY is a field, a label of a select item or an aggregate. A label stands for its select item. A word that is a label of the statement and also a field word is the label. An aggregate key does not have to be a select item.
 - In a statement with an aggregate item or GROUP BY, a key that is a field must be a field of GROUP BY or a selected field. Any other field → syntax, message S03. What was expected is `a field of GROUP BY, a selected field or an aggregate after ORDER BY`.
 - In a statement without an aggregate item and without GROUP BY, an aggregate key → syntax, message S03. What was expected is `a field name`.
@@ -1385,6 +1389,7 @@ Rules for a write statement:
 - The entity goes through resolve-names. An unknown entity → bad_name, message W12. An entity without any operation → bad_name, message W13. An entity that does not have the operation of the statement → bad_name, message W14.
 - INSERT has one row of values. A second row → syntax, message W07. A different number of columns and values → syntax, message W08.
 - A column of INSERT is the parent when it is `parent`, the name of the parent kind of the entity, or another name of the parent field of the entity. The parent given twice with different values → syntax, message W09.
+- A write statement sets each field once, whatever the spelling: `title` is `name`, and in an UPDATE of a feature `parent` is `release`. A column of INSERT or an assigned field of UPDATE that names the field of an earlier column or assignment → syntax, message W33. A custom field counts in the same way. The parent of INSERT has the rule of W09 instead: the parent given twice with one value is one parent. A guard may name a field that the statement assigns.
 - A column or an assigned field that is the id field of the entity → bad_name, message W15. A column or an assigned field that is unknown or not writable → bad_name, message W16. An assigned field of UPDATE that is writable in INSERT only → bad_name, message W16.
 - An assigned field of UPDATE can be a custom field of the entity. A column or an assigned field that is a custom field of a kind that cannot be set → bad_name, message W16. Every other custom field as a column of INSERT → bad_name, message W31: a custom field is set with UPDATE only.
 - An assignment is `field = value`. Anything between the value and the next `,` or WHERE → syntax, message W10.
@@ -1400,7 +1405,7 @@ POSTCONDITIONS:
 - no input is left after the statement
 
 ERRORS:
-- syntax: S03 to S14, W01 to W11, and S01 and S02 from tokenize
+- syntax: S03 to S16, W01 to W11 and W33, and S01 and S02 from tokenize
 - bad_name: W12 to W17 and W31, and N01 to N07 from resolve-names
 - bad_value: a value in a condition or in a guard that does not fit the type of its field (V01), and an ordering operator on a boolean field (V02)
 - rate_limited, network, api_error: X01, X02, X03, when resolve-names needs the custom field definitions and they cannot be read
@@ -2342,6 +2347,7 @@ POSTCONDITIONS:
 - an aggregate is computed over all matching records, also when step 5 cuts the rows of a grouped result
 - every row has the labels of the statement in its order; in a grouped result the group fields that are not selected come first
 - after these labels a row has the star custom fields that have a value, and no other label
+- no row has a label twice
 - count is never above max_limit
 
 ERRORS:
@@ -2615,6 +2621,11 @@ Messages for a statement that cannot be read:
 | S12 | syntax | `unknown function <NAME>. Functions: COUNT, SUM, AVG, MIN, MAX. Example: SELECT COUNT(*) FROM features WHERE product = '<KEY>'` |
 | S13 | syntax | `text goes in single quotes: write '<word>' instead of <word>` |
 | S14 | syntax | `DESCRIBE <entity> lists the fields of <entity> and takes nothing else. To read records: <example of entity>` |
+| S15 | syntax | `two select items have the label '<label>'. Give one of them another label, in the form: field AS label` |
+| S16 | syntax | `the label '<label>' is also the name of a field of <entity>. Choose another label, in the form: field AS label` |
+
+In S15 and S16, `<label>` is the label as the statement writes it. In S15
+it is the label of the first pair of items that parse-statement refuses.
 
 In S01, `<quote>` is `apostrophe` or `double quote`. `<text hint>` is the
 apostrophe hint when that is not empty. Otherwise it is ` Text goes in
@@ -2753,6 +2764,7 @@ Messages of write statements:
 | W30 | api_error | `aha: API error (status <n>) on <method> <route>: <answer>` |
 | W31 | bad_name | `custom fields cannot be set in INSERT. Leave out <name>, create the record, and then send: UPDATE <entity> SET <name> = '...' WHERE id = '...'` |
 | W32 | bad_value | `<field>: there is no option '<value>'. Options: <options>` |
+| W33 | syntax | `the field <field> is given twice. A statement sets each field once.` |
 
 In W03, `<problem>` is one of these texts:
 
@@ -2784,6 +2796,9 @@ in INSERT` when the entity has the operation create, and empty otherwise.
 custom list>` when the writable custom list is not empty, and empty
 otherwise. In W17, `<custom guard hint>` is `. Custom fields of <entity>:
 <custom list>` when the custom list is not empty, and empty otherwise.
+
+In W33, `<field>` is the name of the field in the catalog, whatever the
+statement writes. For a custom field it is `custom.` and its key.
 
 In W31, `<name>` is the name of the custom field, `custom.` and its key. In
 W32, `<field>` is that name too. `<options>` are the texts of the options
@@ -2931,6 +2946,7 @@ ERRORS:
 - [observable] one call of execute creates, changes or deletes at most one record
 - [observable] a write statement is checked completely before its write request: an unknown column, an unknown field, a value of the wrong form, an unknown status, a value that a fixed list of options does not have and a guard that is not true are errors, and none of them changes data
 - [observable] an accepted write statement sends every field that it assigns; no column, assignment or condition is ignored without an error
+- [observable] no JSON object of a tool result and no body of a request has two members with the same name
 - [observable] the tool query sends only read requests, and with read_only true the server offers no tool that accepts INSERT, UPDATE or DELETE
 - [observable] the tool list is query and execute, or query alone with read_only true; the server offers no other tool, no resource and no prompt
 - [observable] text that follows a complete statement is an error, for every statement kind
@@ -3950,6 +3966,20 @@ THEN:
   the tool result is
   `{"id":"DEMO-1","name":"CSV export","due_date":"2026-12-01","message":"Feature DEMO-1 updated"}`
 
+### EXAMPLE: update_of_the_name_shows_it_once (of: update-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE features SET name = 'CSV export 2', due_date = '2026-05-01' WHERE id = 'DEMO-1'`
+  and update-statement returns the WriteResult
+THEN:
+  FakeAha recorded one ApiUpdate call on /features/DEMO-1 with the body
+  `{"feature":{"name":"CSV export 2","due_date":"2026-05-01"}}`
+  the tool result is
+  `{"id":"DEMO-1","name":"CSV export 2","due_date":"2026-05-01","message":"Feature DEMO-1 updated"}`
+  the object of the result has the member `name` once
+
 ### EXAMPLE: update_sets_a_custom_field (of: update-statement)
 GIVEN:
   the fixture account, in which DEMO-2 has the priority Medium
@@ -4377,6 +4407,86 @@ WHEN:
 THEN:
   the tool result is an error whose message starts with
   `cannot read the statement at position 12 (*) FROM features WHERE p): expected a field inside SUM( ).`
+
+### EXAMPLE: a_row_has_each_label_once (of: parse-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool query is called with query =
+  `SELECT id, id, f.name, name FROM features f WHERE release = 'DEMO-R-2'`
+  and parse-statement leaves out the items that repeat an earlier item
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"release DEMO-R-2","count":2,"records":[{"id":"DEMO-1","name":"CSV export"},{"id":"DEMO-2","name":"Offline maps"}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT COUNT(*), COUNT(1) FROM features WHERE product = 'DEMO'`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":1,"records":[{"COUNT(*)":6}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT COUNT(*) FROM features WHERE product = 'DEMO' GROUP BY status, workflow_status`
+THEN:
+  the tool result is
+  `{"entity":"features","scope":"product DEMO","count":4,"records":[{"status":"In design","COUNT(*)":1},{"status":"Under consideration","COUNT(*)":3},{"status":"In development","COUNT(*)":1},{"status":"Shipped","COUNT(*)":1}]}`
+WHEN:
+  the tool query is called with query =
+  `SELECT *, name FROM features WHERE release = 'DEMO-R-2'`
+THEN:
+  each of the two rows has the labels id, name, status and release, in
+  this order, and no other label
+WHEN:
+  the tool query is called with query =
+  `SELECT id, name AS id FROM features WHERE release = 'DEMO-R-2'`
+THEN:
+  the tool result is an error with the message
+  `two select items have the label 'id'. Give one of them another label, in the form: field AS label`
+  FakeAha recorded no call
+WHEN:
+  the tool query is called with query =
+  `SELECT COUNT(*) AS status FROM features WHERE product = 'DEMO' GROUP BY status`
+THEN:
+  the tool result is an error with the message
+  `the label 'status' is also the name of a field of features. Choose another label, in the form: field AS label`
+WHEN:
+  the tool query is called with query =
+  `SELECT *, name AS id FROM features WHERE release = 'DEMO-R-2'`
+THEN:
+  the tool result is an error with the message
+  `the label 'id' is also the name of a field of features. Choose another label, in the form: field AS label`
+
+### EXAMPLE: a_field_that_is_given_twice (of: parse-statement)
+GIVEN:
+  the fixture account
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE features SET status = 'Shipped', status = 'In design' WHERE id = 'DEMO-2'`
+  and parse-statement finds the second assignment of the field
+THEN:
+  the tool result is an error with the message
+  `the field status is given twice. A statement sets each field once.`
+  FakeAha recorded no call
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE features SET release = 'DEMO-R-3', parent = 'DEMO-R-1' WHERE id = 'DEMO-2'`
+THEN:
+  the tool result is an error with the message
+  `the field release is given twice. A statement sets each field once.`
+WHEN:
+  the tool execute is called with statement =
+  `INSERT INTO comments (parent, body, text) VALUES ('DEMO-3', 'one', 'two')`
+THEN:
+  the tool result is an error with the message
+  `the field body is given twice. A statement sets each field once.`
+  FakeAha recorded no call
+WHEN:
+  the tool execute is called with statement =
+  `UPDATE features SET custom.customer = 'Acme', custom.CUSTOMER = 'Globex' WHERE id = 'DEMO-2'`
+THEN:
+  the tool result is an error with the message
+  `the field custom.customer is given twice. A statement sets each field once.`
+  FakeAha recorded no ApiUpdate call
 
 ### EXAMPLE: values_that_do_not_fit_the_type (of: parse-statement)
 GIVEN:
