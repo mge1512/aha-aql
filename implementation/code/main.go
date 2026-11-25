@@ -1,4 +1,4 @@
-// generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
+// generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
 
 // Command mcp-server-aha-aql is an MCP server for the Aha! product
 // management service. A language model reads and changes Aha! records
@@ -31,10 +31,10 @@ import (
 
 // serverVersion is the version of the spec; the build can set it with
 // -ldflags "-X main.serverVersion=...".
-var serverVersion = "0.20.1"
+var serverVersion = "0.23.0"
 
 // specSHA256 is the SHA256 of the specification this binary was translated from.
-const specSHA256 = "b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30"
+const specSHA256 = "b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268"
 
 var permissionBits = runtime.GOOS != "windows"
 
@@ -135,7 +135,10 @@ func (a *app) runHTTP() int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
-	hs := server.NewStreamableHTTPServer(a.newMCPServer(), server.WithEndpointPath("/mcp"))
+	hs := server.NewStreamableHTTPServer(a.newMCPServer(), server.WithEndpointPath("/mcp"),
+		// The server keeps no MCP session: no Mcp-Session-Id is given, and
+		// one in a request is ignored.
+		server.WithStateLess(true))
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", a.accountMiddleware(hs))
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 30 * time.Second}

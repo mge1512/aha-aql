@@ -1,8 +1,8 @@
-# generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
+# generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
 
 BINARY      := mcp-server-aha-aql
-VERSION     := 0.20.1
-SPEC_SHA256 := b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
+VERSION     := 0.23.0
+SPEC_SHA256 := b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
 PREFIX      ?= /usr
 BINDIR      ?= $(PREFIX)/bin
 MANDIR      ?= $(PREFIX)/share/man
@@ -12,7 +12,7 @@ LDFLAGS     := -X main.serverVersion=$(VERSION)
 
 export CGO_ENABLED := 0
 
-.PHONY: all build test install clean man vendor-tarball
+.PHONY: all build test install clean man vendor-tarball deb-vendor-tarball
 
 all: build
 
@@ -43,5 +43,10 @@ install: build man
 vendor-tarball: vendor
 	tar -cJf $(BINARY)-$(VERSION)-vendor.tar.xz vendor/
 
+# The Debian component tarball: a copy of the vendor tarball with the
+# Debian name. dpkg-source (format 3.0 (quilt)) unpacks it into vendor/.
+deb-vendor-tarball: vendor-tarball
+	cp $(BINARY)-$(VERSION)-vendor.tar.xz $(BINARY)_$(VERSION).orig-vendor.tar.xz
+
 clean:
-	rm -f $(BINARY)
+	rm -rf $(BINARY) vendor

@@ -1,4 +1,4 @@
-// generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
+// generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
 // tests by: claude-opus-5-5
 
 package aqltests
@@ -11,6 +11,11 @@ import (
 
 func queryDescription(key string) string {
 	return strings.ReplaceAll(`Read from Aha! with one AQL statement.
+Start with: SELECT key, name FROM products. Most other lists need a product key.
+DESCRIBE lists the entities; DESCRIBE features lists the fields of features.
+A workspace or project is a product; a milestone or version is a release; an objective is a goal.
+Search by word: SELECT id, name FROM features WHERE product = '{KEY}' AND name CONTAINS 'word'
+In name and description: SELECT id, name FROM features WHERE release = '{KEY}-R-3' AND (name CONTAINS 'word' OR description CONTAINS 'word')
 SELECT fields FROM entity [WHERE field = 'value' [AND ...]] [GROUP BY field] [ORDER BY field [DESC]] [LIMIT n]
 DESCRIBE entity
 Entities: products, releases, features, epics, requirements, initiatives, goals, ideas, comments, users, statuses, me.
@@ -83,12 +88,13 @@ func TestToolsWithoutReadOnlyMode(t *testing.T) {
 	if x.Description != executeDescription("PROD") {
 		t.Fatalf("execute description\n got: %q\nwant: %q", x.Description, executeDescription("PROD"))
 	}
-	// No resource and no prompt.
-	for _, m := range []string{"resources/list", "prompts/list"} {
-		a := s.request(m, map[string]any{}, 30*time.Second)
-		if a.Error == nil && strings.Contains(string(a.Result), `"name"`) {
-			t.Fatalf("%s: %s", m, a.Result)
-		}
+	// No resource; the prompt list is start alone.
+	a := s.request("resources/list", map[string]any{}, 30*time.Second)
+	if a.Error == nil && strings.Contains(string(a.Result), `"name"`) {
+		t.Fatalf("resources/list: %s", a.Result)
+	}
+	if names := promptNames(t, s.request("prompts/list", map[string]any{}, 30*time.Second)); !eqStrings(names, []string{"start"}) {
+		t.Fatalf("prompts: %v", names)
 	}
 }
 

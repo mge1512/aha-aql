@@ -1,4 +1,4 @@
-// generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
+// generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
 // tests by: claude-opus-5-5
 
 package aqltests
@@ -1242,6 +1242,13 @@ func TestStatementsInMessagesCanBeSent(t *testing.T) {
 		`SELECT id, body FROM comments WHERE parent = 'PROD-23'`,
 		`DESCRIBE features`,
 		`SELECT id, custom.customer FROM features WHERE id = 'PROD-23'`,
+		// The lines Start with:, Search by word: and In name and description: of query.
+		`SELECT id, name FROM features WHERE product = 'PROD' AND name CONTAINS 'word'`,
+		`SELECT id, name FROM features WHERE release = 'PROD-R-3' AND (name CONTAINS 'word' OR description CONTAINS 'word')`,
+		// The statements of the prompt text of start.
+		`SELECT id, name, status FROM features WHERE product = 'PROD'`,
+		`DESCRIBE`,
+		`SELECT * FROM features WHERE name CONTAINS 'x'`,
 	}
 	for _, q := range reads {
 		r := s.query(q)

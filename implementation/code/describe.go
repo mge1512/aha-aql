@@ -1,4 +1,4 @@
-// generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
+// generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
 
 package main
 
@@ -51,7 +51,7 @@ func (sc *stmtCtx) runDescribe(st *DescribeStmt) (omap, *AqlError) {
 		for _, e := range catalog {
 			ents = append(ents, omap{{"entity", e.Name}, {"about", sc.aboutOf(e)}})
 		}
-		return omap{{"entities", ents}, {"note", "DESCRIBE entity lists the fields of one entity, for example: DESCRIBE features"}}, nil
+		return omap{{"entities", ents}, {"note", "DESCRIBE entity lists the fields of one entity, for example: DESCRIBE features. Most lists need a product key: SELECT key, name FROM products"}}, nil
 	}
 	e := st.E
 	out := omap{{"entity", e.Name}, {"about", sc.aboutOf(e)}}

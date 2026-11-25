@@ -1,4 +1,4 @@
-// generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
+// generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
 
 package main
 
@@ -16,6 +16,11 @@ import (
 )
 
 const queryDescription = `Read from Aha! with one AQL statement.
+Start with: SELECT key, name FROM products. Most other lists need a product key.
+DESCRIBE lists the entities; DESCRIBE features lists the fields of features.
+A workspace or project is a product; a milestone or version is a release; an objective is a goal.
+Search by word: SELECT id, name FROM features WHERE product = '{KEY}' AND name CONTAINS 'word'
+In name and description: SELECT id, name FROM features WHERE release = '{KEY}-R-3' AND (name CONTAINS 'word' OR description CONTAINS 'word')
 SELECT fields FROM entity [WHERE field = 'value' [AND ...]] [GROUP BY field] [ORDER BY field [DESC]] [LIMIT n]
 DESCRIBE entity
 Entities: {ENTITIES}.
@@ -42,6 +47,24 @@ Examples:
 INSERT INTO features (parent, name) VALUES ('{KEY}-R-3', 'Export to CSV')
 UPDATE features SET status = 'In design', assigned_to = 'me' WHERE id = '{KEY}-23'
 INSERT INTO comments (parent, body) VALUES ('{KEY}-23', 'It''s ready.')
+`
+
+// serverInstructions is the text of the server instructions of
+// tool-registration. It is the same for every Account and has no {KEY}.
+const serverInstructions = `This server reads and changes records of one Aha! account with AQL, a small SQL dialect.
+The tool query reads (SELECT, DESCRIBE). The tool execute, when the tool list has it, changes one record (INSERT, UPDATE, DELETE).
+Start with SELECT key, name FROM products, then DESCRIBE an entity for its field names.
+Most error messages show what to write instead; then send the corrected statement.
+`
+
+// startPromptText is the prompt text of the MCP prompt start.
+const startPromptText = `Use the tool query of the Aha! server, with one AQL statement in each call.
+1. SELECT key, name FROM products
+2. DESCRIBE features lists the fields of features; DESCRIBE alone lists the entities.
+3. SELECT id, name, status FROM features WHERE product = '{KEY}'
+Search by word: SELECT id, name FROM features WHERE product = '{KEY}' AND name CONTAINS 'word'
+A workspace or project is a product; a milestone or version is a release; an objective is a goal.
+Most error messages show what to write instead; then send the corrected statement.
 `
 
 // app is the server process.
@@ -184,6 +207,8 @@ func (a *app) newMCPServer() *server.MCPServer {
 	})
 	s := server.NewMCPServer("mcp-server-aha-aql", serverVersion,
 		server.WithToolCapabilities(false),
+		server.WithPromptCapabilities(false),
+		server.WithInstructions(serverInstructions),
 		server.WithHooks(hooks),
 		server.WithRecovery(),
 	)
@@ -210,6 +235,15 @@ func (a *app) newMCPServer() *server.MCPServer {
 			return toolResult(a.executeTool(ctx, req.GetArguments(), false, true)), nil
 		})
 	}
+	// Step 7: the one MCP prompt, start.
+	s.AddPrompt(mcp.NewPrompt("start", mcp.WithPromptDescription("How to start with AQL")),
+		func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			key := a.stmt(ctx).key()
+			text := strings.ReplaceAll(startPromptText, "{KEY}", key)
+			return mcp.NewGetPromptResult("How to start with AQL", []mcp.PromptMessage{
+				mcp.NewPromptMessage(mcp.RoleUser, mcp.NewTextContent(text)),
+			}), nil
+		})
 	return s
 }
 

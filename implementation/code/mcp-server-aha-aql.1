@@ -14,7 +14,7 @@
 . ftr VB CB
 . ftr VBI CBI
 .\}
-.TH "MCP-SERVER-AHA-AQL" "1" "November 2026" "mcp-server-aha-aql 0.20.1" "User Commands"
+.TH "MCP-SERVER-AHA-AQL" "1" "November 2026" "mcp-server-aha-aql 0.23.0" "User Commands"
 .hy
 .SH NAME
 .PP
@@ -69,6 +69,8 @@ Every request brings its credential in the header \f[B]Aha-Api-Key\f[R],
 and its account name in the header \f[B]Aha-Subdomain\f[R] when the
 server has no setting subdomain.
 A request with an \f[B]Origin\f[R] header is refused with status 403.
+The server keeps no MCP session: no answer has the header
+\f[B]Mcp-Session-Id\f[R].
 .TP
 \f[B]query\f[R]
 Command word.
@@ -144,6 +146,11 @@ VALUES (`parent id', `value', \&...), UPDATE entity SET field = `value',
 \&...
 WHERE id = `id', or DELETE FROM entity WHERE id = `id'.
 In stdio and http mode each call writes one log line to standard error.
+.PP
+The answers to \f[I]initialize\f[R] and \f[I]server/discover\f[R] have
+server instructions.
+The one MCP prompt, \f[B]start\f[R] (\[lq]How to start with AQL\[rq]),
+has no argument and gives a short guide to the first statements.
 .SH ENVIRONMENT
 .TP
 \f[B]AHA_SUBDOMAIN\f[R]
@@ -194,8 +201,8 @@ mcp-server-aha-aql http listen=127.0.0.1:8080 subdomain=mycompany
 https://github.com/mge1512/aha-aql
 .SH SPECIFICATION
 .PP
-This program is a translation of the specification aha-aql 0.20.1, with
+This program is a translation of the specification aha-aql 0.23.0, with
 the SHA256
-b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30.
+b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268.
 .SH AUTHORS
 Matthias G. Eckermann <mge@mailbox.org>.

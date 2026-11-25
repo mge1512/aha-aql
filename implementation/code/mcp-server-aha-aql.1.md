@@ -1,8 +1,8 @@
-% MCP-SERVER-AHA-AQL(1) mcp-server-aha-aql 0.20.1 | User Commands
+% MCP-SERVER-AHA-AQL(1) mcp-server-aha-aql 0.23.0 | User Commands
 % Matthias G. Eckermann <mge@mailbox.org>
 % November 2026
 
-<!-- generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30 -->
+<!-- generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268 -->
 
 # NAME
 
@@ -43,7 +43,8 @@ The first word of the command line selects the mode.
 :   MCP over HTTP on the endpoint /mcp. Every request brings its credential
     in the header **Aha-Api-Key**, and its account name in the header
     **Aha-Subdomain** when the server has no setting subdomain. A request
-    with an **Origin** header is refused with status 403.
+    with an **Origin** header is refused with status 403. The server keeps
+    no MCP session: no answer has the header **Mcp-Session-Id**.
 
 **query**
 :   Command word. One call of the tool query, then the program ends. Selects
@@ -115,6 +116,10 @@ the credential itself.
     FROM entity WHERE id = 'id'. In stdio and http mode each call writes one
     log line to standard error.
 
+The answers to *initialize* and *server/discover* have server instructions.
+The one MCP prompt, **start** ("How to start with AQL"), has no argument and
+gives a short guide to the first statements.
+
 # ENVIRONMENT
 
 **AHA_SUBDOMAIN**
@@ -161,5 +166,5 @@ https://github.com/mge1512/aha-aql
 
 # SPECIFICATION
 
-This program is a translation of the specification aha-aql 0.20.1, with
-the SHA256 b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30.
+This program is a translation of the specification aha-aql 0.23.0, with
+the SHA256 b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268.
