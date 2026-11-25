@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.23.0
+Version:      0.24.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -414,6 +414,18 @@ headers and body, and answers it from memory with a fixture account. It
 answers several requests in one tunnel, one after the other, as long as
 the server keeps the tunnel open. It opens no network connection of its
 own.
+
+Platforms of the tests. FakeAha needs a platform where the server takes
+its trust store from SSL_CERT_FILE, and that is Linux. On macOS and
+Windows the server checks the certificate of FakeAha against the trust
+store of the system (see aha-request, step 4). That trust store does not
+have the certificate authority of the test. On these two systems every
+test that needs FakeAha is
+skipped, with a reason that names the platform. The tests that send no
+request to Aha! run on every platform: the command line, the
+configuration, the version, and the start of the MCP protocol. A
+translation report counts macOS and Windows as tested for those tests
+only. On Windows the binary has the name `mcp-server-aha-aql.exe`.
 
 The server has no hook for tests: no option, no variable and no part of
 its code is there for a test only. A test starts the server as a user
@@ -2565,7 +2577,7 @@ STEPS:
 2. Send the request with the headers `Authorization: Bearer <credential>`, `Accept: application/json` and `User-Agent: mcp-server-aha-aql/<version> (https://github.com/mge1512/aha-aql)`. A request with a body also has `Content-Type: application/json`. Aha! asks every client for a way to reach its developer, and the address of the project in the User-Agent is that way.
 3. Proxy. When the environment gives an HTTPS proxy and does not exclude the host of Aha! from it: connect to the proxy and ask it with CONNECT for a tunnel to `<subdomain>.aha.io`, port 443. In every other case connect to that host and port directly.
    MECHANISM: the standard library of the language reads the variables for an https address. HTTPS_PROXY or https_proxy gives the proxy. NO_PROXY or no_proxy gives the hosts without a proxy.
-4. TLS. The connection to Aha!, direct or inside the tunnel, uses TLS. The certificate must be valid for the host name `<subdomain>.aha.io`, and its chain must end in the trust store of the platform. On Linux the variables SSL_CERT_FILE and SSL_CERT_DIR can name that trust store. No setting turns this check off.
+4. TLS. The connection to Aha!, direct or inside the tunnel, uses TLS. The certificate must be valid for the host name `<subdomain>.aha.io`, and its chain must end in the trust store of the platform. On Linux the variables SSL_CERT_FILE and SSL_CERT_DIR can name that trust store. On macOS the trust store of the platform is the keychain, and on Windows it is the certificate store of the system. The two variables have no effect there. No setting turns this check off.
 5. Failures before an answer. In each of these cases → Unreachable, and the request is not sent again:
    a. the proxy cannot be reached, or it does not open the tunnel;
    b. the connection or the certificate check fails;
@@ -6268,8 +6280,9 @@ environment variables needs no key file and no option: the server takes
 AHA_SUBDOMAIN and AHA_API_KEY from its environment. When the sandbox
 sends all traffic through a proxy, the server uses the proxy of the
 variable HTTPS_PROXY. When that proxy ends the TLS connection itself, its
-certificate authority has to be in the trust store, for example through
-SSL_CERT_FILE. The value of AHA_API_KEY can then be a placeholder that the
+certificate authority has to be in the trust store. On Linux that can be done
+through SSL_CERT_FILE, on macOS through the keychain, and on Windows through the
+certificate store of the system. The value of AHA_API_KEY can then be a placeholder that the
 sandbox replaces on the way to Aha!.
 
 HTTP mode. The server starts without a credential, for example from the
