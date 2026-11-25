@@ -1,4 +1,4 @@
-<!-- generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30 -->
+<!-- generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268 -->
 
 # mcp-server-aha-aql
 
@@ -113,6 +113,10 @@ The server refuses a request:
 - with status 400 when there is no account name, or the account name has the wrong form,
 - with status 403 when the account name is not the account of the server.
 
+In http mode the server keeps no MCP session. Its answers have no header
+`Mcp-Session-Id`, and the server ignores this header in a request. Every
+HTTP request is handled on its own.
+
 The http transport speaks plain HTTP. If the listen address is not a
 loopback address, put a TLS endpoint in front of the server. The server then
 writes a warning. The package has the systemd unit
@@ -196,6 +200,17 @@ standard error:
 
 The line has no value of a field, no text of the statement and no
 credential.
+
+### Server instructions and the prompt `start`
+
+The answers to `initialize` and to `server/discover` have server
+instructions. They tell the language model where to start:
+`SELECT key, name FROM products`, then `DESCRIBE` for the field names. The
+MCP host decides whether the language model sees them.
+
+The server also has one MCP prompt, `start` ("How to start with AQL"). It
+has no argument. When you pick it in the MCP host, the host puts a short
+guide to the first statements into the conversation.
 
 A statement that fails is a normal tool result. The result is marked as an
 error (`isError`), and its text tells the language model what to write

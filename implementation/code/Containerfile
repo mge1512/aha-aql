@@ -1,15 +1,15 @@
-# generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
+# generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
 FROM registry.suse.com/bci/golang:latest AS builder
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -mod=mod -trimpath -ldflags="-X main.serverVersion=0.20.1" -o mcp-server-aha-aql .
+RUN CGO_ENABLED=0 go build -mod=mod -trimpath -ldflags="-X main.serverVersion=0.23.0" -o mcp-server-aha-aql .
 
 FROM scratch
-LABEL pcd.spec.sha256="b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30"
+LABEL pcd.spec.sha256="b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268"
 LABEL org.opencontainers.image.title="mcp-server-aha-aql" \
-      org.opencontainers.image.version="0.20.1" \
+      org.opencontainers.image.version="0.23.0" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="https://github.com/mge1512/aha-aql"
 # The trust store of the image: the certificate authorities of its build.

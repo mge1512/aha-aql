@@ -2,13 +2,13 @@
 
 | Field | Value |
 |---|---|
-| Spec-SHA256 | `b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30` |
-| Spec-SHA256 (host) | `b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30` |
-| Spec | `aha-aql.spec.md`, Version 0.20.1, Spec-Schema 0.4.0 |
+| Spec-SHA256 | `b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268` |
+| Spec-SHA256 (host) | `b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268` |
+| Spec | `aha-aql.spec.md`, Version 0.23.0, Spec-Schema 0.4.0 |
 | Deployment-Template | `mcp-server.template.md` v0.3.24 |
 | LLM-Name | `claude-opus-5-5` |
 | Mode | `translator` |
-| Run | single-LLM (no test-author output in the input directory) |
+| Run | single-LLM (no test-author output in the input directory); incremental build from 0.20.1 to 0.23.0 |
 | Date | 2026-11-25 |
 
 ## Included-Specs
@@ -23,24 +23,54 @@ hash equals the host hash.
 
 ## Translation Inputs (provenance)
 
-- `Spec-SHA256 (merged):` `b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30`
-- `Spec-SHA256 (host):` `aha-aql.spec.md` `b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30`
+- `Spec-SHA256 (merged):` `b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268`
+- `Spec-SHA256 (host):` `aha-aql.spec.md` `b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268`
 - `Decisions-Hints-SHA256:` none
 - `Milestones-Hints-SHA256:` none
 - `Template-SHA256:` `mcp-server.template.md` `22c55b355e28a6f2635413e72f2281faa3f7f1c79f79ea4eca76aba0b5b37b3e`
 - `Prompt-SHA256:` `prompt.md` `702ec28de611ff65d76b2819cb53c675867fb58b1c090c6b17192cc73470d7d3`
-- `Library-Hints-SHA256:` `mcp-server.go.mcp-go.hints.md` `f873012218200cddc8a96b42e2db95cffc8213195f590f28b83bec924d8ea0a3`
+- `Library-Hints-SHA256:` `mcp-server.go.mcp-go.hints.md` `3f5898ed241676f5503b22c7f13005dc3d67732c36bbae840718ec0cbf148b70` (Version v1.6.0, Release 1)
 - `Style-Hints-SHA256:` none (no `/etc/pcd/hints/` and no `.pcd/hints/` exist)
 - `Role-SHA256:` `ROLE.md` `e7839aedd9096d8059dd7854cfe94a01bd492cfbce204a445d37f8306c8930cf`
-- `System-Prompt-SHA256:` `system-prompt.txt` `65a41409b8abb5504b505bb3f12b316c66ae6706d8baa19b8924a595122b0e71`
-- `Upgrade-Brief-SHA256:` none
+- `System-Prompt-SHA256:` `system-prompt.txt` `6be5a16f69ce413b0ce8143fd3e66cfc992e41840f43aa0cba6952e53e2b81a6`
+- `Upgrade-Brief-SHA256:` `aha-aql.spec.md.diff` `2e9fc7681e8aab7eaaa36d1549d2218fa1e32d19a2a9267416567a5c50b0d41c` (spec change 0.20.1 → 0.23.0)
+- `Upgrade-Brief-SHA256:` `mcp-server.go.mcp-go.hints.md.diff` `bfd3315e43d3ed3a40d011213124416e7825cdc7c04593910446753f3e609098` (hints change)
 - `Directive-SHA256:` none
+
+## Incremental build 0.20.1 → 0.23.0
+
+The input had the full spec 0.23.0 and the hints file, plus two diffs that
+name the changes. The prior translation of 0.20.1 was in the output
+directory. Only the changed BEHAVIORs, EXAMPLES and packaging rules were
+translated again; all other code is unchanged except for the spec hash in
+the header comments.
+
+| Change in the spec or hints | Where | What was done |
+|---|---|---|
+| tool-registration: five new lines at the start of the description of `query` | `tools.go` | added to `queryDescription` |
+| tool-registration step 6: server instructions in `initialize` and `server/discover` | `tools.go` | `server.WithInstructions(serverInstructions)`. mcp-go v1.6.0 answers `server/discover` (protocol 2026-07-28) with the same `instructions`. No {KEY}, so neither answer sends a request to Aha! |
+| tool-registration steps 3 and 7: the prompt `start`, capability prompts | `tools.go` | `server.WithPromptCapabilities(false)` and `AddPrompt("start")` with the description "How to start with AQL", no argument, one `user` message; {KEY} is the ExampleKey of the Account that asks (`stmtCtx.key()`) |
+| load-configuration 6a: `true`/`false` in lower case only | `config.go` | already so (exact comparison); new test `TestBooleanSettingsAreLowerCase` |
+| request-account: no MCP session in http mode | `main.go` | `server.WithStateLess(true)`: no `Mcp-Session-Id` in an answer, the header of a request is ignored |
+| describe-statement 1b: new `note` text | `describe.go` | text changed |
+| insert-statement 5: values and parent of the dry run | `write.go` | already so: `values` are the checked fields in statement order without the parent; parent is the product key or the parent in capital letters. New test `TestDryRunOfAnInsert` (lower-case `demo-r-3`) |
+| check-write-values: `form_only` removed | `write.go` | nothing to change; the parameter was never implemented (see the 0.20.1 note, now removed) |
+| aha-request: connections stay open, also through the tunnel of a proxy | `aha.go` | `DisableKeepAlives` removed; `MaxIdleConnsPerHost: 4`, `IdleConnTimeout: 90s`. Every request still sets its own headers with the credential of its Account. The response body is read completely and closed, so the connection can be used again |
+| A02: names sorted by code point | `tools.go` | already so (`sort.Strings` on UTF-8 sorts by code point); new test `TestUnknownParameterNamesAreSorted` |
+| FakeAha answers several requests in one tunnel | `fakeaha_test.go` | already so: the inner `http.Server` serves each TLS tunnel with keep-alive |
+| EXAMPLE request_through_the_proxy_of_the_environment: at least one CONNECT | `aharequest_test.go` | test edited (see Test Refinements) |
+| EXAMPLE statements_in_messages_can_be_sent: more statements | `read_test.go` | the statements of the new lines of `query` and of the prompt text were added |
+| hints: `clean` removes `vendor` | `Makefile` | `rm -rf $(BINARY) vendor` |
+| hints: Debian component tarball `orig-vendor`, format `3.0 (quilt)` | `debian/source/format`, `Makefile`, `debian/rules` | new file `debian/source/format` with `3.0 (quilt)`; new target `deb-vendor-tarball` copies the vendor tarball to `mcp-server-aha-aql_<version>.orig-vendor.tar.xz`; `debian/rules` keeps `-mod=vendor` and never runs `go mod vendor` |
+| hints: `WithRecovery` writes no stderr line | — | no change; still recorded under "Rules that could not be implemented exactly as written" |
+| hints: regexp repeat count above 1000 | — | already handled in 0.20.1 (Credential check without a count) |
+| Version 0.23.0 | `main.go`, `Makefile`, `aha-aql.spec`, `Containerfile`, man page, `debian/changelog`, pikchr | version and spec hash updated; new `debian/changelog` entry |
 
 ## Tests-First-Compliance
 
 **no**, with one documented exception.
 
-- The 10 test files with 208 tests (`fakeaha_test.go`, `harness_test.go`,
+- 0.20.1: the 10 test files with 208 tests (`fakeaha_test.go`, `harness_test.go`,
   `read_test.go`, `describe_test.go`, `write_test.go`, `config_test.go`,
   `manual_test.go`, `tools_test.go`, `http_test.go`, `aharequest_test.go`)
   were written before any implementation source file. The structural guard
@@ -54,6 +84,13 @@ hash equals the host hash.
   before the implementation. So the answer is `no`. The confidence table
   below is Medium for every EXAMPLE. That level also follows from the
   single-LLM run, because no test-author suite exists.
+
+Incremental run 0.23.0: the new and changed tests (`entry_test.go` with 7
+tests, the changes in `tools_test.go`, `describe_test.go`, `read_test.go`,
+`aharequest_test.go` and `harness_test.go`) were written and passed
+`go vet` and `gofmt -l` before any implementation file was changed. Two
+existing tests were then edited after the first run (see Test
+Refinements), so the answer stays **no**.
 
 ## Continuity-Check
 
@@ -116,17 +153,17 @@ output directory is not a git repository, so nothing was committed.
 |---|---|
 | source | `main.go`, `go.mod`, plus `tools.go`, `config.go`, `catalog.go`, `aha.go`, `context.go`, `custom.go`, `lexer.go`, `parser.go`, `read.go`, `describe.go`, `write.go`, `messages.go`, `util.go`. The template allows tool handlers in further files for a larger server. The server has about 5,000 lines of Go. |
 | (dependency lock) | `go.sum`, written by `go mod tidy` (compile gate step 2). The template's Containerfile runs `COPY go.mod go.sum`. |
-| build | `Makefile` (targets `build`, `test`, `install`, `clean`, `man`, plus `vendor` and `vendor-tarball` from the hints file) |
+| build | `Makefile` (targets `build`, `test`, `install`, `clean`, `man`, plus `vendor`, `vendor-tarball` and `deb-vendor-tarball` from the hints file) |
 | docs | `README.md` |
 | man | `mcp-server-aha-aql.1.md`, `mcp-server-aha-aql.1` (built with pandoc 2.18) |
 | license | `LICENSE` (SPDX `MIT` and URLs, no license text) |
 | RPM | `aha-aql.spec` (`{n}.spec` with n = `aha-aql`; package Name `mcp-server-aha-aql`) |
 | unit | `mcp-server-aha-aql.service` |
-| DEB | `debian/control`, `debian/changelog`, `debian/rules`, `debian/copyright` |
+| DEB | `debian/control`, `debian/changelog`, `debian/rules`, `debian/copyright`, `debian/source/format` (`3.0 (quilt)`, from the hints file; the file has room for the format line only, so it has no spec hash) |
 | OCI | `Containerfile` |
 | Phase 4 | `translation_report/translation-workflow.pikchr` |
 | report | `TRANSLATION_REPORT.md` |
-| tests | `independent_tests/claude-opus-5-5/*_test.go` (11 files) |
+| tests | `independent_tests/claude-opus-5-5/*_test.go` (12 files) |
 
 `vendor/` was made during the compile gate and then removed. The hints file
 says that `vendor/` is never part of the source. `make vendor` makes it
@@ -138,7 +175,7 @@ again, and `make vendor-tarball` makes the tarball `Source1` of the RPM.
 |---|---|
 | every `.go` file (implementation and tests) | `// generated from spec: aha-aql.spec.md sha256:<hash>`; tests also `// tests by: claude-opus-5-5` |
 | `go.mod` | the same comment on the first line |
-| binary | `mcp-server-aha-aql --version` writes `mcp-server-aha-aql 0.20.1 spec:<hash>` |
+| binary | `mcp-server-aha-aql --version` writes `mcp-server-aha-aql 0.23.0 spec:<hash>` |
 | `Makefile` | `SPEC_SHA256 := <hash>` |
 | `aha-aql.spec` | `# pcd-spec-sha256: <hash>` |
 | `debian/control` | `X-PCD-Spec-SHA256: <hash>` |
@@ -161,12 +198,13 @@ allowed in it.
   logger writes to standard error through the same mutex as the log lines.
 - **http**: `net.Listen` first. A bind error gives
   `error: cannot listen on <addr>: <reason>` and the exit code 1. Then
-  `server.NewStreamableHTTPServer` with endpoint `/mcp` runs behind the
+  `server.NewStreamableHTTPServer` with endpoint `/mcp` and
+  `WithStateLess(true)` (no MCP session, no `Mcp-Session-Id`) runs behind the
   middleware of request-account in an `http.ServeMux`. POST /mcp handles
   JSON-RPC, and GET /mcp gives the SSE stream (mcp-go). On SIGTERM or SIGINT:
   `http.Server.Shutdown` with a 30 second drain timeout, then exit 0. The
   server writes one start line to standard error:
-  `mcp-server-aha-aql 0.20.1: listening on http://<addr>/mcp`.
+  `mcp-server-aha-aql 0.23.0: listening on http://<addr>/mcp`.
 - **request-account**: the middleware checks every request to `/mcp`
   before mcp-go sees it: Origin → 403, missing or malformed `Aha-Api-Key` →
   400, malformed `Aha-Subdomain` → 400, another account → 403, no account →
@@ -186,7 +224,9 @@ allowed in it.
 | `query` | `query` (string, required, "One AQL statement") | readOnlyHint true, destructiveHint false, idempotentHint true, openWorldHint true | the text of tool-registration, with `{KEY}` replaced per tool list |
 | `execute` | `statement` (string, required, "One AQL statement") | readOnlyHint false, destructiveHint true, idempotentHint false, openWorldHint true | the text of tool-registration; not registered when read_only is true |
 
-No resource and no prompt is registered.
+No resource is registered. The one MCP prompt is `start` ("How to start
+with AQL", no argument). The answers to `initialize` and `server/discover`
+have the server instructions of tool-registration.
 
 ## How STEPS ordering was applied
 
@@ -283,11 +323,11 @@ is inherited. Illustrative paths of the EXAMPLES (`/run/user/1000/aha-key`,
 | Step | Command | Result |
 |---|---|---|
 | 1 Framework | mcp-go v1.6.0 (template default) | done |
-| 2 Dependencies | `go mod tidy` | pass. Indirect dependencies were resolved by the tool (google/jsonschema-go, google/uuid, santhosh-tekuri/jsonschema/v6, spf13/cast, yosida95/uritemplate/v3, golang.org/x/text) |
-| 3 Compilation | `go build ./...`, `CGO_ENABLED=0`, Go 1.27.4 | pass after one fix (see Test Refinements) |
+| 2 Dependencies | `go mod tidy` | pass (0.20.1; go.mod and go.sum unchanged in 0.23.0, no new dependency). Indirect dependencies were resolved by the tool (google/jsonschema-go, google/uuid, santhosh-tekuri/jsonschema/v6, spf13/cast, yosida95/uritemplate/v3, golang.org/x/text) |
+| 3 Compilation | `go build ./...`, `CGO_ENABLED=0`, Go 1.27.4 | pass (0.23.0: first time) |
 | — | `go vet ./...`, `gofmt -l` | pass, no output |
-| — | `go mod vendor`, `make build`, `make test` | pass (vendor/ removed afterwards) |
-| 4 Translator tests | `go test ./independent_tests/claude-opus-5-5/...` | **209 passed, 0 failed, 0 skipped** (61 s) |
+| — | `go mod vendor`, `make build`, `make test` | pass (vendor/ removed afterwards with `make clean`) |
+| 4 Translator tests | `go test ./independent_tests/claude-opus-5-5/...` | **216 passed, 0 failed, 0 skipped** (61 s), in two runs after the last edit |
 | 5 Test-author tests | — | not applicable (single-LLM run) |
 | — | `pandoc mcp-server-aha-aql.1.md -s -t man -o mcp-server-aha-aql.1` | pass |
 
@@ -306,21 +346,22 @@ timeouts wait for the real 60 seconds of aha-request
 2 to 10 seconds. These tests run in parallel and have timeouts of 150
 seconds.
 
-Passed (209): TestAccountFromTheEnvironment, TestAFieldThatIsGivenTwice,
+Passed (216): TestAccountFromTheEnvironment, TestAFieldThatIsGivenTwice,
 TestAnswersInTheJSONFormOfAha, TestAnswerWithAnUnknownForm,
 TestApostropheHintInAnError, TestApostropheInsideAWordIsReadAsText,
 TestArgumentsOfTheWrongForm, TestArgumentsTakePrecedence,
 TestARowHasEachLabelOnce, TestArticlesAndIDsInMessages,
 TestAssignmentOfAWordOrAnExpression, TestBareKeyOfACustomField,
 TestBodiesForAGoal, TestBodyOfACreateRequest, TestBodyOfAnUpdateRequest,
-TestBodyWithCustomFields, TestCatalogNameWinsOverACustomKey,
+TestBodyWithCustomFields, TestBooleanSettingsAreLowerCase,
+TestCatalogNameWinsOverACustomKey,
 TestCertificateThatTheTrustStoreDoesNotHave, TestCommentsNeedAParent,
 TestCommentsOfARecord, TestConditionsOnCustomFields,
-TestCountNeedsOneListRequest, TestCountOfNothingIsZero, TestCountPerStatus,
-TestCredentialIsNotAnOption, TestCredentialThatAhaDoesNotAccept,
-TestCurrentUser, TestCustomFieldOfAProduct,
-TestCustomFieldOfATypeThatIsNotSupported, TestCustomFieldsAreReadByName,
-TestCustomFieldsAreRequestedOnlyWhenUsed,
+TestConnectionIsKeptOpen, TestCountNeedsOneListRequest,
+TestCountOfNothingIsZero, TestCountPerStatus, TestCredentialIsNotAnOption,
+TestCredentialThatAhaDoesNotAccept, TestCurrentUser,
+TestCustomFieldOfAProduct, TestCustomFieldOfATypeThatIsNotSupported,
+TestCustomFieldsAreReadByName, TestCustomFieldsAreRequestedOnlyWhenUsed,
 TestCustomFieldsInGroupByAndOrderBy, TestCustomFieldsPerRecordType,
 TestCustomFieldsThatTheKeyCannotRead, TestCustomFieldThatCannotBeSet,
 TestCustomFieldThatWasAddedLater, TestCustomValuesAreCheckedByKind,
@@ -330,15 +371,16 @@ TestDefinitionsAreNotKeptInHTTPMode, TestDeleteAReleaseThroughItsProduct,
 TestDeleteOfAnUnknownRecord, TestDeleteOneFeature,
 TestDeleteWithACustomGuard, TestDeleteWithAFalseGuard,
 TestDescribeAndReadHaveTheSameFields, TestDescribeOneEntity,
-TestDescribeShowsAFieldThatIsSetInInsertOnly,
-TestDescribeTakesNothingElse, TestDescribeWhenAhaCannotBeReached,
-TestDescribeWithoutEntity, TestDescriptionIsPlainText,
+TestDescribeShowsAFieldThatIsSetInInsertOnly, TestDescribeTakesNothingElse,
+TestDescribeWhenAhaCannotBeReached, TestDescribeWithoutEntity,
+TestDescriptionIsPlainText,
 TestDescriptionOfAProductIsRequestedWhenItIsUsed,
-TestDoubledApostropheInText, TestDryRunShowsAListAsText,
-TestEmptyTextAndNullStandForNoValue, TestEntityWithoutCustomFields,
-TestEveryAssignedFieldIsSent, TestEveryPageIsReadOnce,
-TestExampleKeyIsChosenWhenItIsNeeded, TestExampleKeyIsKeptForTheProcess,
-TestExampleKeyIsNotAProductOfTheAccount, TestExampleKeyIsTheDefaultProduct,
+TestDoubledApostropheInText, TestDryRunOfAnInsert,
+TestDryRunShowsAListAsText, TestEmptyTextAndNullStandForNoValue,
+TestEntityWithoutCustomFields, TestEveryAssignedFieldIsSent,
+TestEveryPageIsReadOnce, TestExampleKeyIsChosenWhenItIsNeeded,
+TestExampleKeyIsKeptForTheProcess, TestExampleKeyIsNotAProductOfTheAccount,
+TestExampleKeyIsTheDefaultProduct,
 TestExampleKeyWhenTheProductListCannotBeRead,
 TestExampleKeyWithoutADefaultProduct, TestExecuteLogsARefusedStatement,
 TestExecuteRefusesReadStatements, TestExecuteRejectsUnknownParameter,
@@ -347,17 +389,18 @@ TestExecuteWritesALogLine, TestFieldsWithoutAValueInConditions,
 TestFieldsWithSeveralValues, TestFieldWithoutValueIsNull,
 TestGoalStatusFromTheSuccessMetric, TestGracefulShutdownHTTP,
 TestGracefulShutdownStdio, TestGroupingWithoutGroupBy, TestHTTPBindError,
-TestHTTPExecuteWritesALogLine, TestHTTPModeUsesNoCredentialOfTheProcess,
-TestHTTPRequestBringsItsAccount, TestHTTPRequestForAnotherAccount,
-TestHTTPRequestFromAWebPage, TestHTTPRequestsShareNothing,
-TestHTTPRequestWithoutACredential, TestHTTPRequestWithoutAnAccount,
-TestHTTPToolListAndExampleKeyPerRequest, TestIDOrEntityAlone,
-TestIDsAreSortedByTheirNumbers, TestInListIsCheckedBeforeTheFirstRequest,
-TestInListReadsEachParent, TestInsertCommentWithApostrophe,
-TestInsertGoalWithoutASuccessMetric, TestInsertUnderAnUnknownRelease,
-TestInsertWithACustomFieldIsRefused, TestInsertWithAnUnknownColumnIsRefused,
-TestInsertWithAProductAsRelease, TestInsertWithOtherSpellings,
-TestInsertWithoutParent, TestInsertWithTwoRowsIsRefused, TestJoinIsRefused,
+TestHTTPExecuteWritesALogLine, TestHTTPModeKeepsNoSession,
+TestHTTPModeUsesNoCredentialOfTheProcess, TestHTTPRequestBringsItsAccount,
+TestHTTPRequestForAnotherAccount, TestHTTPRequestFromAWebPage,
+TestHTTPRequestsShareNothing, TestHTTPRequestWithoutACredential,
+TestHTTPRequestWithoutAnAccount, TestHTTPToolListAndExampleKeyPerRequest,
+TestIDOrEntityAlone, TestIDsAreSortedByTheirNumbers,
+TestInListIsCheckedBeforeTheFirstRequest, TestInListReadsEachParent,
+TestInsertCommentWithApostrophe, TestInsertGoalWithoutASuccessMetric,
+TestInsertUnderAnUnknownRelease, TestInsertWithACustomFieldIsRefused,
+TestInsertWithAnUnknownColumnIsRefused, TestInsertWithAProductAsRelease,
+TestInsertWithOtherSpellings, TestInsertWithoutParent,
+TestInsertWithTwoRowsIsRefused, TestJoinIsRefused,
 TestKeyFileThatCannotBeUsed, TestKeyFileThatOtherUsersCanRead,
 TestKeysAndArgumentsThatAreRefused, TestLabelIsTheWordOfTheStatement,
 TestLabelOfACustomField, TestLabelsOfSelectItems,
@@ -383,8 +426,9 @@ TestReleaseByNameListsTheReleases, TestReleaseIDWhereAFeatureIDIsNeeded,
 TestReleaseIDWhereAProductIsNeeded, TestReleaseOfAnEpic,
 TestReleasesNeedAProduct, TestRequestAddressAndHeaders,
 TestRequestThroughTheProxyOfTheEnvironment, TestRowsWithoutAValueSortLast,
-TestSettingsFromTheEnvironment, TestStarShowsDefaultFields,
-TestStarShowsTheCustomValuesOfAProduct, TestStartWithoutAnAccount,
+TestServerInstructionsAndEntryPoint, TestSettingsFromTheEnvironment,
+TestStarShowsDefaultFields, TestStarShowsTheCustomValuesOfAProduct,
+TestStartPrompt, TestStartWithoutAnAccount,
 TestStarWithAnIDShowsCustomValues, TestStarWithoutAnIDHasCatalogFieldsOnly,
 TestStatementsInMessagesCanBeSent, TestStatementsWithoutSelect,
 TestStatusesOfAnEntity, TestStatusesOfAnEntityThatHasNone,
@@ -396,14 +440,14 @@ TestTooManyRequestsIsSentAgain, TestTooManyRequestsThreeTimes,
 TestUnexpectedCharacter, TestUnknownCustomFieldListsTheCustomFields,
 TestUnknownEntityListsTheEntities, TestUnknownFieldListsTheFields,
 TestUnknownFirstWord, TestUnknownIDGivesAnEmptyResult,
-TestUnknownProductListsTheKeys, TestUnknownStatusListsTheStatuses,
-TestUnknownToolIsAProtocolError, TestUpdateAssignedToMe,
-TestUpdateOfAFieldThatIsSetInInsertOnly, TestUpdateOfAnUnknownRecord,
-TestUpdateOfTheNameShowsItOnce, TestUpdateSendsEmptyText,
-TestUpdateSetsACustomField, TestUpdateStatusInAnyCase,
-TestUpdateWithACustomGuard, TestUpdateWithADateWithoutQuotes,
-TestUpdateWithAFalseGuard, TestUpdateWithAGuardForNoValue,
-TestUpdateWithATrueGuard, TestUserByName,
+TestUnknownParameterNamesAreSorted, TestUnknownProductListsTheKeys,
+TestUnknownStatusListsTheStatuses, TestUnknownToolIsAProtocolError,
+TestUpdateAssignedToMe, TestUpdateOfAFieldThatIsSetInInsertOnly,
+TestUpdateOfAnUnknownRecord, TestUpdateOfTheNameShowsItOnce,
+TestUpdateSendsEmptyText, TestUpdateSetsACustomField,
+TestUpdateStatusInAnyCase, TestUpdateWithACustomGuard,
+TestUpdateWithADateWithoutQuotes, TestUpdateWithAFalseGuard,
+TestUpdateWithAGuardForNoValue, TestUpdateWithATrueGuard, TestUserByName,
 TestUsersCannotBeFilteredByProduct, TestValuesOfTheWrongForm,
 TestValuesThatDoNotFitTheType, TestVersionFlag,
 TestWriteRequestHasAContentType, TestWriteRequestThatAhaRejects,
@@ -421,8 +465,11 @@ were in the input directory.
 
 | Test | Result before | Action | Rationale |
 |---|---|---|---|
-| all 208 tests of the first run | failed (the binary panicked at start) | code fixed | `regexp.MustCompile("^[!-~]{1,4096}$")` panics in Go, because the regexp package allows a repeat count of at most 1000. The check of the TYPE `Credential` is now a function that tests the length (1 to 4096) and the byte range `!` to `~`. No test was changed. |
+| all 208 tests of the first run (0.20.1) | failed (the binary panicked at start) | code fixed | `regexp.MustCompile("^[!-~]{1,4096}$")` panics in Go, because the regexp package allows a repeat count of at most 1000. The check of the TYPE `Credential` is now a function that tests the length (1 to 4096) and the byte range `!` to `~`. No test was changed. |
 | TestDescribeTakesNothingElse | did not exist | test added (after implementation) | The coverage audit found the EXAMPLE `describe_takes_nothing_else` without a test. A new test in `late_test.go` asserts the exact S14 message of the EXAMPLE and that FakeAha recorded no call. It passed on its first run. No existing test was edited. |
+| TestRequestThroughTheProxyOfTheEnvironment | failed (0.23.0 run 1: no CONNECT recorded) | test edited | The EXAMPLE `request_through_the_proxy_of_the_environment` (0.23.0) asks for at least one CONNECT, all for `example.aha.io:443`. aha-request "Connections" now keeps the tunnel of the tool list open, and the harness had reset the records after the tool list. The test now sends no tools/list before the query, so the CONNECT of the query is recorded. The assertion changed from "exactly one CONNECT" to "at least one, every one for example.aha.io:443", as the EXAMPLE now says. |
+| TestProxyDoesNotOpenTheTunnel | failed (0.23.0 run 1: the update succeeded) | test edited | The GIVEN of `proxy_does_not_open_the_tunnel` is that FakeAha refuses CONNECT. The test turned the refusal on only after the tool list had opened a tunnel, which aha-request "Connections" now keeps open. The refusal is now set before the server starts, and no tools/list is sent. The assertions are unchanged. |
+| TestToolsWithoutReadOnlyMode, TestDescribeWithoutEntity, TestStatementsInMessagesCanBeSent | not run (changed before the first 0.23.0 run) | none | changed for the 0.23.0 spec (description of `query`, prompt list `start`, note text, more statements) before any implementation change; they passed on their first run |
 | all other tests | passed | none | — |
 
 Before the first test run, `gofmt -w` changed only the white space of
@@ -430,28 +477,20 @@ Before the first test run, `gofmt -w` changed only the white space of
 
 ## Specification ambiguities
 
-1. **Dry run of INSERT.** Step 5 says "a WriteResult without id, with the
-   checked fields as values". The parent is not a field. The result is
-   `{<checked fields>..., "message":"would create <singular> under <parent>"}`.
-   The parent is shown as the product key, or as the id in capital letters.
-   Tested by `TestManualDryRunOfInsertAndDelete`. No EXAMPLE gives this case.
-2. **One CONNECT per request.** The EXAMPLE
-   `request_through_the_proxy_of_the_environment` counts one CONNECT for one
-   statement after the tool list. To make this deterministic, the HTTP
-   client does not keep connections open (`DisableKeepAlives`). Each request
-   opens its own tunnel and TLS session. This also fits "the server keeps
-   nothing".
+1. **Dry run of INSERT.** Resolved in 0.23.0 (insert-statement step 5 and
+   the EXAMPLE `dry_run_of_an_insert`).
+2. **One CONNECT per request.** Resolved in 0.23.0: connections stay open
+   (aha-request "Connections"), and the EXAMPLE counts the requests inside
+   the tunnel. `DisableKeepAlives` was removed.
 3. **ExampleKey and the product list of the statement.** When a message of
    a statement needs the ExampleKey, choose-example-key uses the product
    list of that statement. If the statement has not read it, the ExampleKey
    reads it and keeps it for the rest of the statement. So the list is read
    at most once per statement (resolve-product step 1). It is not kept after
    the statement.
-4. **AHA_READ_ONLY, read-only and dry-run** accept exactly `true` and
-   `false`, in lower case (G04 otherwise). The spec writes "`true` or
-   `false`" and does not mention case.
-5. **A02 `<names>`.** A JSON object has no defined order. The unknown
-   parameter names are sorted alphabetically.
+4. **AHA_READ_ONLY, read-only and dry-run**: resolved in 0.23.0 (lower
+   case only, `TRUE` gives G04).
+5. **A02 `<names>`**: resolved in 0.23.0 (sorted by code point).
 6. **N02 `<word>`** is the word without a qualifier (as N04 defines it), for
    example `severity` for `f.severity`.
 7. **`WHERE id = NULL` in a write statement**: W11 ("NULL as a value") takes
@@ -469,9 +508,19 @@ Before the first test run, `gofmt -w` changed only the white space of
     standard error. The deployment template allows "startup messages" on
     stderr. It is no warning and has no value of an option except the listen
     address.
-12. **MCP sessions in http mode** use the mcp-go default (session ids are
-    made and not checked). Each HTTP request still brings its own Account,
-    and no data of Aha! is kept in a session.
+12. **MCP sessions in http mode**: resolved in 0.23.0 (no session,
+    `WithStateLess(true)`).
+15. **`server/discover` over http.** request-account checks every request
+    to `/mcp`, so a `server/discover` over http needs the header
+    `Aha-Api-Key` like any other request; the answer itself sends no request
+    to Aha!. The spec says that no request reaches "any other MCP method"
+    without a credential, so this was kept. `TestServerInstructionsAndEntryPoint`
+    tests `server/discover` over stdio.
+16. **Connection reuse in tests.** The spec says that the number of CONNECT
+    requests depends on timing. `TestConnectionIsKeptOpen` sends three
+    statements one after the other in one process and asserts at most one
+    CONNECT after the tool list. For sequential requests the Go transport
+    uses the idle connection deterministically.
 13. **Users in the custom field `users`**: when an entry has no
     `email_value`, the e-mail addresses come from `full_value`, else from
     the texts of `value`, as custom-fields says. Each user's name and
@@ -482,8 +531,6 @@ Before the first test run, `gofmt -w` changed only the white space of
 
 ## Rules that could not be implemented exactly as written
 
-- **check-write-values `form_only`.** No caller of the spec passes true, so
-  the parameter is not implemented. Every check always runs completely.
 - **Template EXAMPLE tool_error_handling** ("stderr contains error log
   entry with timestamp"). Internal errors (panics) are caught by mcp-go
   `WithRecovery` and answered as JSON-RPC errors. mcp-go logs nothing for
@@ -516,9 +563,12 @@ Low confidence.
 | execute_logs_a_refused_statement | Medium | TestExecuteLogsARefusedStatement | — |
 | tools_without_read_only_mode | Medium | TestToolsWithoutReadOnlyMode | — |
 | tools_in_read_only_mode | Medium | TestToolsInReadOnlyMode | — |
+| server_instructions_and_entry_point | Medium | TestServerInstructionsAndEntryPoint | whether an MCP host shows the instructions to the language model is outside the server |
+| start_prompt | Medium | TestStartPrompt, TestToolsWithoutReadOnlyMode (prompt list is `start` alone) | — |
 | manual_query_prints_the_tool_result | Medium | TestManualQueryPrintsTheToolResult | — |
 | manual_statement_from_standard_input | Medium | TestManualStatementFromStandardInput | — |
 | manual_dry_run_sends_no_write_request | Medium | TestManualDryRunSendsNoWriteRequest | — |
+| dry_run_of_an_insert | Medium | TestDryRunOfAnInsert, TestManualDryRunOfInsertAndDelete | — |
 | manual_error_goes_to_standard_error | Medium | TestManualErrorGoesToStandardError | — |
 | manual_statement_argument_is_missing | Medium | TestManualStatementArgumentIsMissing | — |
 | manual_execute_is_refused_in_read_only | Medium | TestManualExecuteIsRefusedInReadOnly | — |
@@ -680,6 +730,7 @@ Low confidence.
 | request_address_and_headers | Medium | TestRequestAddressAndHeaders, TestWriteRequestHasAContentType | — |
 | request_through_the_proxy_of_the_environment | Medium | TestRequestThroughTheProxyOfTheEnvironment | — |
 | certificate_that_the_trust_store_does_not_have | Medium | TestCertificateThatTheTrustStoreDoesNotHave | — |
+| http_mode_keeps_no_session | Medium | TestHTTPModeKeepsNoSession | — |
 | proxy_does_not_open_the_tunnel | Medium | TestProxyDoesNotOpenTheTunnel, TestManualProxyThatCannotBeReached | — |
 | too_many_requests_is_sent_again | Medium | TestTooManyRequestsIsSentAgain | — |
 | too_many_requests_three_times | Medium | TestTooManyRequestsThreeTimes | — |
@@ -719,3 +770,8 @@ Template EXAMPLES (mcp-server.template.md):
   dpkg-buildpackage or podman on the build host).
 - Windows and macOS were not tested.
 - No test drains a request that is in flight while SIGTERM arrives.
+- Connection reuse (0.23.0) is tested for sequential requests of one stdio
+  process (`TestConnectionIsKeptOpen`). Reuse across HTTP requests in http
+  mode is not tested separately; it uses the same `http.Transport`.
+- The Debian component tarball and format `3.0 (quilt)` were not checked
+  with `dpkg-source` (not installed on the build host).

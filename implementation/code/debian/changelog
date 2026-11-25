@@ -1,3 +1,15 @@
+mcp-server-aha-aql (0.23.0-1) unstable; urgency=medium
+
+  * Translation of the specification aha-aql 0.23.0
+    (spec sha256 b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268).
+  * Server instructions in initialize and server/discover, the MCP prompt
+    start, new entry-point lines in the description of query.
+  * http mode keeps no MCP session.
+  * Connections to Aha! stay open and are used again.
+  * Source format 3.0 (quilt) with the component tarball orig-vendor.
+
+ -- Matthias G. Eckermann <mge@mailbox.org>  Wed, 25 Nov 2026 12:00:00 +0000
+
 mcp-server-aha-aql (0.20.1-1) unstable; urgency=medium
 
   * Translation of the specification aha-aql 0.20.1

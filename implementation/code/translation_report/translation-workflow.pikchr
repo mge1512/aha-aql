@@ -1,11 +1,11 @@
-# generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
+# generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
 # tests by: claude-opus-5-5 (translator run)
 # Translation workflow of mcp-server-aha-aql (mcp-server template v0.3.24)
 
 fontscale = 0.9
 down
 
-IN: box "Inputs" "aha-aql.spec.md 0.20.1" "mcp-server.template.md 0.3.24" "mcp-server.go.mcp-go.hints.md" fit
+IN: box "Inputs" "aha-aql.spec.md 0.23.0" "mcp-server.template.md 0.3.24" "mcp-server.go.mcp-go.hints.md" fit
 arrow
 P1: box "Phase 1: test suite" "independent_tests/claude-opus-5-5" "FakeAha proxy + fixture account" fit
 arrow
@@ -17,7 +17,7 @@ P3: box "Phase 3: packaging" "Makefile, aha-aql.spec, debian/," "Containerfile, 
 arrow
 P5: box "Phase 5: README.md, man page" fit
 arrow
-P6: box "Phase 6: compile gate" "go mod tidy, go build, go vet," "go test (208 tests)" fit
+P6: box "Phase 6: compile gate" "go mod tidy, go build, go vet," "go test (216 tests)" fit
 arrow
 P7: box "Phase 7: TRANSLATION_REPORT.md" fit
 

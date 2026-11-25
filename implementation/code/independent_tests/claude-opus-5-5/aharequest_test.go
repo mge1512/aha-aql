@@ -1,4 +1,4 @@
-// generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
+// generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
 // tests by: claude-opus-5-5
 
 package aqltests
@@ -51,17 +51,26 @@ func TestWriteRequestHasAContentType(t *testing.T) {
 func TestRequestThroughTheProxyOfTheEnvironment(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	s := e.stdio(nil)
+	// No tools/list before the query: a tunnel that the tool list opened
+	// stays open (aha-request, Connections), and the CONNECT of the query
+	// would then lie before the reset of the recorded requests.
+	s := e.stdioRaw(nil)
+	s.initialize()
 	wantResult(t, s.query(`SELECT id FROM features WHERE id = 'DEMO-3'`),
 		`{"entity":"features","scope":"feature DEMO-3","count":1,"records":[{"id":"DEMO-3"}]}`)
 	cs := e.fake.Connects()
-	if len(cs) != 1 || cs[0].Host != "example.aha.io:443" {
-		t.Fatalf("connects: %+v", cs)
+	if len(cs) < 1 {
+		t.Fatalf("no CONNECT request")
 	}
-	for k, vs := range cs[0].Header {
-		for _, v := range vs {
-			if strings.Contains(v, "fixture-key") {
-				t.Fatalf("CONNECT header %s has the credential", k)
+	for _, c := range cs {
+		if c.Host != "example.aha.io:443" {
+			t.Fatalf("connects: %+v", cs)
+		}
+		for k, vs := range c.Header {
+			for _, v := range vs {
+				if strings.Contains(v, "fixture-key") {
+					t.Fatalf("CONNECT header %s has the credential", k)
+				}
 			}
 		}
 	}
@@ -81,8 +90,12 @@ func TestCertificateThatTheTrustStoreDoesNotHave(t *testing.T) {
 func TestProxyDoesNotOpenTheTunnel(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	s := e.stdio(nil)
+	// FakeAha refuses CONNECT from the start (GIVEN). A tunnel that a tool
+	// list opened before would stay open and be used (aha-request,
+	// Connections), so the server gets no tools/list first.
 	e.fake.RefuseConnect(true)
+	s := e.stdioRaw(nil)
+	s.initialize()
 	r := s.execute(`UPDATE features SET name = 'CSV export 2' WHERE id = 'DEMO-1'`)
 	wantError(t, r, `cannot reach Aha!: the proxy did not open a connection to example.aha.io.`)
 	if strings.Contains(r.text, strings.TrimPrefix(e.fake.ProxyURL, "http://")) {

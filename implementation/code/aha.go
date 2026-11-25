@@ -1,4 +1,4 @@
-// generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
+// generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
 
 package main
 
@@ -58,8 +58,12 @@ func newAhaClient() *ahaClient {
 	tr := &http.Transport{
 		// MECHANISM: the standard library reads HTTPS_PROXY, https_proxy,
 		// NO_PROXY and no_proxy for an https address.
-		Proxy:               http.ProxyFromEnvironment,
-		DisableKeepAlives:   true,
+		Proxy: http.ProxyFromEnvironment,
+		// A connection, direct or through the tunnel of a proxy, stays
+		// open and is used for later requests to the same host. Every
+		// request has its own headers with the credential of its Account.
+		MaxIdleConnsPerHost: 4,
+		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: requestTimeout,
 		DialContext:         (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
 		// The trust store of the platform; on Linux SSL_CERT_FILE and

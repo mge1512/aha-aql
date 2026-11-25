@@ -4,6 +4,8 @@ Development Paradigm.
 Input: /tmp/pcd-input/ Output: /tmp/pcd-output/ (do not create another
 output directory)
 
+CAVEAT: This is an incremental build, see below.
+
 Start by reading ROLE.md from the input directory. ROLE.md declares your
 mode (test-author, translator, etc.). Execute only the flow for your
 declared mode, as described in prompt.md. Produce only the artefacts
@@ -28,4 +30,8 @@ through the interface declared in the spec's DEPLOYMENT section.
 Tests use exec.Command to run the binary and assert on stdout, stderr,
 and exit code. Tests must NOT call internal Go functions or simulate the
 binary's behaviour through wrapper code. The test harness is black-box. 
+
+This is an incremental build. Changes are in:
+- aha-aql.spec.md.diff
+- mcp-server.go.mcp-go.hints.md.diff
 

@@ -1,7 +1,11 @@
 #!/usr/bin/make -f
-# generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
+# generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
 
 export CGO_ENABLED = 0
+# vendor/ comes from the component tarball
+# mcp-server-aha-aql_<version>.orig-vendor.tar.xz (make deb-vendor-tarball),
+# which dpkg-source unpacks for the format 3.0 (quilt). The build never
+# runs go mod vendor.
 export GOFLAGS = -mod=vendor
 export GOCACHE = $(CURDIR)/debian/.gocache
 export HOME = $(CURDIR)/debian/.home

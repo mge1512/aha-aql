@@ -1,4 +1,4 @@
-// generated from spec: aha-aql.spec.md sha256:b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30
+// generated from spec: aha-aql.spec.md sha256:b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268
 // tests by: claude-opus-5-5
 
 // The harness starts the binary mcp-server-aha-aql as a user starts it and
@@ -26,7 +26,7 @@ import (
 	"time"
 )
 
-const specSHA = "b5064b9ba50274af776104231d9794d500d571b98535d7bff53fa730836f6f30"
+const specSHA = "b5c2ed33da65d1486080b50fd0a29bd64fef4f69ec258e8971393437c2fd7268"
 
 var binPath string
 
@@ -427,6 +427,7 @@ type httpAnswer struct {
 	status int
 	msg    rpcMsg
 	raw    string
+	header http.Header
 }
 
 type httpClient struct {
@@ -464,7 +465,7 @@ func (c *httpClient) post(body any, timeout time.Duration) httpAnswer {
 		c.session = sid
 	}
 	data, _ := io.ReadAll(resp.Body)
-	a := httpAnswer{status: resp.StatusCode, raw: string(data)}
+	a := httpAnswer{status: resp.StatusCode, raw: string(data), header: resp.Header.Clone()}
 	payload := data
 	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 		sc := bufio.NewScanner(bytes.NewReader(data))
