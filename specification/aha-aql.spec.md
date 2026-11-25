@@ -2,7 +2,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.21.0
+Version:      0.22.0
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -674,7 +674,8 @@ ERRORS:
 ## BEHAVIOR: tool-registration
 Constraint: required
 
-Decides which tools the MCP server offers and what their descriptions say.
+Decides which tools the MCP server offers, what their descriptions say,
+and the instructions that the server gives in its answer to `initialize`.
 The server has two tools, `query` and `execute`. No other BEHAVIOR of this
 specification is an MCP tool. The descriptions are what a language model
 learns the language from, so their text is part of this specification.
@@ -687,6 +688,7 @@ read_only: Boolean   // the setting read_only
 OUTPUTS:
 ```
 registered tools: query; execute unless read_only
+instructions:     the server instructions below, in the answer to initialize
 ```
 
 PRECONDITIONS:
@@ -698,11 +700,17 @@ STEPS:
 3. Register no other tool, no MCP resource and no MCP prompt.
 4. When the tool list is answered: replace every {KEY} in both descriptions by the ExampleKey of the Account that asks (see choose-example-key).
 5. A call with a parameter that the tool does not declare reaches the tool and is answered with message A02. It is not ignored, and it is not answered with a JSON-RPC error.
+6. Answer `initialize` with the server instructions below as `instructions`. They are the same for every Account and have no {KEY}, so the answer to `initialize` causes no request to Aha!. An MCP host decides whether the language model sees them; the description of `query` therefore starts with the same entry point.
 
 Description of `query`:
 
 ```
 Read from Aha! with one AQL statement.
+Start with: SELECT key, name FROM products. Most other lists need a product key.
+DESCRIBE lists the entities; DESCRIBE features lists the fields of features.
+A workspace or project is a product; a milestone or version is a release; an objective is a goal.
+Search by word: SELECT id, name FROM features WHERE product = '{KEY}' AND name CONTAINS 'word'
+In name and description: SELECT id, name FROM features WHERE release = '{KEY}-R-3' AND (name CONTAINS 'word' OR description CONTAINS 'word')
 SELECT fields FROM entity [WHERE field = 'value' [AND ...]] [GROUP BY field] [ORDER BY field [DESC]] [LIMIT n]
 DESCRIBE entity
 Entities: products, releases, features, epics, requirements, initiatives, goals, ideas, comments, users, statuses, me.
@@ -734,12 +742,23 @@ UPDATE features SET status = 'In design', assigned_to = 'me' WHERE id = '{KEY}-2
 INSERT INTO comments (parent, body) VALUES ('{KEY}-23', 'It''s ready.')
 ```
 
-Each line of a description ends with a line break. The entity list in the
+Server instructions:
+
+```
+This server reads and changes records of one Aha! account with AQL, a small SQL dialect.
+The tool query reads (SELECT, DESCRIBE). The tool execute, when the tool list has it, changes one record (INSERT, UPDATE, DELETE).
+Start with SELECT key, name FROM products, then DESCRIBE an entity for its field names.
+Most error messages show what to write instead; then send the corrected statement.
+```
+
+Each line of a description and of the server instructions ends with a
+line break. The entity list in the
 description of `query` is the list of catalog entities in catalog
 order.
 
 POSTCONDITIONS:
 - the tool list is `query` and `execute`, or `query` alone when read_only is true
+- the answer to `initialize` has the server instructions, and they have no product key of the account
 - no description contains a product key of the account other than the product of the setting default_product
 
 ERRORS:
@@ -1085,7 +1104,7 @@ PRECONDITIONS:
 STEPS:
 1. Without an entity: return an object with two members.
    a. `entities`: a list with one object per catalog entity, in catalog order. Each object has `entity`, the name, and `about`, the about text with {KEY} replaced.
-   b. `note`: the text "DESCRIBE entity lists the fields of one entity, for example: DESCRIBE features".
+   b. `note`: the text "DESCRIBE entity lists the fields of one entity, for example: DESCRIBE features. Most lists need a product key: SELECT key, name FROM products".
 2. With an entity: return an object with these members in this order.
    a. `entity`: the name.
    b. `about`: the about text with {KEY} replaced.
@@ -3177,6 +3196,26 @@ THEN:
   the list has `query`
   the list has no other tool
 
+### EXAMPLE: server_instructions_and_entry_point (of: tool-registration)
+GIVEN:
+  the fixture account
+  the setting default_product is `demo`
+WHEN:
+  an MCP client sends `initialize`
+THEN:
+  `instructions` of the result is the text of the server instructions,
+  with a line break after each of its four lines
+  FakeAha recorded no request
+WHEN:
+  the client lists the tools
+THEN:
+  the second line of the description of `query` is
+  `Start with: SELECT key, name FROM products. Most other lists need a product key.`
+  the description of `query` has the line
+  `Search by word: SELECT id, name FROM features WHERE product = 'DEMO' AND name CONTAINS 'word'`
+  the description of `query` has the line
+  `In name and description: SELECT id, name FROM features WHERE release = 'DEMO-R-3' AND (name CONTAINS 'word' OR description CONTAINS 'word')`
+
 ### EXAMPLE: manual_query_prints_the_tool_result (of: manual-mode)
 GIVEN:
   the fixture account
@@ -3854,7 +3893,7 @@ THEN:
   the first object is
   `{"entity":"products","about":"Products (workspaces). The key of a product, for example PROD, starts the id of its records."}`
   `note` is
-  `DESCRIBE entity lists the fields of one entity, for example: DESCRIBE features`
+  `DESCRIBE entity lists the fields of one entity, for example: DESCRIBE features. Most lists need a product key: SELECT key, name FROM products`
   every object has exactly the members `entity` and `about`
   FakeAha recorded no call
 
@@ -5954,8 +5993,10 @@ WHEN:
   parse-statement gets each of these statements of
   the error-messages tables and of the catalog after the placeholders are
   replaced: the example statement of every catalog entity; the five
-  example statements of the description of `query`; the three example
-  statements of the description of `execute`;
+  example statements of the description of `query`, and the statements
+  of its lines that start with `Start with:`, `Search by word:` and
+  `In name and description:`; the three example statements of the
+  description of `execute`;
   `SELECT status, COUNT(*) FROM features WHERE product = 'PROD' GROUP BY status`;
   `SELECT COUNT(*) FROM features WHERE product = 'PROD'`;
   `SELECT key, name FROM products`;
