@@ -3,7 +3,7 @@
 
 ## META
 Deployment:   mcp-server
-Version:      0.18.1
+Version:      0.18.2
 Spec-Schema:  0.4.0
 Author:       Matthias G. Eckermann <mge@mailbox.org>
 License:      MIT
@@ -4746,7 +4746,7 @@ WHEN:
   `SELECT id, custom.priority FROM goals WHERE product = 'DEMO'`
 THEN:
   the tool result is an error with the message
-  `goals have no custom fields that can be used here. Fields of goals: id, name, status, product, progress, value, effort, description, created_at, updated_at, url. Example: SELECT id, name FROM goals WHERE product = 'PROD'`
+  `goals have no custom fields that can be used here. Fields of goals: id, name, success_metric, status, product, progress, value, effort, description, created_at, updated_at, url. Example: SELECT id, name FROM goals WHERE product = 'PROD'`
 
 ### EXAMPLE: custom_fields_that_the_key_cannot_read (of: custom-fields)
 GIVEN:
