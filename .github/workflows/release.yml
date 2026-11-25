@@ -88,6 +88,12 @@ jobs:
         with:
           subject-path: dist/*
 
+      - name: Artifact for the smoke test
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+
       - name: Release
         if: github.ref_type == 'tag'
         env:
@@ -100,37 +106,82 @@ jobs:
           Check a download: sha256sum -c SHA256SUMS, and gh attestation verify <file> --repo $GITHUB_REPOSITORY" \
             "$GITHUB_WORKSPACE"/dist/*
 
-      - name: Artifact of a manual run
-        if: github.ref_type != 'tag'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: mcp-server-aha-aql-${{ env.VERSION }}
-          path: dist/
 
-  # The tests have not run on Windows or macOS before. Their results are
-  # information for now and do not hold up a release.
-  test:
+  # Runs the binaries that the build job made, the same files as in the
+  # release, on the system they are for. No check needs the network. The
+  # result does not hold up a release.
+  smoke:
+    needs: build
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        include:
+          - os: macos-latest
+            target: darwin-arm64
+            archive: tar.gz
+          - os: windows-latest
+            target: windows-amd64
+            archive: zip
     runs-on: ${{ matrix.os }}
-    continue-on-error: true
     defaults:
       run:
         shell: bash
-        working-directory: implementation/code
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          persist-credentials: false
+          name: dist
+          path: dist
 
-      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
-        with:
-          go-version-file: implementation/code/go.mod
-          cache: false
+      - name: Check and unpack
+        run: |
+          set -eu
+          archive=$(cd dist && ls mcp-server-aha-aql-*-${{ matrix.target }}.${{ matrix.archive }})
+          (cd dist && grep -F "  $archive" SHA256SUMS > one.sha256 &&
+            if command -v sha256sum > /dev/null; then sha256sum -c one.sha256; else shasum -a 256 -c one.sha256; fi)
+          mkdir -p pkg
+          if [ "${{ matrix.archive }}" = zip ]; then
+            pwsh -NoProfile -Command "Expand-Archive -Path 'dist/$archive' -DestinationPath 'pkg'"
+          else
+            tar -C pkg -xzf "dist/$archive"
+          fi
+          bin=$(ls pkg/*/mcp-server-aha-aql*)
+          echo "BIN=$bin" >> "$GITHUB_ENV"
+          echo "binary: $bin"
 
-      - name: Tests
-        env:
-          CGO_ENABLED: "0"
-        run: go test -count=1 -timeout 20m ./independent_tests/...
+      - name: Version
+        run: |
+          out=$("$BIN" --version)
+          echo "$out"
+          grep -Eq '^mcp-server-aha-aql [0-9][0-9.]* spec:[0-9a-f]{64}$' <<< "$out"
+
+      - name: Unknown first word
+        run: |
+          set +e
+          err=$("$BIN" bogus 2>&1 > /dev/null); code=$?
+          echo "exit $code: $err"
+          [ "$code" -eq 2 ] && grep -q "error: unknown transport 'bogus'" <<< "$err"
+
+      - name: Start without an account
+        run: |
+          set +e
+          err=$(env -u AHA_SUBDOMAIN -u AHA_API_KEY "$BIN" stdio < /dev/null 2>&1 > /dev/null); code=$?
+          echo "exit $code: $err"
+          [ "$code" -eq 2 ] && grep -q 'error: no Aha! account' <<< "$err"
+
+      - name: MCP initialize over stdio
+        run: |
+          set +e
+          req='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'
+          out=$(printf '%s\n' "$req" | AHA_SUBDOMAIN=example AHA_API_KEY=not-a-key "$BIN" stdio); code=$?
+          echo "exit $code: $out"
+          [ "$code" -eq 0 ] && grep -q '"serverInfo"' <<< "$out" && grep -q '"instructions"' <<< "$out"
+
+      - name: Key file that other users can read
+        if: runner.os == 'macOS'
+        run: |
+          set +e
+          key="$PWD/aha-key"
+          printf 'not-a-key\n' > "$key" && chmod 644 "$key"
+          err=$("$BIN" stdio subdomain=example api-key-file="$key" < /dev/null 2>&1 > /dev/null); code=$?
+          echo "exit $code: $err"
+          [ "$code" -eq 2 ] && grep -q 'can be read by other users' <<< "$err"
